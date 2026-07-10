@@ -6,6 +6,8 @@
 
 请到 [Releases](https://github.com/ylty1516/palworld-mod-manager/releases) 下载最新 zip，解压后双击 `帕鲁Mod.exe` 即可。
 
+面板内支持 **检查更新 / 一键更新**（读取 GitHub Release，下载 `PalMod.exe` 或 zip 后自动替换并重启）。发布新版本时请打 tag（如 `v1.3.0`）并上传 `PalMod.exe` 资源。
+
 ## 功能
 
 - 自动检测 Steam 中的幻兽帕鲁安装目录

@@ -258,7 +258,11 @@ def import_mod_file(
     display_name: str | None = None,
     nexus_id: int | None = None,
 ) -> dict[str, Any]:
-    """Import a .zip / .pak / folder into the correct Palworld mod location."""
+    """Import a .zip / .pak / folder into the correct Palworld mod location.
+
+    .zip is extracted automatically — no need to unpack manually first.
+    UE4SS framework packages are detected and installed into Win64.
+    """
     game = get_game_path()
     if not game:
         raise RuntimeError("尚未设置游戏路径，请先检测或选择幻兽帕鲁安装目录")
@@ -268,6 +272,32 @@ def import_mod_file(
     src = Path(file_path)
     if not src.exists():
         raise FileNotFoundError(f"文件不存在: {src}")
+
+    # UE4SS framework zip → install into Binaries/Win64 (auto-extract)
+    from . import ue4ss_installer
+
+    if src.is_file() and src.suffix.lower() == ".zip":
+        if preferred_type in (None, "auto", "ue4ss_framework") or preferred_type == "":
+            if preferred_type == "ue4ss_framework" or ue4ss_installer.looks_like_ue4ss_framework(src):
+                result = ue4ss_installer.install_from_zip(game_root, src)
+                return {
+                    "ok": True,
+                    "kind": "ue4ss_framework",
+                    "ue4ss": result,
+                    "mod": {
+                        "id": "ue4ss-framework",
+                        "name": display_name or "UE4SS (RE-UE4SS)",
+                        "mod_type": "ue4ss_framework",
+                        "enabled": True,
+                        "install_path": result.get("win64", ""),
+                        "source_name": src.name,
+                        "files": [],
+                        "installed_at": _now_iso(),
+                        "size_bytes": src.stat().st_size,
+                        "notes": result.get("message", "UE4SS 框架已安装"),
+                        "nexus_id": nexus_id,
+                    },
+                }
 
     temp_dir: Path | None = None
     try:

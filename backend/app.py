@@ -29,7 +29,8 @@ ROOT = _resolve_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend import game_detector, mod_manager, nexus_api
+from backend import game_detector, mod_config, mod_manager, nexus_api, self_updater, ue4ss_installer
+from backend.version import APP_VERSION
 
 STATIC_DIR = ROOT / "frontend"
 if not STATIC_DIR.is_dir():
@@ -60,7 +61,41 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return ok({"status": "up", "version": "1.0.0"})
+    return ok(
+        {
+            "status": "up",
+            "version": APP_VERSION,
+            "frozen": self_updater.is_frozen(),
+        }
+    )
+
+
+@app.get("/api/update/check")
+def api_update_check():
+    try:
+        return ok(self_updater.check_for_update())
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 502)
+
+
+@app.post("/api/update/apply")
+def api_update_apply():
+    body = request.get_json(silent=True) or {}
+    url = body.get("url")  # optional override
+    try:
+        result = self_updater.prepare_update(download_url=url)
+        if result.get("should_exit"):
+            # Let response flush, then quit so batch can replace EXE
+            def _quit():
+                time.sleep(1.2)
+                os._exit(0)
+
+            threading.Thread(target=_quit, daemon=True).start()
+        return ok(result)
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 400)
 
 
 @app.get("/api/game/detect")
@@ -107,6 +142,105 @@ def api_ensure_folders():
         return ok(game_detector.ensure_mod_folders(path))
     except Exception as e:
         return err(str(e), 400)
+
+
+@app.get("/api/mod-config")
+def api_list_mod_configs():
+    try:
+        return ok(mod_config.list_configurable_mods())
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.get("/api/mod-config/<mod_folder>")
+def api_get_mod_config(mod_folder: str):
+    try:
+        return ok(mod_config.get_mod_config(mod_folder))
+    except KeyError as e:
+        return err(str(e), 404)
+    except Exception as e:
+        return err(str(e), 400)
+
+
+@app.post("/api/mod-config/<mod_folder>")
+def api_update_mod_config(mod_folder: str):
+    body = request.get_json(silent=True) or {}
+    values = body.get("values") if isinstance(body.get("values"), dict) else body
+    if not isinstance(values, dict):
+        return err("请提供 values 对象")
+    try:
+        return ok(mod_config.update_mod_config(mod_folder, values))
+    except KeyError as e:
+        return err(str(e), 404)
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 400)
+
+
+@app.post("/api/mod-config/install-bundled")
+def api_install_bundled():
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "ConfigurableBagExpand").strip()
+    try:
+        return ok(mod_config.install_bundled_mod(name))
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 400)
+
+
+@app.get("/api/ue4ss/status")
+def api_ue4ss_status():
+    path = mod_manager.get_game_path()
+    if not path:
+        return err("尚未设置游戏路径")
+    try:
+        return ok(ue4ss_installer.status(path))
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.post("/api/ue4ss/install-latest")
+def api_ue4ss_install_latest():
+    """Download official UE4SS zip from GitHub and install (auto extract)."""
+    path = mod_manager.get_game_path()
+    if not path:
+        return err("尚未设置游戏路径")
+    try:
+        cache = mod_manager.DATA_DIR / "ue4ss_cache"
+        result = ue4ss_installer.install_latest(path, cache_dir=cache)
+        return ok(result)
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 400)
+
+
+@app.post("/api/ue4ss/install-zip")
+def api_ue4ss_install_zip():
+    """Install UE4SS from uploaded .zip (no manual extract needed)."""
+    path = mod_manager.get_game_path()
+    if not path:
+        return err("尚未设置游戏路径")
+    if "file" not in request.files:
+        return err("请上传 UE4SS 的 .zip 文件")
+    f = request.files["file"]
+    if not f or not f.filename:
+        return err("未选择文件")
+    upload_dir = mod_manager.DATA_DIR / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(f.filename).name
+    dest = upload_dir / safe_name
+    f.save(dest)
+    try:
+        result = ue4ss_installer.install_from_zip(path, dest)
+        return ok(result)
+    except Exception as e:
+        traceback.print_exc()
+        return err(str(e), 400)
+    finally:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.get("/api/mods")

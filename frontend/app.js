@@ -5,15 +5,18 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const state = {
   mods: [],
+  configs: [],
   gamePath: null,
   nexusMode: "popular",
+  updateInfo: null,
+  localVersion: null,
 };
 
 const titles = {
   mods: ["我的模组", "管理已安装模组，一键启用 / 禁用"],
-  import: ["导入安装", "拖入 zip/pak，自动识别类型并安装到正确目录"],
+  import: ["导入安装", "直接拖入 .zip / .pak，自动解压并安装（无需手动解压）"],
   nexus: ["N 网热门", "实时连接 Nexus Mods，显示模组尾号与详情"],
-  settings: ["游戏路径", "自动检测幻兽帕鲁安装目录并创建模组文件夹"],
+  settings: ["游戏路径 / 更新 / UE4SS", "检测游戏目录、面板一键更新、安装 UE4SS"],
 };
 
 function toast(message, type = "info") {
@@ -111,8 +114,137 @@ async function loadMods() {
     const mods = await api("/api/mods");
     state.mods = mods || [];
     renderMods();
+    await loadConfigs();
   } catch (e) {
     list.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}<br/><br/>请先在「游戏路径」中配置目录</div>`;
+  }
+}
+
+async function loadConfigs() {
+  const host = $("#configList");
+  if (!host) return;
+  try {
+    const configs = await api("/api/mod-config");
+    state.configs = configs || [];
+    renderConfigs();
+  } catch (e) {
+    host.innerHTML = "";
+  }
+}
+
+function renderConfigs() {
+  const host = $("#configList");
+  if (!host) return;
+  const configs = state.configs || [];
+  if (!configs.length) {
+    host.innerHTML = `
+      <div class="config-card">
+        <h3>可调节参数模组</h3>
+        <p class="cfg-desc">尚未安装带配置的模组。可点击上方「安装可配置背包扩容」一键安装（默认 100 格，可改）。</p>
+      </div>`;
+    return;
+  }
+  host.innerHTML = configs
+    .map((c) => {
+      const schema = c.schema || {};
+      const fields = schema.fields || [];
+      const values = c.values || {};
+      const folder = c.mod_folder;
+      const fieldHtml = fields
+        .map((f) => {
+          const key = f.key;
+          const val = values[key] ?? f.default;
+          const help = f.description ? `<p class="cfg-help">${escapeHtml(f.description)}</p>` : "";
+          if (f.type === "bool" || f.type === "boolean") {
+            return `<label class="config-field">
+              <span class="cfg-label">${escapeHtml(f.label || key)}</span>
+              <input type="checkbox" data-mod="${escapeAttr(folder)}" data-key="${escapeAttr(key)}" ${val ? "checked" : ""} />
+              ${help}
+            </label>`;
+          }
+          const min = f.min != null ? `min="${f.min}"` : "";
+          const max = f.max != null ? `max="${f.max}"` : "";
+          const step = f.step != null ? `step="${f.step}"` : f.type === "int" ? `step="1"` : "";
+          return `<label class="config-field">
+            <span class="cfg-label">${escapeHtml(f.label || key)}</span>
+            <input type="number" data-mod="${escapeAttr(folder)}" data-key="${escapeAttr(key)}" value="${escapeAttr(val)}" ${min} ${max} ${step} />
+            ${help}
+          </label>`;
+        })
+        .join("");
+      return `<article class="config-card" data-config-mod="${escapeAttr(folder)}">
+        <h3>${escapeHtml(schema.display_name || folder)}</h3>
+        <p class="cfg-desc">${escapeHtml(schema.description || "")} · 路径 <code>${escapeHtml(c.install_path || "")}</code></p>
+        <div class="config-fields">${fieldHtml}</div>
+        <div class="config-actions">
+          <button class="btn btn-primary btn-sm btn-save-config" data-mod="${escapeAttr(folder)}" type="button">保存配置</button>
+          <button class="btn btn-secondary btn-sm btn-reset-config" data-mod="${escapeAttr(folder)}" type="button">恢复默认</button>
+        </div>
+      </article>`;
+    })
+    .join("");
+
+  host.querySelectorAll(".btn-save-config").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const mod = btn.dataset.mod;
+      const card = host.querySelector(`[data-config-mod="${CSS.escape(mod)}"]`);
+      if (!card) return;
+      const values = {};
+      card.querySelectorAll("input[data-key]").forEach((inp) => {
+        const k = inp.dataset.key;
+        if (inp.type === "checkbox") values[k] = inp.checked;
+        else if (inp.type === "number") values[k] = inp.value === "" ? null : Number(inp.value);
+        else values[k] = inp.value;
+      });
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/mod-config/${encodeURIComponent(mod)}`, {
+          method: "POST",
+          body: { values },
+        });
+        toast(r.message || "配置已保存", "success");
+        await loadConfigs();
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  host.querySelectorAll(".btn-reset-config").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const mod = btn.dataset.mod;
+      const c = state.configs.find((x) => x.mod_folder === mod);
+      if (!c) return;
+      const defaults = {};
+      (c.schema.fields || []).forEach((f) => {
+        defaults[f.key] = f.default;
+      });
+      try {
+        await api(`/api/mod-config/${encodeURIComponent(mod)}`, {
+          method: "POST",
+          body: { values: defaults },
+        });
+        toast("已恢复默认", "success");
+        await loadConfigs();
+      } catch (e) {
+        toast(e.message, "error");
+      }
+    });
+  });
+}
+
+async function installBagExpand() {
+  try {
+    const r = await api("/api/mod-config/install-bundled", {
+      method: "POST",
+      body: { name: "ConfigurableBagExpand" },
+    });
+    toast(r.message || "背包扩容模组已安装", "success");
+    await loadMods();
+  } catch (e) {
+    toast(e.message, "error");
   }
 }
 
@@ -229,6 +361,11 @@ async function importFile(file) {
     switchView("settings");
     return;
   }
+  const lower = (file.name || "").toLowerCase();
+  if (!lower.endsWith(".zip") && !lower.endsWith(".pak")) {
+    toast("请使用 .zip 或 .pak（zip 无需先解压）", "error");
+    return;
+  }
   const form = new FormData();
   form.append("file", file);
   form.append("type", $("#importType").value || "auto");
@@ -239,17 +376,25 @@ async function importFile(file) {
 
   const resultBox = $("#importResult");
   resultBox.classList.remove("hidden", "ok", "fail");
-  resultBox.textContent = `正在导入 ${file.name} …`;
+  resultBox.textContent = `正在${lower.endsWith(".zip") ? "解压并" : ""}安装 ${file.name} …`;
 
   try {
     const data = await api("/api/mods/import", { method: "POST", body: form });
     const mod = data.mod || data;
+    const kind = data.kind || mod.mod_type;
     resultBox.classList.add("ok");
-    resultBox.innerHTML = `安装成功：<strong>${escapeHtml(mod.name)}</strong><br/>类型 ${typeLabel(mod.mod_type)} · 路径<br/><code>${escapeHtml(mod.install_path)}</code>`;
-    toast(`导入成功：${mod.name}`, "success");
+    if (kind === "ue4ss_framework" || mod.mod_type === "ue4ss_framework") {
+      const u = data.ue4ss || {};
+      resultBox.innerHTML = `UE4SS 框架已从 zip 自动解压安装<br/><code>${escapeHtml(u.win64 || mod.install_path || "")}</code><br/>${escapeHtml(u.message || "")}`;
+      toast("UE4SS 安装成功", "success");
+      loadUe4ssStatus();
+    } else {
+      resultBox.innerHTML = `安装成功：<strong>${escapeHtml(mod.name)}</strong><br/>类型 ${typeLabel(mod.mod_type)} · 路径<br/><code>${escapeHtml(mod.install_path)}</code>`;
+      toast(`导入成功：${mod.name}`, "success");
+      await loadMods();
+    }
     $("#importName").value = "";
     $("#importNexusId").value = "";
-    await loadMods();
   } catch (e) {
     resultBox.classList.add("fail");
     resultBox.textContent = `导入失败：${e.message}`;
@@ -387,8 +532,118 @@ async function loadSettings() {
       updatePathChip(status.path);
       showPathInfo(status);
     }
+    await loadUe4ssStatus();
+    // refresh version chip; don't force network every time if already checked
+    if (!state.updateInfo) {
+      try {
+        const health = await api("/api/health");
+        state.localVersion = health.version;
+        const chip = $("#versionChip");
+        if (chip) chip.textContent = `v${health.version || "?"}`;
+      } catch (_) {}
+    }
   } catch (e) {
     /* ignore */
+  }
+}
+
+function renderUpdateStatus(info, errMsg) {
+  const el = $("#updateStatus");
+  const applyBtn = $("#btnUpdateApply");
+  const chip = $("#versionChip");
+  if (!el) return;
+  if (errMsg) {
+    el.innerHTML = `<div><strong>检查失败：</strong>${escapeHtml(errMsg)}</div>`;
+    if (applyBtn) applyBtn.disabled = true;
+    return;
+  }
+  if (!info) {
+    el.textContent = "尚未检查";
+    if (applyBtn) applyBtn.disabled = true;
+    return;
+  }
+  state.updateInfo = info;
+  state.localVersion = info.local_version;
+  if (chip) {
+    chip.textContent = info.update_available
+      ? `v${info.local_version} → v${info.remote_version}`
+      : `v${info.local_version}`;
+    chip.classList.toggle("has-update", !!info.update_available);
+  }
+  const asset = info.asset;
+  el.innerHTML = `
+    <div><strong>当前版本：</strong>v${escapeHtml(info.local_version || "?")}</div>
+    <div><strong>GitHub 最新：</strong>v${escapeHtml(info.remote_version || "?")}
+      ${info.tag_name ? `（${escapeHtml(info.tag_name)}）` : ""}</div>
+    <div><strong>仓库：</strong>${escapeHtml(info.github || "")}</div>
+    <div><strong>状态：</strong>${
+      info.update_available
+        ? `<span style="color:#b45309;font-weight:700">发现新版本，可一键更新</span>`
+        : `<span style="color:#047857;font-weight:600">已是最新</span>`
+    }</div>
+    ${
+      asset
+        ? `<div><strong>更新包：</strong>${escapeHtml(asset.name || "")}（${formatBytes(asset.size || 0)}）</div>`
+        : `<div style="color:#b91c1c">Release 中未找到 .exe / zip 资源</div>`
+    }
+    ${info.release_url ? `<div><a href="${escapeAttr(info.release_url)}" target="_blank" rel="noopener">打开 Release 页面</a></div>` : ""}
+    ${
+      !info.is_frozen
+        ? `<div style="margin-top:6px;color:#64748b">开发模式运行：可检查版本，完整一键替换需使用打包后的 EXE。</div>`
+        : ""
+    }
+  `;
+  if (applyBtn) {
+    applyBtn.disabled = !(info.update_available && info.asset && info.asset.browser_download_url);
+  }
+}
+
+async function checkUpdate(silent) {
+  const el = $("#updateStatus");
+  if (el && !silent) el.textContent = "正在连接 GitHub…";
+  try {
+    const info = await api("/api/update/check");
+    renderUpdateStatus(info);
+    if (!silent) {
+      if (info.update_available) toast(`发现新版本 v${info.remote_version}`, "success");
+      else toast(`已是最新 v${info.local_version}`, "info");
+    }
+    return info;
+  } catch (e) {
+    renderUpdateStatus(null, e.message);
+    if (!silent) toast(e.message, "error");
+    return null;
+  }
+}
+
+async function applyUpdate() {
+  const box = $("#updateResult");
+  const btn = $("#btnUpdateApply");
+  if (box) {
+    box.classList.remove("hidden", "ok", "fail");
+    box.textContent = "正在下载更新，请稍候…";
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/update/apply", { method: "POST", body: {} });
+    if (box) {
+      box.classList.add("ok");
+      box.innerHTML = `${escapeHtml(r.message || "更新已开始")}<br/>目标版本 v${escapeHtml(r.version || "")}`;
+    }
+    toast(r.message || "更新中…", "success");
+    if (r.should_exit) {
+      // UI will close with process
+      setTimeout(() => {
+        if (box) box.textContent = "正在重启…";
+      }, 500);
+    }
+  } catch (e) {
+    if (box) {
+      box.classList.add("fail");
+      box.textContent = `更新失败：${e.message}`;
+    }
+    toast(e.message, "error");
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -407,6 +662,74 @@ function showPathInfo(info) {
     <div><strong>UE4SS Mods：</strong><code>${escapeHtml(paths.ue4ss_mods || "")}</code></div>
     <div><strong>Workshop：</strong><code>${escapeHtml(paths.workshop || "")}</code></div>
   `;
+}
+
+async function loadUe4ssStatus() {
+  const el = $("#ue4ssStatus");
+  if (!el) return;
+  if (!state.gamePath) {
+    el.textContent = "请先设置游戏路径";
+    return;
+  }
+  try {
+    const st = await api("/api/ue4ss/status");
+    const bp = st.bp_mod_loader;
+    const bpText = bp === true ? "已开启" : bp === false ? "未开启" : "未知";
+    el.innerHTML = st.installed
+      ? `<div><strong>UE4SS：</strong>已安装</div>
+         <div><strong>Win64：</strong><code>${escapeHtml(st.win64 || "")}</code></div>
+         <div><strong>BPModLoaderMod：</strong>${bpText}</div>`
+      : `<div><strong>UE4SS：</strong>未安装</div>
+         <div>脚本 / LogicMods 需要安装。可点「在线安装」或导入官方 zip。</div>
+         <div><strong>目标：</strong><code>${escapeHtml(st.win64 || "")}</code></div>`;
+  } catch (e) {
+    el.textContent = e.message;
+  }
+}
+
+async function installUe4ssOnline() {
+  const box = $("#ue4ssResult");
+  const btn = $("#btnUe4ssOnline");
+  box.classList.remove("hidden", "ok", "fail");
+  box.textContent = "正在从 GitHub 下载并解压安装 UE4SS，请稍候…";
+  btn.disabled = true;
+  try {
+    const r = await api("/api/ue4ss/install-latest", { method: "POST", body: {} });
+    box.classList.add("ok");
+    box.innerHTML = `安装成功：${escapeHtml(r.download_name || "UE4SS")}<br/>
+      文件数 ${r.files_copied || "?"} · ${escapeHtml(r.message || "")}<br/>
+      <code>${escapeHtml(r.win64 || "")}</code>`;
+    toast("UE4SS 安装完成", "success");
+    await loadUe4ssStatus();
+    const status = await api("/api/game/status");
+    showPathInfo(status);
+  } catch (e) {
+    box.classList.add("fail");
+    box.textContent = `安装失败：${e.message}`;
+    toast(e.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function installUe4ssZip(file) {
+  if (!file) return;
+  const box = $("#ue4ssResult");
+  box.classList.remove("hidden", "ok", "fail");
+  box.textContent = `正在解压安装 ${file.name} …`;
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const r = await api("/api/ue4ss/install-zip", { method: "POST", body: form });
+    box.classList.add("ok");
+    box.innerHTML = `已从 zip 安装<br/><code>${escapeHtml(r.win64 || "")}</code><br/>${escapeHtml(r.message || "")}`;
+    toast("UE4SS 安装完成", "success");
+    await loadUe4ssStatus();
+  } catch (e) {
+    box.classList.add("fail");
+    box.textContent = `安装失败：${e.message}`;
+    toast(e.message, "error");
+  }
 }
 
 async function autoDetect() {
@@ -485,6 +808,10 @@ function bindUI() {
   });
 
   $("#btnRefreshMods").addEventListener("click", () => loadMods());
+  const btnBag = $("#btnInstallBagExpand");
+  if (btnBag) btnBag.addEventListener("click", installBagExpand);
+  const btnCfg = $("#btnRefreshConfigs");
+  if (btnCfg) btnCfg.addEventListener("click", loadConfigs);
   $("#btnOpenModsFolder").addEventListener("click", async () => {
     try {
       await api("/api/mods/open-folder");
@@ -531,11 +858,41 @@ function bindUI() {
       toast(e.message, "error");
     }
   });
+
+  const btnUe4 = $("#btnUe4ssOnline");
+  if (btnUe4) btnUe4.addEventListener("click", installUe4ssOnline);
+  const btnUe4R = $("#btnUe4ssRefresh");
+  if (btnUe4R) btnUe4R.addEventListener("click", loadUe4ssStatus);
+
+  const btnUp1 = $("#btnCheckUpdate");
+  if (btnUp1) btnUp1.addEventListener("click", () => {
+    switchView("settings");
+    checkUpdate(false);
+  });
+  const btnUp2 = $("#btnUpdateCheck");
+  if (btnUp2) btnUp2.addEventListener("click", () => checkUpdate(false));
+  const btnUp3 = $("#btnUpdateApply");
+  if (btnUp3) btnUp3.addEventListener("click", applyUpdate);
+  const ue4zip = $("#ue4ssZipInput");
+  if (ue4zip) {
+    ue4zip.addEventListener("change", () => {
+      const f = ue4zip.files?.[0];
+      if (f) installUe4ssZip(f);
+      ue4zip.value = "";
+    });
+  }
 }
 
 async function init() {
   bindUI();
   try {
+    try {
+      const health = await api("/api/health");
+      state.localVersion = health.version;
+      const chip = $("#versionChip");
+      if (chip) chip.textContent = `v${health.version || "?"}`;
+    } catch (_) {}
+
     const status = await api("/api/game/status");
     if (status.configured && status.path) {
       updatePathChip(status.path);
@@ -555,6 +912,8 @@ async function init() {
         autoDetect();
       }
     }
+    // Background version check (non-blocking)
+    checkUpdate(true).catch(() => {});
   } catch (e) {
     toast(e.message, "error");
   }

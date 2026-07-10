@@ -37,7 +37,9 @@
 
       <div class="sidebar-footer">
         <div class="path-chip" id="pathChip" title="未配置">未检测游戏目录</div>
+        <div class="version-chip" id="versionChip">v-</div>
         <button class="btn btn-ghost btn-sm" id="btnRescan" type="button">重新扫描</button>
+        <button class="btn btn-ghost btn-sm" id="btnCheckUpdate" type="button">检查更新</button>
       </div>
     </aside>
 
@@ -59,8 +61,13 @@
           <div class="search-box">
             <input type="search" id="modFilter" placeholder="筛选本地模组名称…" />
           </div>
+          <div class="btn-group">
+            <button class="btn btn-primary btn-sm" id="btnInstallBagExpand" type="button">安装可配置背包扩容</button>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshConfigs" type="button">刷新配置</button>
+          </div>
           <div class="stats" id="modStats">共 0 个模组</div>
         </div>
+        <div class="card-list" id="configList"></div>
         <div class="card-list" id="modList">
           <div class="empty-state">正在加载…</div>
         </div>
@@ -72,10 +79,10 @@
           <div class="dropzone" id="dropzone">
             <div class="dropzone-inner">
               <div class="drop-icon">⬇</div>
-              <h3>拖放模组到这里</h3>
-              <p>支持 <code>.zip</code> / <code>.pak</code>，自动识别并安装到正确目录</p>
+              <h3>拖放 zip / pak 到这里</h3>
+              <p><strong>无需手动解压</strong>：直接拖入 <code>.zip</code> 或 <code>.pak</code>，自动解压并安装</p>
               <label class="btn btn-primary file-btn">
-                选择文件导入
+                选择文件导入（支持 zip）
                 <input type="file" id="fileInput" accept=".zip,.pak,application/zip" hidden />
               </label>
             </div>
@@ -90,6 +97,7 @@
                 <option value="pak">PAK → Content/Paks/~mods</option>
                 <option value="logicpak">LogicMods → Content/Paks/LogicMods</option>
                 <option value="ue4ss">UE4SS 脚本 → Binaries/Win64/Mods</option>
+                <option value="ue4ss_framework">UE4SS 框架本体 → Win64</option>
                 <option value="workshop">官方 Workshop → Mods/Workshop</option>
               </select>
             </label>
@@ -102,12 +110,13 @@
               <input type="number" id="importNexusId" placeholder="例如 336" min="1" />
             </label>
             <div class="hint-box">
-              <strong>自动安装规则</strong>
+              <strong>自动安装规则（zip 直接装）</strong>
               <ul>
-                <li><code>.pak</code> → <code>Pal/Content/Paks/~mods</code></li>
+                <li><code>.zip</code> 会在内部自动解压，不用你先解压</li>
+                <li><code>.pak</code> / zip 内 pak → <code>~mods</code></li>
                 <li>含 <code>Scripts/main.lua</code> → UE4SS Mods</li>
+                <li>含 <code>UE4SS.dll</code> 的官方包 → 自动装到 Win64</li>
                 <li>含 <code>Info.json</code> → 官方 Workshop</li>
-                <li>禁用时：重命名为 <code>.disabled</code>，游戏不会加载</li>
               </ul>
             </div>
             <div id="importResult" class="import-result hidden"></div>
@@ -147,6 +156,32 @@
           </div>
           <div id="detectList" class="detect-list"></div>
           <div id="pathInfo" class="path-info hidden"></div>
+        </div>
+
+        <div class="settings-card" style="margin-top:16px">
+          <h3>面板更新</h3>
+          <p class="muted">自动检测 GitHub Release 最新版本，支持一键下载并替换本程序后重启。</p>
+          <div id="updateStatus" class="path-info">尚未检查</div>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn btn-secondary" id="btnUpdateCheck" type="button">检查 GitHub 更新</button>
+            <button class="btn btn-primary" id="btnUpdateApply" type="button" disabled>一键更新并重启</button>
+          </div>
+          <div id="updateResult" class="import-result hidden" style="margin-top:12px"></div>
+        </div>
+
+        <div class="settings-card" style="margin-top:16px">
+          <h3>UE4SS 前置（一键安装）</h3>
+          <p class="muted">脚本 / LogicMods 需要 UE4SS。可在线下载官方 zip，或拖入你已下载的 <code>UE4SS_v3.x.x.zip</code>（无需手动解压）。</p>
+          <div id="ue4ssStatus" class="path-info">检测中…</div>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn btn-primary" id="btnUe4ssOnline" type="button">在线安装最新 UE4SS</button>
+            <label class="btn btn-secondary file-btn">
+              从本地 zip 安装
+              <input type="file" id="ue4ssZipInput" accept=".zip,application/zip" hidden />
+            </label>
+            <button class="btn btn-secondary" id="btnUe4ssRefresh" type="button">刷新状态</button>
+          </div>
+          <div id="ue4ssResult" class="import-result hidden" style="margin-top:12px"></div>
         </div>
       </section>
     </main>

@@ -25,3 +25,6 @@ assets/icon_imagine_raw.jpg
 .idea/
 .vscode/
 *.log
+
+release/
+

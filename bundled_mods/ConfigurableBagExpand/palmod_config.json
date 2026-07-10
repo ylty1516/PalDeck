@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "mod_id": "ConfigurableBagExpand",
+  "display_name": "可配置背包扩容",
+  "description": "将玩家通用物品栏扩大到指定格子数（默认 100），可在管理面板中调整。",
+  "version": "1.0.0",
+  "fields": [
+    {
+      "key": "inventory_slots",
+      "label": "背包目标格子数",
+      "type": "int",
+      "min": 42,
+      "max": 300,
+      "default": 100,
+      "step": 1,
+      "description": "玩家 Common 物品栏目标槽位数。进游戏后生效，建议 42–200。"
+    },
+    {
+      "key": "apply_on_interval_sec",
+      "label": "周期性检查(秒)",
+      "type": "int",
+      "min": 0,
+      "max": 60,
+      "default": 5,
+      "step": 1,
+      "description": "每隔多少秒再检查一次并补齐格子。0=仅在进出读档时尝试。"
+    },
+    {
+      "key": "boost_pouch_bonus",
+      "label": "增强腰包加成",
+      "type": "bool",
+      "default": true,
+      "description": "同时提高腰包类物品提供的额外格子（FloatValue1），避免旧存档格子偏少。"
+    }
+  ]
+}
