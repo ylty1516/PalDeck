@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# build artifacts
+build/
+dist/
+*.spec
+*.exe
+
+# local runtime data
+data/config.json
+data/mods_registry.json
+data/uploads/
+data/
+
+# temp previews
+assets/_*.png
+assets/icon_imagine_raw.jpg
+
+# IDE
+.idea/
+.vscode/
+*.log

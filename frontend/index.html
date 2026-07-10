@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>幻兽帕鲁 Mod 管理面板</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">P</div>
+        <div>
+          <div class="brand-title">Palworld Mods</div>
+          <div class="brand-sub">幻兽帕鲁管理面板</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="mods" type="button">
+          <span class="nav-ico">▣</span> 我的模组
+        </button>
+        <button class="nav-item" data-view="import" type="button">
+          <span class="nav-ico">＋</span> 导入安装
+        </button>
+        <button class="nav-item" data-view="nexus" type="button">
+          <span class="nav-ico">☁</span> N 网热门
+        </button>
+        <button class="nav-item" data-view="settings" type="button">
+          <span class="nav-ico">⚙</span> 游戏路径
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="path-chip" id="pathChip" title="未配置">未检测游戏目录</div>
+        <button class="btn btn-ghost btn-sm" id="btnRescan" type="button">重新扫描</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="viewTitle">我的模组</h1>
+          <p class="subtitle" id="viewSubtitle">管理已安装模组，一键启用 / 禁用</p>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn btn-secondary" id="btnRefreshMods" type="button">刷新列表</button>
+          <button class="btn btn-primary" id="btnOpenModsFolder" type="button">打开 ~mods 文件夹</button>
+        </div>
+      </header>
+
+      <!-- MODS VIEW -->
+      <section class="view active" id="view-mods">
+        <div class="toolbar">
+          <div class="search-box">
+            <input type="search" id="modFilter" placeholder="筛选本地模组名称…" />
+          </div>
+          <div class="stats" id="modStats">共 0 个模组</div>
+        </div>
+        <div class="card-list" id="modList">
+          <div class="empty-state">正在加载…</div>
+        </div>
+      </section>
+
+      <!-- IMPORT VIEW -->
+      <section class="view" id="view-import">
+        <div class="import-grid">
+          <div class="dropzone" id="dropzone">
+            <div class="dropzone-inner">
+              <div class="drop-icon">⬇</div>
+              <h3>拖放模组到这里</h3>
+              <p>支持 <code>.zip</code> / <code>.pak</code>，自动识别并安装到正确目录</p>
+              <label class="btn btn-primary file-btn">
+                选择文件导入
+                <input type="file" id="fileInput" accept=".zip,.pak,application/zip" hidden />
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h3>安装选项</h3>
+            <label class="field">
+              <span>安装类型</span>
+              <select id="importType">
+                <option value="auto">自动识别（推荐）</option>
+                <option value="pak">PAK → Content/Paks/~mods</option>
+                <option value="logicpak">LogicMods → Content/Paks/LogicMods</option>
+                <option value="ue4ss">UE4SS 脚本 → Binaries/Win64/Mods</option>
+                <option value="workshop">官方 Workshop → Mods/Workshop</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>显示名称（可选）</span>
+              <input type="text" id="importName" placeholder="留空则使用文件名" />
+            </label>
+            <label class="field">
+              <span>N 网尾号（可选）</span>
+              <input type="number" id="importNexusId" placeholder="例如 336" min="1" />
+            </label>
+            <div class="hint-box">
+              <strong>自动安装规则</strong>
+              <ul>
+                <li><code>.pak</code> → <code>Pal/Content/Paks/~mods</code></li>
+                <li>含 <code>Scripts/main.lua</code> → UE4SS Mods</li>
+                <li>含 <code>Info.json</code> → 官方 Workshop</li>
+                <li>禁用时：重命名为 <code>.disabled</code>，游戏不会加载</li>
+              </ul>
+            </div>
+            <div id="importResult" class="import-result hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- NEXUS VIEW -->
+      <section class="view" id="view-nexus">
+        <div class="toolbar">
+          <div class="search-box grow">
+            <input type="search" id="nexusQuery" placeholder="搜索 N 网模组名称，或直接输入尾号数字…" />
+            <button class="btn btn-primary" id="btnNexusSearch" type="button">搜索</button>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-secondary active-sort" data-nexus="popular" type="button">热门下载</button>
+            <button class="btn btn-secondary" data-nexus="endorsements" type="button">好评推荐</button>
+            <button class="btn btn-secondary" data-nexus="latest" type="button">最新上传</button>
+          </div>
+        </div>
+        <div class="nexus-status" id="nexusStatus">正在连接 N 网…</div>
+        <div class="nexus-grid" id="nexusGrid"></div>
+      </section>
+
+      <!-- SETTINGS VIEW -->
+      <section class="view" id="view-settings">
+        <div class="settings-card">
+          <h3>游戏目录</h3>
+          <p class="muted">自动扫描 Steam 库与常见路径，也可手动填写。</p>
+          <div class="path-row">
+            <input type="text" id="gamePathInput" placeholder="例如 F:\SteamLibrary\steamapps\common\Palworld" />
+            <button class="btn btn-primary" id="btnSavePath" type="button">保存并创建模组目录</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-secondary" id="btnAutoDetect" type="button">自动检测</button>
+            <button class="btn btn-secondary" id="btnEnsureFolders" type="button">仅重建模组文件夹</button>
+          </div>
+          <div id="detectList" class="detect-list"></div>
+          <div id="pathInfo" class="path-info hidden"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-host" id="toastHost"></div>
+  <script src="app.js"></script>
+</body>
+</html>
