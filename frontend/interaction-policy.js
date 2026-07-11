@@ -8,3 +8,18 @@ export function actionableErrorMessage(error) {
 export function dynamicActionKey(action, id) {
   return action === "rescanMods" ? "rescan-mods" : `${action}:${id || "global"}`;
 }
+
+export function pendingUploadTokenAfterError(_previousToken, error) {
+  if (error?.status === 409 && error?.code === "mod_conflict") {
+    return error?.details?.upload_token || null;
+  }
+  return null;
+}
+
+export function resetModFileSelectionState(state) {
+  return { ...state, pendingUploadToken: null, selectedModFile: null };
+}
+
+export function nextModsGeneration(current) {
+  return Number(current) + 1;
+}

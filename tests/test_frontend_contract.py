@@ -162,7 +162,7 @@ def test_modals_and_aria_are_real_accessible_actions():
     assert 'error.code === "mod_conflict"' in app
     cancel = re.search(r"async function cancelImportConflict\(\) \{(.*?)^\}", app, re.S | re.M)
     assert cancel
-    assert cancel.group(1).index('await request("/api/mods/import"') < cancel.group(1).index('$("#conflictModal").close()')
+    assert cancel.group(1).index('await request("/api/mods/import"') < cancel.group(1).rindex('$("#conflictModal").close()')
     assert 'importSelected("replace")' in app
     assert 'importSelected("keep_both")' in app
     assert not re.search(r'case "[^"]+":\s*break;', app)
@@ -254,10 +254,10 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
     assert "mod.nexus_id" in render
     assert "mod.size_bytes" in render
     assert "previousMods" not in app
-    assert "const updated = await request" in app
-    assert "state.mods = state.mods.map" in app
     toggle = re.search(r"async function toggleMod\(target, id\) \{(.*?)^\}", app, re.S | re.M)
     assert toggle
+    assert "beginModsWrite()" in toggle.group(1)
+    assert toggle.group(1).count("await loadMods()") >= 2
     assert toggle.group(1).index("await loadMods()") < toggle.group(1).index('error.code === "mod_conflict"')
     assert "target.disabled = true" in app
     assert "target.disabled = false" in app
@@ -312,7 +312,10 @@ def test_all_async_file_branches_use_shared_actionable_error_mapping():
 
 def test_interaction_policy_executable_contract():
     script = """
-      import { actionableErrorMessage, dynamicActionKey } from './frontend/interaction-policy.js';
+      import {
+        actionableErrorMessage, dynamicActionKey, nextModsGeneration,
+        pendingUploadTokenAfterError, resetModFileSelectionState
+      } from './frontend/interaction-policy.js';
       if (dynamicActionKey('rescanMods', 'card-a') !== 'rescan-mods') process.exit(1);
       if (dynamicActionKey('rescanMods', 'card-b') !== 'rescan-mods') process.exit(2);
       if (dynamicActionKey('toggleMod', 'card-a') !== 'toggleMod:card-a') process.exit(3);
@@ -322,12 +325,44 @@ def test_interaction_policy_executable_contract():
         [{ status: 410, code: 'upload_expired' }, '重新选择文件'],
       ];
       if (!cases.every(([error, expected]) => actionableErrorMessage(error).includes(expected))) process.exit(4);
+      const replacement = { status: 409, code: 'mod_conflict', details: { upload_token: 'new-token' } };
+      if (pendingUploadTokenAfterError('old-token', replacement) !== 'new-token') process.exit(5);
+      for (const error of cases.map(([value]) => value)) {
+        if (pendingUploadTokenAfterError('old-token', error) !== null) process.exit(6);
+      }
+      const selected = { pendingUploadToken: 'token', selectedModFile: { name: 'old.zip' }, other: 1 };
+      const reset = resetModFileSelectionState(selected);
+      if (reset.pendingUploadToken !== null || reset.selectedModFile !== null || reset.other !== 1) process.exit(7);
+      if (nextModsGeneration(4) !== 5) process.exit(8);
     """
     result = subprocess.run(
         ["node", "--input-type=module", "--eval", script], cwd=ROOT,
         text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_import_lifecycle_and_mod_generation_contract():
+    app = APP.read_text(encoding="utf-8")
+    api = API.read_text(encoding="utf-8")
+    assert "function resetModFileSelection()" in app
+    reset = re.search(r"function resetModFileSelection\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert reset
+    for token in ('state.pendingUploadToken = reset.pendingUploadToken', 'state.selectedModFile = reset.selectedModFile', '$("#modFileInput").value = ""', '$("#importResult").textContent = ""'):
+        assert token in reset.group(1)
+    select = re.search(r"function selectModFile\(file\) \{(.*?)^\}", app, re.S | re.M)
+    assert select and select.group(1).index("resetModFileSelection()") < select.group(1).index("isSupportedModFile")
+    assert "pendingUploadTokenAfterError" in app
+    assert "if (!token) { resetModFileSelection();" in app
+    assert "nextModsGeneration" in app
+    assert "modsRequestController.abort()" in app
+    assert 'request("/api/mods", { signal: controller.signal })' in app
+    assert "generation !== state.modsRequestGeneration" in app
+    for operation in ("importSelected", "toggleMod", "deletePendingMod"):
+        body = re.search(rf"async function {operation}\([^)]*\) \{{(.*?)^\}}", app, re.S | re.M)
+        assert body and "beginModsWrite()" in body.group(1), operation
+    assert 'case "rescanMods": beginModsWrite();' in app
+    assert "externalSignal" in api
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

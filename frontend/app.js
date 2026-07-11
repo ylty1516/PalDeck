@@ -1,13 +1,17 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
-import { actionableErrorMessage, dynamicActionKey } from "./interaction-policy.js";
+import {
+  actionableErrorMessage, dynamicActionKey, nextModsGeneration,
+  pendingUploadTokenAfterError, resetModFileSelectionState,
+} from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
-  modsRequestSequence: 0, nexusRequestSequence: 0,
+  modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
+  nexusRequestSequence: 0,
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
@@ -91,15 +95,36 @@ function refreshBackground() {
   document.documentElement.style.setProperty("--background-url", `url("${url}")`);
 }
 
+function invalidateModsRequests() {
+  state.modsRequestGeneration = nextModsGeneration(state.modsRequestGeneration);
+  if (state.modsRequestController) state.modsRequestController.abort();
+  state.modsRequestController = null;
+  return state.modsRequestGeneration;
+}
+
+function beginModsWrite() {
+  return invalidateModsRequests();
+}
+
 async function loadMods() {
   const sequence = ++state.modsRequestSequence;
+  const generation = invalidateModsRequests();
+  const controller = new AbortController();
+  state.modsRequestController = controller;
   renderMessage($("#modList"), "正在加载模组…", "empty-state glass-panel");
-  const mods = await request("/api/mods");
-  if (sequence !== state.modsRequestSequence) return false;
-  state.mods = mods;
-  $("#modConflictNotice").hidden = true;
-  filterMods();
-  return true;
+  try {
+    const mods = await request("/api/mods", { signal: controller.signal });
+    if (sequence !== state.modsRequestSequence || generation !== state.modsRequestGeneration) return false;
+    state.mods = mods;
+    $("#modConflictNotice").hidden = true;
+    filterMods();
+    return true;
+  } catch (error) {
+    if (controller.signal.aborted || generation !== state.modsRequestGeneration) return false;
+    throw error;
+  } finally {
+    if (state.modsRequestController === controller) state.modsRequestController = null;
+  }
 }
 
 function filterMods() {
@@ -115,7 +140,17 @@ function isSupportedModFile(file) {
   return Boolean(file && /\.(zip|pak)$/i.test(file.name || ""));
 }
 
+function resetModFileSelection() {
+  const reset = resetModFileSelectionState(state);
+  state.pendingUploadToken = reset.pendingUploadToken;
+  state.selectedModFile = reset.selectedModFile;
+  $("#modFileInput").value = "";
+  $("#selectedModFile").textContent = "尚未选择文件";
+  $("#importResult").textContent = "";
+}
+
 function selectModFile(file) {
+  resetModFileSelection();
   if (file && !isSupportedModFile(file)) throw new ApiError("仅支持 ZIP 或 PAK 文件");
   state.selectedModFile = file || null;
   $("#selectedModFile").textContent = file ? `已选择：${file.name}` : "尚未选择文件";
@@ -137,9 +172,10 @@ async function executeModFileSelection(file) {
 }
 
 async function importSelected(decision = "cancel") {
+  const retryToken = state.pendingUploadToken;
   let options;
-  if (state.pendingUploadToken) {
-    options = { method: "POST", body: { upload_token: state.pendingUploadToken, decision } };
+  if (retryToken) {
+    options = { method: "POST", body: { upload_token: retryToken, decision } };
   } else {
     if (!state.selectedModFile) throw new ApiError("请先选择 ZIP 或 PAK 文件");
     const form = new FormData();
@@ -149,27 +185,26 @@ async function importSelected(decision = "cancel") {
     if ($("#importNexusId").value) form.append("nexus_id", $("#importNexusId").value);
     options = { method: "POST", body: form, timeout: 120000 };
   }
+  beginModsWrite();
   try {
-    $("#importResult").textContent = state.pendingUploadToken ? "正在识别并安装：应用冲突处理…" : `正在识别并安装：正在上传 ${state.selectedModFile.name}`;
+    $("#importResult").textContent = retryToken ? "正在识别并安装：应用冲突处理…" : `正在识别并安装：正在上传 ${state.selectedModFile.name}`;
     const result = await request("/api/mods/import", options);
-    state.pendingUploadToken = null;
-    state.selectedModFile = null;
-    $("#selectedModFile").textContent = "尚未选择文件";
+    resetModFileSelection();
     $("#importResult").textContent = `安装成功：${result.name || result.mod?.name || "模组"} · 类型 ${result.mod_type || result.kind || "已识别"}`;
     toast("模组安装成功", "success");
     await loadMods();
   } catch (error) {
-    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
-      state.pendingUploadToken = error.details?.upload_token || null;
+    const nextToken = pendingUploadTokenAfterError(retryToken, error);
+    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict" && nextToken) {
+      state.pendingUploadToken = nextToken;
       $("#importResult").textContent = "识别完成：发现冲突，请选择处理方式";
       renderConflict($("#conflictDetails"), error.details);
       openModal($("#conflictModal"));
       return null;
     }
+    if (retryToken) state.pendingUploadToken = null;
     if (error instanceof ApiError && error.status === 410 && error.code === "upload_expired") {
-      state.pendingUploadToken = null;
-      state.selectedModFile = null;
-      $("#selectedModFile").textContent = "尚未选择文件";
+      resetModFileSelection();
       $("#importResult").textContent = "暂存文件已过期，请重新选择文件";
       if ($("#conflictModal").open) $("#conflictModal").close();
     }
@@ -184,14 +219,16 @@ function openModal(dialog) {
 
 async function cancelImportConflict() {
   const token = state.pendingUploadToken;
-  if (!token) return;
+  if (!token) { resetModFileSelection(); $("#conflictModal").close(); return; }
+  beginModsWrite();
   try {
     await request("/api/mods/import", { method: "POST", body: { upload_token: token, decision: "cancel" } });
   } catch (error) {
     if (!(error instanceof ApiError && error.status === 410 && error.code === "upload_expired")) throw error;
+  } finally {
+    resetModFileSelection();
+    $("#conflictModal").close();
   }
-  state.pendingUploadToken = null;
-  $("#conflictModal").close();
 }
 
 async function deletePendingMod() {
@@ -199,6 +236,7 @@ async function deletePendingMod() {
   if (!id) return;
   $("#deleteModal").close();
   const suffix = state.pendingDeleteForce ? "?force_modified=true" : "";
+  beginModsWrite();
   try {
     await request(`/api/mods/${encodeURIComponent(id)}${suffix}`, { method: "DELETE" });
     state.pendingDeleteId = null;
@@ -358,12 +396,12 @@ async function dispatchStatic(event) {
 }
 
 async function toggleMod(target, id) {
+  beginModsWrite();
   try {
-    const updated = await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
+    await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
       method: "POST", body: { enabled: target.dataset.enabled === "true" },
     });
-    state.mods = state.mods.map((mod) => String(mod.id) === String(updated.id) ? updated : mod);
-    filterMods();
+    await loadMods();
   } catch (error) {
     await loadMods();
     if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
@@ -389,7 +427,7 @@ async function handleDynamicAction(event) {
     switch (target.dataset.dynamicAction) {
       case "toggleMod": await run(target, () => toggleMod(target, id), { disable: false }); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
-      case "rescanMods": state.mods = await request("/api/mods/resync", { method: "POST", body: {} }); filterMods(); toast("重扫完成", "success"); break;
+      case "rescanMods": beginModsWrite(); await request("/api/mods/resync", { method: "POST", body: {} }); await loadMods(); toast("重扫完成", "success"); break;
       case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;

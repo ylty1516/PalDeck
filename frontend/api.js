@@ -16,7 +16,12 @@ const STATUS_MESSAGES = Object.freeze({
 
 export async function request(path, options = {}) {
   const { timeout = 15000, ...fetchOptions } = options;
+  const externalSignal = fetchOptions.signal;
+  delete fetchOptions.signal;
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   const timer = setTimeout(() => controller.abort(), timeout);
   const headers = new Headers(fetchOptions.headers || {});
   let body = fetchOptions.body;
@@ -38,9 +43,13 @@ export async function request(path, options = {}) {
     return payload.data === undefined ? payload : payload.data;
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    if (error?.name === "AbortError") throw new ApiError("请求超时，请重试", { code: "timeout" });
+    if (error?.name === "AbortError") {
+      if (externalSignal?.aborted) throw new ApiError("请求已取消", { code: "request_cancelled" });
+      throw new ApiError("请求超时，请重试", { code: "timeout" });
+    }
     throw new ApiError("无法连接本地服务", { code: "network_error", details: String(error) });
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
