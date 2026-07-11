@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from backend import game_detector
 from backend.game_detector import (
     ensure_mod_folders,
     find_palworld_installs,
@@ -65,6 +66,42 @@ def test_find_install_does_not_guess_without_manifest(tmp_path):
     assert find_palworld_installs(steam_roots=[steam_root]) == []
 
 
+def test_default_fallback_is_not_scanned_when_manifest_finds_valid_install(
+    tmp_path, monkeypatch
+):
+    steam_root = tmp_path / "Steam"
+    write_manifest(steam_root, "Palworld")
+    game = make_shipping_game(steam_root / "steamapps" / "common" / "Palworld")
+    monkeypatch.setattr(game_detector, "_read_steam_path_from_registry", lambda: steam_root)
+
+    def fail_if_called():
+        raise AssertionError("fallback must not be scanned")
+
+    monkeypatch.setattr(game_detector, "_common_steam_candidates", fail_if_called)
+
+    assert find_palworld_installs()[0]["path"] == str(game)
+
+
+def test_default_fallback_is_scanned_when_manifest_has_no_valid_install(
+    tmp_path, monkeypatch
+):
+    steam_root = tmp_path / "Steam"
+    write_manifest(steam_root, "Missing")
+    fallback = make_shipping_game(tmp_path / "Fallback" / "Palworld")
+    monkeypatch.setattr(game_detector, "_read_steam_path_from_registry", lambda: steam_root)
+    monkeypatch.setattr(game_detector, "_common_steam_candidates", lambda: [fallback])
+
+    assert [item["path"] for item in find_palworld_installs()] == [str(fallback)]
+
+
+def test_common_fallback_candidates_are_steam_only():
+    candidates = game_detector._common_steam_candidates()
+
+    assert candidates
+    assert all("xboxgames" not in str(path).casefold() for path in candidates)
+    assert all("steamapps\\common" in str(path).casefold() for path in candidates)
+
+
 def test_validate_without_create_has_no_directory_side_effects(tmp_path):
     game = make_shipping_game(tmp_path / "Palworld")
     expected = [
@@ -111,24 +148,68 @@ def test_shipping_exe_without_paks_is_not_a_valid_game_root(tmp_path):
     assert validate_game_path(root)["valid"] is False
 
 
-def test_resolve_ue4ss_mods_dir_prefers_nested_layout(tmp_path):
+@pytest.mark.parametrize(
+    "marker",
+    [
+        Path("ue4ss/Mods"),
+        Path("ue4ss/Mods/mods.txt"),
+        Path("ue4ss/UE4SS-settings.ini"),
+        Path("ue4ss/UE4SS.dll"),
+        Path("ue4ss/dwmapi.dll"),
+    ],
+)
+def test_resolve_ue4ss_mods_dir_prefers_explicit_nested_markers(tmp_path, marker):
     root = make_shipping_game(tmp_path / "Palworld")
-    nested = root / "Pal" / "Binaries" / "Win64" / "ue4ss" / "Mods"
-    nested.mkdir(parents=True)
-    classic = root / "Pal" / "Binaries" / "Win64" / "Mods"
-    classic.mkdir()
+    win64 = root / "Pal" / "Binaries" / "Win64"
+    marked_path = win64 / marker
+    if marker.name == "Mods":
+        marked_path.mkdir(parents=True)
+    else:
+        marked_path.parent.mkdir(parents=True, exist_ok=True)
+        marked_path.touch()
+    (win64 / "Mods").mkdir(exist_ok=True)
+    (win64 / "UE4SS.dll").touch()
 
-    assert resolve_ue4ss_mods_dir(root) == nested
+    assert resolve_ue4ss_mods_dir(root) == win64 / "ue4ss" / "Mods"
 
 
-def test_resolve_ue4ss_mods_dir_uses_classic_layout_and_default(tmp_path):
+@pytest.mark.parametrize(
+    "marker",
+    [
+        Path("Mods"),
+        Path("Mods/mods.txt"),
+        Path("UE4SS-settings.ini"),
+        Path("UE4SS.dll"),
+        Path("dwmapi.dll"),
+    ],
+)
+def test_resolve_ue4ss_mods_dir_recognizes_classic_markers(tmp_path, marker):
     root = make_shipping_game(tmp_path / "Palworld")
-    classic = root / "Pal" / "Binaries" / "Win64" / "Mods"
+    win64 = root / "Pal" / "Binaries" / "Win64"
+    marked_path = win64 / marker
+    if marker.name == "Mods":
+        marked_path.mkdir(parents=True)
+    else:
+        marked_path.parent.mkdir(parents=True, exist_ok=True)
+        marked_path.touch()
 
-    assert resolve_ue4ss_mods_dir(root) == classic
-    classic.mkdir()
-    (classic / "mods.txt").touch()
-    assert resolve_ue4ss_mods_dir(root) == classic
+    assert resolve_ue4ss_mods_dir(root) == win64 / "Mods"
+
+
+def test_empty_nested_parent_does_not_override_classic_marker(tmp_path):
+    root = make_shipping_game(tmp_path / "Palworld")
+    win64 = root / "Pal" / "Binaries" / "Win64"
+    (win64 / "ue4ss").mkdir()
+    (win64 / "UE4SS-settings.ini").touch()
+
+    assert resolve_ue4ss_mods_dir(root) == win64 / "Mods"
+
+
+def test_resolve_ue4ss_mods_dir_defaults_to_classic(tmp_path):
+    root = make_shipping_game(tmp_path / "Palworld")
+    win64 = root / "Pal" / "Binaries" / "Win64"
+
+    assert resolve_ue4ss_mods_dir(root) == win64 / "Mods"
 
 
 def test_validate_with_create_creates_only_client_mod_folders(tmp_path):

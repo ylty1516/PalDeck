@@ -74,6 +74,34 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
     return unique
 
 
+def _common_steam_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for drive in string.ascii_uppercase:
+        for relative in (
+            rf"{drive}:\Steam\steamapps\common\Palworld",
+            rf"{drive}:\SteamLibrary\steamapps\common\Palworld",
+            rf"{drive}:\Program Files (x86)\Steam\steamapps\common\Palworld",
+            rf"{drive}:\Program Files\Steam\steamapps\common\Palworld",
+        ):
+            candidates.append(Path(relative))
+    return candidates
+
+
+def _describe_valid_installs(candidates: list[Path]) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    for path in _unique_paths(candidates):
+        if _is_valid_game_root(path):
+            found.append(
+                {
+                    "path": str(path),
+                    "valid": True,
+                    "has_ue4ss": has_ue4ss(path),
+                    "mod_paths": describe_mod_paths(path),
+                }
+            )
+    return found
+
+
 def find_palworld_installs(
     *, steam_roots: list[Path] | None = None
 ) -> list[dict[str, object]]:
@@ -92,36 +120,16 @@ def find_palworld_installs(
             _parse_library_folders(Path(root) / "steamapps" / "libraryfolders.vdf")
         )
 
-    candidates: list[Path] = []
+    manifest_candidates: list[Path] = []
     for library in _unique_paths(libraries):
         installdir = _manifest_installdir(library)
         if installdir:
-            candidates.append(library / "steamapps" / "common" / installdir)
+            manifest_candidates.append(library / "steamapps" / "common" / installdir)
 
-    if not supplied_roots:
-        for drive in string.ascii_uppercase:
-            for relative in (
-                rf"{drive}:\Steam\steamapps\common\Palworld",
-                rf"{drive}:\SteamLibrary\steamapps\common\Palworld",
-                rf"{drive}:\Program Files (x86)\Steam\steamapps\common\Palworld",
-                rf"{drive}:\Program Files\Steam\steamapps\common\Palworld",
-                rf"{drive}:\Games\Palworld",
-                rf"{drive}:\XboxGames\Palworld\Content",
-            ):
-                candidates.append(Path(relative))
-
-    found: list[dict[str, object]] = []
-    for path in _unique_paths(candidates):
-        if _is_valid_game_root(path):
-            found.append(
-                {
-                    "path": str(path),
-                    "valid": True,
-                    "has_ue4ss": has_ue4ss(path),
-                    "mod_paths": describe_mod_paths(path),
-                }
-            )
-    return found
+    found = _describe_valid_installs(manifest_candidates)
+    if found or supplied_roots:
+        return found
+    return _describe_valid_installs(_common_steam_candidates())
 
 
 def has_ue4ss(game_root: Path | str) -> bool:
@@ -131,18 +139,36 @@ def has_ue4ss(game_root: Path | str) -> bool:
         win64 / "dwmapi.dll",
         win64 / "UE4SS-settings.ini",
         win64 / "ue4ss" / "UE4SS.dll",
+        win64 / "ue4ss" / "dwmapi.dll",
         win64 / "ue4ss" / "UE4SS-settings.ini",
     )
     return any(marker.is_file() for marker in markers)
 
 
 def resolve_ue4ss_mods_dir(game_root: Path | str) -> Path:
-    """Resolve nested UE4SS layouts before the classic Win64/Mods layout."""
+    """Resolve explicit nested UE4SS markers before the classic layout."""
     win64 = Path(game_root) / "Pal" / "Binaries" / "Win64"
     nested_root = win64 / "ue4ss"
-    if (nested_root / "Mods").is_dir() or nested_root.is_dir():
-        return nested_root / "Mods"
-    return win64 / "Mods"
+    nested_mods = nested_root / "Mods"
+    nested_markers = (
+        nested_mods / "mods.txt",
+        nested_root / "UE4SS-settings.ini",
+        nested_root / "UE4SS.dll",
+        nested_root / "dwmapi.dll",
+    )
+    if nested_mods.is_dir() or any(marker.is_file() for marker in nested_markers):
+        return nested_mods
+
+    classic_mods = win64 / "Mods"
+    classic_markers = (
+        classic_mods / "mods.txt",
+        win64 / "UE4SS-settings.ini",
+        win64 / "UE4SS.dll",
+        win64 / "dwmapi.dll",
+    )
+    if classic_mods.is_dir() or any(marker.is_file() for marker in classic_markers):
+        return classic_mods
+    return classic_mods
 
 
 def get_mod_directories(game_root: Path | str) -> dict[str, Path]:
