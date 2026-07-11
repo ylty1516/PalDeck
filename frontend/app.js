@@ -11,7 +11,7 @@ const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
-  nexusRequestSequence: 0, nexusMode: "downloads",
+  nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
@@ -277,6 +277,9 @@ async function copyNexusId(target) {
 }
 
 async function loadNexus(mode = "downloads", force = false) {
+  state.nexusRequestController?.abort();
+  const controller = new AbortController();
+  state.nexusRequestController = controller;
   const sequence = ++state.nexusRequestSequence;
   $("#nexusStatus").textContent = "正在连接 Nexus Mods…";
   const query = $("#nexusQuery").value.trim();
@@ -285,15 +288,22 @@ async function loadNexus(mode = "downloads", force = false) {
   const path = mode === "search"
     ? `/api/nexus/search?q=${encodeURIComponent(query)}&count=24${forceQuery}`
     : `/api/nexus/popular?sort=${encodeURIComponent(mode)}&count=24${forceQuery}`;
-  const result = await request(path);
-  if (sequence !== state.nexusRequestSequence) return false;
-  state.nexus = Array.isArray(result.items) ? result.items : [];
-  const source = result.source === "live" ? "实时" : (result.stale ? "过期缓存" : "缓存");
-  const fetched = result.fetched_at ? new Date(result.fetched_at).toLocaleString("zh-CN") : "未知时间";
-  const warning = result.warning ? ` · 警告：${result.warning}` : "";
-  $("#nexusStatus").textContent = `${source} · ${fetched} · ${state.nexus.length} 个模组${warning}`;
-  renderNexus($("#nexusGrid"), state.nexus);
-  return true;
+  try {
+    const result = await request(path, { signal: controller.signal });
+    if (sequence !== state.nexusRequestSequence) return false;
+    state.nexus = Array.isArray(result.items) ? result.items : [];
+    const source = result.source === "live" ? "实时" : (result.stale ? "过期缓存" : "缓存");
+    const fetched = result.fetched_at ? new Date(result.fetched_at).toLocaleString("zh-CN") : "未知时间";
+    const warning = result.warning ? ` · 警告：${result.warning}` : "";
+    $("#nexusStatus").textContent = `${source} · ${fetched} · ${state.nexus.length} 个模组${warning}`;
+    renderNexus($("#nexusGrid"), state.nexus);
+    return true;
+  } catch (error) {
+    if (error.code === "request_cancelled") return false;
+    throw error;
+  } finally {
+    if (state.nexusRequestController === controller) state.nexusRequestController = null;
+  }
 }
 
 function showPathInfo(status) {

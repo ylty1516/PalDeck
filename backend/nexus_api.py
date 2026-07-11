@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -70,7 +71,7 @@ _SEARCH_QUERY = f"""
   }}
 """
 _MOD_QUERY = f"""
-  query ModById($gameId: Int!, $modId: Int!) {{
+  query ModById($gameId: ID!, $modId: ID!) {{
     mod(gameId: $gameId, modId: $modId) {{ {MOD_FIELDS} }}
   }}
 """
@@ -139,12 +140,53 @@ def _normalize(node: dict[str, Any]) -> dict[str, Any]:
 class NexusCatalog:
     """TTL-backed anonymous Nexus catalog with injectable GraphQL transport."""
 
+    _locks_guard = threading.Lock()
+    _locks: dict[str, threading.RLock] = {}
+    _max_cache_files = 200
+    _max_cache_age = 30 * 24 * 60 * 60
+
     def __init__(self, cache_dir: str | Path, transport: Transport | None = None, ttl: int = 600):
         self.cache_dir = Path(cache_dir)
         self.transport = transport or _default_transport
         self.ttl = int(ttl)
         if self.ttl < 0:
             raise ValueError("ttl 不能为负数")
+        self._cleanup_cache()
+
+    @classmethod
+    def _key_lock(cls, path: Path) -> threading.RLock:
+        key = str(path.resolve(strict=False)).casefold()
+        with cls._locks_guard:
+            return cls._locks.setdefault(key, threading.RLock())
+
+    def _cleanup_cache(self) -> None:
+        try:
+            files = list(self.cache_dir.glob("*.json"))
+        except OSError:
+            return
+        now = time.time()
+        entries: list[tuple[float, Path]] = []
+        for path in files:
+            try:
+                timestamp = path.stat().st_mtime
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(value, dict) and isinstance(value.get("timestamp"), (int, float)):
+                        timestamp = float(value["timestamp"])
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    pass
+                if now - timestamp > self._max_cache_age:
+                    path.unlink(missing_ok=True)
+                else:
+                    entries.append((timestamp, path))
+            except OSError:
+                continue
+        entries.sort(key=lambda item: item[0], reverse=True)
+        for _timestamp, path in entries[self._max_cache_files:]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     def _count(value: Any) -> int:
@@ -187,8 +229,10 @@ class NexusCatalog:
             response = self.transport(query, variables)
         except NexusError:
             raise
-        except Exception as exc:
+        except TimeoutError as exc:
             raise NexusError(f"Nexus 请求失败: {exc}") from exc
+        except Exception as exc:
+            raise NexusError("Nexus 请求失败") from exc
         return self._decode(response)
 
     def _cached(self, store: JsonStore) -> dict[str, Any] | None:
@@ -199,23 +243,54 @@ class NexusCatalog:
             return None
         return cached
 
+    @staticmethod
+    def _cache_result(cached: dict[str, Any], *, stale: bool = False, warning: str = "") -> dict[str, Any]:
+        return {"items": cached["items"], "source": "cache", "stale": stale,
+                "fetched_at": cached["fetched_at"], "warning": warning}
+
     def _load(self, store: JsonStore, fetch: Callable[[], list[dict[str, Any]]], force: bool) -> dict[str, Any]:
-        cached = self._cached(store)
-        if not force and cached is not None and time.time() - cached["timestamp"] < self.ttl:
-            return {"items": cached["items"], "source": "cache", "stale": False,
-                    "fetched_at": cached["fetched_at"], "warning": ""}
-        try:
-            items = fetch()
+        request_started = time.time()
+        request_started_ns = time.time_ns()
+        initial = self._cached(store)
+        initial_timestamp = initial["timestamp"] if initial is not None else None
+        if not force and initial is not None and request_started - initial["timestamp"] < self.ttl:
+            return self._cache_result(initial)
+
+        with self._key_lock(store.path):
+            cached = self._cached(store)
+            completed_ns = cached.get("_completed_ns") if cached is not None else None
+            cache_changed_while_waiting = cached is not None and (
+                (isinstance(completed_ns, int) and completed_ns >= request_started_ns)
+                or (cached["timestamp"] >= request_started and cached["timestamp"] != initial_timestamp)
+            )
+            if cache_changed_while_waiting:
+                return self._cache_result(cached)
+            if not force and cached is not None and time.time() - cached["timestamp"] < self.ttl:
+                return self._cache_result(cached)
+            fallback = cached or initial
+            try:
+                items = fetch()
+            except NexusError as exc:
+                if fallback is None:
+                    raise
+                return self._cache_result(fallback, stale=True, warning=str(exc))
+
             timestamp = time.time()
             fetched_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
-            store.write({"items": items, "timestamp": timestamp, "fetched_at": fetched_at})
+            warning = ""
+            try:
+                store.write({
+                    "items": items,
+                    "timestamp": timestamp,
+                    "fetched_at": fetched_at,
+                    "_completed_ns": time.time_ns(),
+                })
+            except Exception:
+                warning = "缓存写入失败"
+            else:
+                self._cleanup_cache()
             return {"items": items, "source": "live", "stale": False,
-                    "fetched_at": fetched_at, "warning": ""}
-        except NexusError as exc:
-            if cached is None:
-                raise
-            return {"items": cached["items"], "source": "cache", "stale": True,
-                    "fetched_at": cached["fetched_at"], "warning": str(exc)}
+                    "fetched_at": fetched_at, "warning": warning}
 
     def popular(self, sort: str = "downloads", force: bool = False, count: int = 24) -> dict[str, Any]:
         if sort not in _LIST_QUERIES:
@@ -257,7 +332,7 @@ class NexusCatalog:
         store = self._store("id", mod_id)
 
         def fetch() -> list[dict[str, Any]]:
-            data = self._request(_MOD_QUERY, {"gameId": GAME_ID, "modId": mod_id})
+            data = self._request(_MOD_QUERY, {"gameId": str(GAME_ID), "modId": str(mod_id)})
             if "mod" not in data:
                 raise NexusError("Nexus 响应结构无效：缺少 mod")
             item = data["mod"]

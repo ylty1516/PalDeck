@@ -497,13 +497,14 @@ def create_app(
     def nexus_result(call):
         try:
             return success(call())
-        except ValueError as exc:
-            raise ApiError(str(exc), 400, "invalid_input") from exc
         except ApiError:
             raise
+        except nexus_api.NexusError as exc:
+            app.logger.warning("Nexus request failed", exc_info=exc)
+            return failure(str(exc), 502, "upstream_error")
         except Exception as exc:
             app.logger.warning("Nexus request failed", exc_info=exc)
-            return failure(str(exc) or "Nexus 请求失败", 502, "upstream_error")
+            return failure("Nexus 请求失败", 502, "upstream_error")
 
     @app.get("/api/nexus/popular")
     def nexus_popular():

@@ -189,6 +189,10 @@ def test_request_sequences_conflict_feedback_and_nexus_validation():
     app = APP.read_text(encoding="utf-8")
     render = RENDER.read_text(encoding="utf-8")
     assert "modsRequestSequence" in app and "nexusRequestSequence" in app
+    assert "nexusRequestController" in app
+    assert "state.nexusRequestController?.abort()" in app
+    assert 'signal: controller.signal' in app
+    assert 'error.code === "request_cancelled"' in app
     assert "sequence !== state.modsRequestSequence" in app
     assert "sequence !== state.nexusRequestSequence" in app
     assert 'error.code === "mod_conflict"' in app

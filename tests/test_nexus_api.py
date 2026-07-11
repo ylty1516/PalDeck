@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -81,7 +83,8 @@ def test_numeric_search_uses_single_mod_query_and_variables(tmp_path):
     result = NexusCatalog(tmp_path, transport=transport).search("123")
     query, variables = transport.calls[0]
     assert "mods(" not in query and "mod(" in query
-    assert variables["modId"] == 123 and variables["gameId"] == 6063
+    assert "$gameId: ID!" in query and "$modId: ID!" in query
+    assert variables["modId"] == "123" and variables["gameId"] == "6063"
     assert result["items"][0]["nexus_id"] == 123
 
 
@@ -147,6 +150,83 @@ def test_invalid_sort_count_and_id_are_rejected_before_transport(tmp_path):
 def test_adult_content_is_preserved(tmp_path):
     result = NexusCatalog(tmp_path, transport=Transport([payload([node(adultContent=True)])])).popular()
     assert result["items"][0]["adultContent"] is True
+
+
+def test_force_requests_for_same_key_are_singleflight(tmp_path):
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(3)
+
+    def slow_transport(_query, _variables):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.15)
+        return payload([node()])
+
+    catalogs = [
+        NexusCatalog(tmp_path, transport=slow_transport),
+        NexusCatalog(tmp_path, transport=slow_transport),
+    ]
+    results = []
+
+    def worker(catalog):
+        start.wait()
+        results.append(catalog.popular(force=True))
+
+    threads = [threading.Thread(target=worker, args=(catalog,)) for catalog in catalogs]
+    for thread in threads: thread.start()
+    start.wait()
+    for thread in threads: thread.join(timeout=2)
+
+    assert calls == 1
+    assert sorted(result["source"] for result in results) == ["cache", "live"]
+    assert all(result["stale"] is False for result in results)
+
+
+def test_live_result_survives_cache_write_failure_without_leaking_path(tmp_path):
+    cache_file = tmp_path / "not-a-directory"
+    cache_file.write_text("conflict", encoding="utf-8")
+    result = NexusCatalog(cache_file, transport=Transport([payload([node()])])).popular(force=True)
+    assert result["source"] == "live"
+    assert result["items"][0]["nexus_id"] == 42
+    assert result["warning"] == "缓存写入失败"
+    assert str(cache_file) not in result["warning"]
+
+
+def test_live_result_survives_read_only_cache(monkeypatch, tmp_path):
+    def deny_write(_self, _value):
+        raise PermissionError(r"read-only C:\\private\\nexus-cache")
+
+    monkeypatch.setattr(nexus_api.JsonStore, "write", deny_write)
+    result = NexusCatalog(tmp_path, transport=Transport([payload([node()])])).popular(force=True)
+    assert result["source"] == "live"
+    assert result["warning"] == "缓存写入失败"
+    assert "private" not in result["warning"]
+
+
+def test_cache_cleanup_removes_older_than_30_days_and_caps_json_files(tmp_path):
+    now = time.time()
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps({"items": [], "timestamp": now - 31 * 86400, "fetched_at": "old"}), encoding="utf-8")
+    for index in range(205):
+        path = tmp_path / f"entry-{index:03}.json"
+        path.write_text(json.dumps({"items": [], "timestamp": now - index, "fetched_at": "x"}), encoding="utf-8")
+
+    NexusCatalog(tmp_path, transport=Transport([]))
+
+    files = list(tmp_path.glob("*.json"))
+    assert not old.exists()
+    assert len(files) == 200
+    assert not (tmp_path / "entry-204.json").exists()
+
+
+def test_cache_cleanup_after_write_keeps_at_most_200_files(tmp_path):
+    for index in range(200):
+        (tmp_path / f"existing-{index}.json").write_text("{}", encoding="utf-8")
+    catalog = NexusCatalog(tmp_path, transport=Transport([payload([node()])]))
+    catalog.popular(force=True)
+    assert len(list(tmp_path.glob("*.json"))) <= 200
 
 
 def test_http_error_never_exposes_response_body(monkeypatch):
