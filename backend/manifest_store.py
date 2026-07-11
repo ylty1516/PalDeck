@@ -306,8 +306,11 @@ class ManifestStore:
             for item in validated.files:
                 self._audit_path(validated.install_root, item.relative_path)
             if validated.ue4ss_enabled_txt is not None:
+                if validated.kind is not ModKind.UE4SS:
+                    raise ValueError("ue4ss_enabled_txt is only valid for UE4SS manifests")
                 self._audit_path(
-                    validated.install_root, validated.ue4ss_enabled_txt.relative_path
+                    self.root.parent / "disabled" / validated.id,
+                    validated.ue4ss_enabled_txt.relative_path,
                 )
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid manifest: {manifest_id}: {exc}") from exc

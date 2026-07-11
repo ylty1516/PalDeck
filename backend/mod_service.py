@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Iterable
 
 from .archive_utils import inspect_and_extract
-from .domain import AuditStatus, ManifestFile, ModKind, ModManifest
-from .game_detector import ensure_mod_folders, get_mod_directories
+from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
+from .game_detector import ensure_mod_folders, get_mod_directories, is_ue4ss_framework_mod
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
 
@@ -85,7 +85,7 @@ class ModService:
         dirs = get_mod_directories(self.game_root)
         self.store = ManifestStore(
             self.data_dir / "manifests",
-            known_roots=(dirs["tilde_mods"], dirs["logic_mods"]),
+            known_roots=(dirs["tilde_mods"], dirs["logic_mods"], dirs["ue4ss_mods"]),
         )
         self.game_running = game_running
         self._migrate_legacy_once()
@@ -227,7 +227,7 @@ class ModService:
         ensure_mod_folders(self.game_root)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "staging").mkdir(parents=True, exist_ok=True)
-        for path in (dirs["tilde_mods"], dirs["logic_mods"], self.data_dir):
+        for path in (dirs["tilde_mods"], dirs["logic_mods"], dirs["ue4ss_mods"], self.data_dir):
             if not check_directory_writable(path):
                 raise PermissionError(f"目录不可写：{path}")
         return dirs
@@ -237,12 +237,14 @@ class ModService:
         if value in (None, "", "auto"):
             return fallback
         kind = ModKind(value)
-        if kind not in (ModKind.PAK, ModKind.LOGICPAK):
-            raise ValueError("仅支持 pak 或 logicpak")
+        if kind not in (ModKind.PAK, ModKind.LOGICPAK, ModKind.UE4SS):
+            raise ValueError("仅支持 pak、logicpak 或 ue4ss")
         return kind
 
     @staticmethod
     def _target(dirs: dict[str, Path], kind: ModKind) -> Path:
+        if kind is ModKind.UE4SS:
+            return dirs["ue4ss_mods"]
         return dirs["logic_mods"] if kind is ModKind.LOGICPAK else dirs["tilde_mods"]
 
     @staticmethod
@@ -271,7 +273,143 @@ class ModService:
         return value
 
     def _listed(self, manifest: ModManifest) -> dict[str, object]:
-        return self._serialize_manifest(manifest, self.store.audit(manifest))
+        audit = self._audit(manifest)
+        displayed = manifest
+        if manifest.kind is ModKind.UE4SS and audit.status in (AuditStatus.ENABLED, AuditStatus.DISABLED):
+            displayed = replace(manifest, enabled=audit.status is AuditStatus.ENABLED)
+        return self._serialize_manifest(displayed, audit)
+
+    @staticmethod
+    def _mods_entry(line: str) -> tuple[str, str] | None:
+        match = re.match(r"^(?P<prefix>\s*)(?P<name>[^:#;]+?)(?P<separator>\s*:\s*)(?P<value>[01])(?P<tail>\s*(?:[#;].*)?)$", line)
+        if not match:
+            return None
+        return match.group("name").strip(), match.group("value")
+
+    @classmethod
+    def _updated_mods_text(cls, text: str, name: str, enabled: bool | None) -> str:
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        wanted = name.casefold()
+        found = False
+        appended = False
+        output: list[str] = []
+        for line in lines:
+            entry = cls._mods_entry(line)
+            if entry is None or entry[0].casefold() != wanted:
+                output.append(line)
+                continue
+            if found or enabled is None:
+                continue
+            output.append(re.sub(r"(\s*:\s*)[01]", rf"\g<1>{int(enabled)}", line, count=1))
+            found = True
+        if enabled is not None and not found:
+            output.append(f"{name} : {int(enabled)}")
+            appended = True
+        result = newline.join(output)
+        if output and (text.endswith(("\n", "\r")) or appended):
+            result += newline
+        return result
+
+    def _write_mods_txt(self, path: Path, text: str) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(text.encode("utf-8"))
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @classmethod
+    def _mods_enabled(cls, path: Path, name: str) -> bool | None:
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            entry = cls._mods_entry(line)
+            if entry is not None and entry[0].casefold() == name.casefold():
+                return entry[1] == "1"
+        return None
+
+    def _audit(self, manifest: ModManifest) -> ManifestAudit:
+        audit = self.store.audit(manifest)
+        if manifest.kind is not ModKind.UE4SS or audit.status is not AuditStatus.ENABLED:
+            return audit
+        state = self._mods_enabled(manifest.install_root.parent / "mods.txt", manifest.install_root.name)
+        if state is None:
+            return ManifestAudit(manifest.id, AuditStatus.MISSING)
+        return ManifestAudit(
+            manifest.id,
+            AuditStatus.ENABLED if state else AuditStatus.DISABLED,
+        )
+
+    def _install_ue4ss(
+        self,
+        source_path: Path,
+        inspected,
+        dirs: dict[str, Path],
+        transaction: Path,
+        display_name: str | None,
+        nexus_id: int | None,
+        decision: str,
+    ) -> dict[str, object]:
+        source_root = inspected.content_root
+        folder_name = _safe_label(source_root.name or inspected.display_name)
+        target_root = dirs["ue4ss_mods"] / folder_name
+        existing = next(
+            (child for child in dirs["ue4ss_mods"].iterdir() if child.name.casefold() == folder_name.casefold()),
+            None,
+        )
+        if existing is not None:
+            raise ModConflictError({"files": [str(existing)], "choices": ["cancel"]})
+        files = [path for path in source_root.rglob("*") if path.is_file() and not _is_reparse(path)]
+        enabled_source = next((path for path in files if path.relative_to(source_root).as_posix().casefold() == "enabled.txt"), None)
+        payload = [path for path in files if path != enabled_source]
+        if not any(path.relative_to(source_root).as_posix().casefold() == "scripts/main.lua" for path in payload):
+            raise ValueError("UE4SS 模组必须包含 Scripts/main.lua")
+        mods_txt = dirs["ue4ss_mods"] / "mods.txt"
+        old_config = mods_txt.read_bytes() if mods_txt.is_file() else None
+        created: ModManifest | None = None
+        metadata_root: Path | None = None
+        try:
+            target_root.mkdir(parents=True)
+            installed: list[Path] = []
+            for incoming in payload:
+                destination = target_root / incoming.relative_to(source_root)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(incoming, destination)
+                installed.append(destination)
+            created = self.store.create(
+                name=display_name or folder_name,
+                kind=ModKind.UE4SS,
+                install_root=target_root,
+                files=installed,
+                source_name=source_path.name,
+                nexus_id=nexus_id,
+            )
+            if enabled_source is not None:
+                metadata_root = self.data_dir / "disabled" / created.id
+                metadata = metadata_root / "metadata" / "enabled.txt"
+                metadata.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(enabled_source, metadata)
+                created = replace(
+                    created,
+                    ue4ss_enabled_txt=ManifestFile("metadata/enabled.txt", metadata.stat().st_size, _sha256(metadata)),
+                )
+                self.store.save(created)
+            current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+            self._write_mods_txt(mods_txt, self._updated_mods_text(current, folder_name, True))
+            return self._listed(created)
+        except BaseException:
+            if created is not None:
+                self.store.delete(created.id)
+            shutil.rmtree(target_root, ignore_errors=True)
+            if metadata_root is not None:
+                shutil.rmtree(metadata_root, ignore_errors=True)
+            if old_config is None:
+                mods_txt.unlink(missing_ok=True)
+            else:
+                mods_txt.parent.mkdir(parents=True, exist_ok=True)
+                mods_txt.write_bytes(old_config)
+            raise
 
     def _direct_group(self, source: Path) -> tuple[tuple[Path, ...], ...]:
         if source.suffix.casefold() != ".pak" or not source.is_file():
@@ -324,8 +462,15 @@ class ModService:
                 extracted = transaction / "extracted"
                 inspected = inspect_and_extract(source_path, extracted)
                 kind = self._kind(preferred_kind, inspected.kind)
+                if kind is ModKind.UE4SS:
+                    if inspected.kind is not ModKind.UE4SS:
+                        raise ValueError("所选压缩包不是标准 UE4SS Scripts/main.lua 模组")
+                    return self._install_ue4ss(
+                        source_path, inspected, dirs, transaction,
+                        display_name, nexus_id, decision,
+                    )
                 if inspected.kind not in (ModKind.PAK, ModKind.LOGICPAK):
-                    raise ValueError("此服务仅支持 PAK 与 LogicMods")
+                    raise ValueError("此服务仅支持 PAK、LogicMods 与 UE4SS")
                 groups = inspected.groups
                 name = display_name or inspected.display_name
             else:
@@ -491,7 +636,35 @@ class ModService:
         self._assert_stopped()
         self._prepare_dirs()
         manifest = self.store.get(manifest_id)
-        audit = self.store.audit(manifest)
+        audit = self._audit(manifest)
+        if manifest.kind is ModKind.UE4SS:
+            desired_status = AuditStatus.ENABLED if enabled else AuditStatus.DISABLED
+            if manifest.enabled is enabled and audit.status is desired_status:
+                return self._listed(manifest)
+            if audit.status in (AuditStatus.MISSING, AuditStatus.MODIFIED, AuditStatus.CONFLICT):
+                raise RuntimeError(f"模组文件状态异常：{audit.status.value}")
+            mods_txt = manifest.install_root.parent / "mods.txt"
+            old_config = mods_txt.read_bytes() if mods_txt.is_file() else None
+            manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
+            manifest_bytes = manifest_path.read_bytes()
+            changed = replace(manifest, enabled=enabled)
+            try:
+                current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                self._write_mods_txt(
+                    mods_txt,
+                    self._updated_mods_text(current, manifest.install_root.name, enabled),
+                )
+                self.store.save(changed)
+                return self._listed(changed)
+            except BaseException:
+                if old_config is None:
+                    mods_txt.unlink(missing_ok=True)
+                else:
+                    mods_txt.write_bytes(old_config)
+                rollback = manifest_path.with_name(f".{manifest_path.name}.rollback.tmp")
+                rollback.write_bytes(manifest_bytes)
+                os.replace(rollback, manifest_path)
+                raise
         if enabled and audit.status is AuditStatus.ENABLED:
             return self._listed(manifest)
         if not enabled and audit.status is AuditStatus.DISABLED:
@@ -582,12 +755,16 @@ class ModService:
         self._assert_stopped()
         self._prepare_dirs()
         manifest = self.store.get(manifest_id)
-        audit = self.store.audit(manifest)
+        audit = self._audit(manifest)
         if audit.status in (AuditStatus.MODIFIED, AuditStatus.CONFLICT) and not force_modified:
             raise RuntimeError("模组文件已修改，需 force_modified=True 才能删除")
         transaction = self.data_dir / "staging" / uuid.uuid4().hex
         transaction.mkdir(parents=True)
         moved: list[tuple[Path, Path]] = []
+        manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
+        manifest_bytes = manifest_path.read_bytes()
+        mods_txt = manifest.install_root.parent / "mods.txt" if manifest.kind is ModKind.UE4SS else None
+        old_config = mods_txt.read_bytes() if mods_txt is not None and mods_txt.is_file() else None
         try:
             disabled_root = self.data_dir / "disabled" / manifest.id
             for root in (manifest.install_root, disabled_root):
@@ -598,18 +775,43 @@ class ModService:
                         backup.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(source, backup)
                         moved.append((backup, source))
+            if manifest.kind is ModKind.UE4SS:
+                metadata = disabled_root / "metadata" / "enabled.txt"
+                if metadata.is_file():
+                    backup = transaction / "metadata" / "enabled.txt"
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(metadata, backup)
+                    moved.append((backup, metadata))
+                current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                self._write_mods_txt(
+                    mods_txt,
+                    self._updated_mods_text(current, manifest.install_root.name, None),
+                )
             self.store.delete(manifest.id)
         except BaseException:
+            if mods_txt is not None:
+                if old_config is None:
+                    mods_txt.unlink(missing_ok=True)
+                else:
+                    mods_txt.write_bytes(old_config)
             for backup, original in reversed(moved):
                 original.parent.mkdir(parents=True, exist_ok=True)
                 if backup.exists():
                     os.replace(backup, original)
+            if not manifest_path.exists():
+                rollback = manifest_path.with_name(f".{manifest_path.name}.rollback.tmp")
+                rollback.parent.mkdir(parents=True, exist_ok=True)
+                rollback.write_bytes(manifest_bytes)
+                os.replace(rollback, manifest_path)
             raise
         finally:
             shutil.rmtree(transaction, ignore_errors=True)
         for _, original in moved:
             stop = manifest.install_root if original.is_relative_to(manifest.install_root) else self.data_dir / "disabled"
             self._remove_empty_parents(original, stop)
+        if manifest.kind is ModKind.UE4SS:
+            shutil.rmtree(manifest.install_root, ignore_errors=True)
+            shutil.rmtree(self.data_dir / "disabled" / manifest.id, ignore_errors=True)
         return {"ok": True, "deleted": manifest.id}
 
     @_locked_write
@@ -638,6 +840,51 @@ class ModService:
                         group.append(sidecar)
                 manifest = self.store.create(pak.stem, kind, root, group, source_name="rescan")
                 tracked.update((str(root.resolve()).casefold(), item.relative_path.casefold()) for item in manifest.files)
+
+        ue4ss_root = dirs["ue4ss_mods"]
+        tracked_roots = {
+            str(manifest.install_root.resolve()).casefold()
+            for manifest in self.store.list()
+            if manifest.kind is ModKind.UE4SS
+        }
+        if not _is_reparse(ue4ss_root):
+            for candidate in sorted(ue4ss_root.iterdir(), key=lambda path: path.name.casefold()):
+                if (
+                    not candidate.is_dir()
+                    or _is_reparse(candidate)
+                    or is_ue4ss_framework_mod(candidate.name)
+                    or not (candidate / "Scripts" / "main.lua").is_file()
+                    or str(candidate.resolve()).casefold() in tracked_roots
+                ):
+                    continue
+                files = [path for path in candidate.rglob("*") if path.is_file() and not _is_reparse(path)]
+                enabled_txt = next((path for path in files if path.relative_to(candidate).as_posix().casefold() == "enabled.txt"), None)
+                payload = [path for path in files if path != enabled_txt]
+                enabled = self._mods_enabled(ue4ss_root / "mods.txt", candidate.name)
+                manifest = self.store.create(
+                    candidate.name, ModKind.UE4SS, candidate, payload,
+                    source_name="rescan", enabled=enabled is not False,
+                )
+                if enabled_txt is not None:
+                    metadata = self.data_dir / "disabled" / manifest.id / "metadata" / "enabled.txt"
+                    try:
+                        metadata.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(enabled_txt, metadata)
+                        manifest = replace(
+                            manifest,
+                            ue4ss_enabled_txt=ManifestFile(
+                                "metadata/enabled.txt", metadata.stat().st_size, _sha256(metadata)
+                            ),
+                        )
+                        self.store.save(manifest)
+                    except BaseException:
+                        if metadata.exists():
+                            enabled_txt.parent.mkdir(parents=True, exist_ok=True)
+                            os.replace(metadata, enabled_txt)
+                        self.store.delete(manifest.id)
+                        shutil.rmtree(metadata.parent.parent, ignore_errors=True)
+                        raise
+                tracked_roots.add(str(candidate.resolve()).casefold())
         return self.list_mods()
 
     def list_mods(self) -> list[dict[str, object]]:

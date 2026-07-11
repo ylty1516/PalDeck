@@ -8,6 +8,18 @@ from pathlib import Path, PureWindowsPath
 
 
 APP_ID = "1623730"
+UE4SS_FRAMEWORK_MODS = frozenset({
+    "bpmodloadermod",
+    "cheatmanagermod",
+    "consolecommandsmod",
+    "keybinds",
+    "uobjecthook",
+})
+
+
+def is_ue4ss_framework_mod(name: str) -> bool:
+    """Return whether a Mods child is shipped as UE4SS framework infrastructure."""
+    return name.casefold() in UE4SS_FRAMEWORK_MODS
 
 
 def _read_steam_path_from_registry() -> Path | None:
