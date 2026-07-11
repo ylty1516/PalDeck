@@ -182,8 +182,12 @@ class ManifestStore:
     @staticmethod
     def _to_dict(manifest: ModManifest) -> dict[str, Any]:
         value = asdict(manifest)
-        value["kind"] = manifest.kind.value
-        value["install_root"] = str(manifest.install_root)
+        if isinstance(manifest.kind, ModKind):
+            value["kind"] = manifest.kind.value
+        if isinstance(manifest.install_root, Path):
+            value["install_root"] = str(manifest.install_root)
+        if type(manifest.files) is tuple:
+            value["files"] = list(value["files"])
         return value
 
     @staticmethod
@@ -242,7 +246,18 @@ class ManifestStore:
         )
 
     def save(self, manifest: ModManifest) -> None:
-        JsonStore(self._path(manifest.id)).write(self._to_dict(manifest))
+        manifest_id = getattr(manifest, "id", "unknown")
+        try:
+            validated = self._from_dict(self._to_dict(manifest))
+            for item in validated.files:
+                self._audit_path(validated.install_root, item.relative_path)
+            if validated.ue4ss_enabled_txt is not None:
+                self._audit_path(
+                    validated.install_root, validated.ue4ss_enabled_txt.relative_path
+                )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid manifest: {manifest_id}: {exc}") from exc
+        JsonStore(self._path(validated.id)).write(self._to_dict(validated))
 
     def get(self, manifest_id: str) -> ModManifest:
         try:
@@ -255,7 +270,11 @@ class ManifestStore:
         try:
             if value is None:
                 raise ValueError("invalid JSON")
-            return self._from_dict(value)
+            manifest = self._from_dict(value)
+            requested_id = uuid.UUID(manifest_id).hex
+            if manifest.id != requested_id:
+                raise ValueError("JSON id does not match requested id")
+            return manifest
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid manifest: {manifest_id}: {exc}") from exc
 
@@ -267,7 +286,10 @@ class ManifestStore:
             try:
                 value = JsonStore(path).read(None)
                 if value is not None:
-                    manifests.append(self._from_dict(value))
+                    manifest = self._from_dict(value)
+                    if uuid.UUID(path.stem).hex != manifest.id:
+                        raise ValueError("JSON id does not match manifest filename")
+                    manifests.append(manifest)
             except (KeyError, TypeError, ValueError):
                 continue
         return sorted(manifests, key=lambda item: (_installed_datetime(item.installed_at), item.id))
@@ -298,14 +320,10 @@ class ManifestStore:
             raise ValueError("relative_path resolves outside its root")
         return resolved
 
-    def audit(
-        self, manifest_id: str, disabled_root: str | os.PathLike[str] | None = None
-    ) -> ManifestAudit:
+    def audit(self, manifest_id: str) -> ManifestAudit:
         manifest = self.get(manifest_id)
         live_root = manifest.install_root
-        alternate_root = (
-            Path(disabled_root) if disabled_root is not None else live_root.parent / "disabled"
-        ) / manifest.id
+        alternate_root = self.root.parent / "disabled" / manifest.id
         live_count = disabled_count = 0
         changed = False
         for expected in manifest.files:

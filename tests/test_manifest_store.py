@@ -122,28 +122,34 @@ def test_audit_detects_modified_missing_disabled_and_conflict(tmp_path):
     store = ManifestStore(tmp_path / "data")
     manifest = _create(store, root, [payload])
 
-    assert store.audit(manifest.id, disabled).status == "enabled"
+    assert store.audit(manifest.id).status == "enabled"
     payload.write_bytes(b"changed")
-    assert store.audit(manifest.id, disabled).status == "modified"
+    assert store.audit(manifest.id).status == "modified"
     payload.unlink()
-    assert store.audit(manifest.id, disabled).status == "missing"
+    assert store.audit(manifest.id).status == "missing"
     disabled_payload = disabled / manifest.id / "a.pak"
     disabled_payload.parent.mkdir()
     disabled_payload.write_bytes(b"original")
-    assert store.audit(manifest.id, disabled).status == "disabled"
+    assert store.audit(manifest.id).status == "disabled"
     payload.write_bytes(b"original")
-    assert store.audit(manifest.id, disabled).status == "conflict"
+    assert store.audit(manifest.id).status == "conflict"
 
 
-def test_audit_uses_default_disabled_root_and_manifest_id(tmp_path):
-    live = tmp_path / "live"
-    live.mkdir()
+def test_audit_does_not_accept_a_caller_supplied_disabled_root(tmp_path):
+    store = ManifestStore(tmp_path / "data")
+    with pytest.raises(TypeError):
+        store.audit("0" * 32, tmp_path / "other-disabled")
+
+
+def test_audit_uses_store_root_to_derive_default_disabled_root(tmp_path):
+    live = tmp_path / "game" / "live"
+    live.mkdir(parents=True)
     payload = live / "a.pak"
     payload.write_bytes(b"original")
-    store = ManifestStore(tmp_path / "data")
+    store = ManifestStore(tmp_path / "state" / "data")
     manifest = _create(store, live, [payload])
     payload.unlink()
-    disabled_payload = tmp_path / "disabled" / manifest.id / "a.pak"
+    disabled_payload = tmp_path / "state" / "disabled" / manifest.id / "a.pak"
     disabled_payload.parent.mkdir(parents=True)
     disabled_payload.write_bytes(b"original")
 
@@ -215,6 +221,57 @@ def test_create_rejects_directory_and_missing_file(tmp_path):
         _create(store, root, [root])
     with pytest.raises(ValueError):
         _create(store, root, [root / "missing.pak"])
+
+
+def test_save_rejects_invalid_schema_before_replacing_manifest(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    payload = root / "a.pak"
+    payload.write_bytes(b"a")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, root, [payload])
+    path = store.manifests_dir / f"{manifest.id}.json"
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="invalid manifest"):
+        store.save(replace(manifest, enabled=1))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["files", "ue4ss_enabled_txt"])
+def test_save_rejects_every_path_outside_install_root(tmp_path, field):
+    root = tmp_path / "root"
+    root.mkdir()
+    payload = root / "a.pak"
+    payload.write_bytes(b"a")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, root, [payload])
+    unsafe = ManifestFile("../outside.pak", 1, "0" * 64)
+    changed = replace(
+        manifest,
+        files=(unsafe,) if field == "files" else manifest.files,
+        ue4ss_enabled_txt=unsafe if field == "ue4ss_enabled_txt" else None,
+    )
+
+    with pytest.raises(ValueError, match="relative_path"):
+        store.save(changed)
+
+
+def test_get_rejects_manifest_whose_json_id_does_not_match_requested_id(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    payload = root / "a.pak"
+    payload.write_bytes(b"a")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, root, [payload])
+    path = store.manifests_dir / f"{manifest.id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["id"] = "ffffffffffffffffffffffffffffffff"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match requested id"):
+        store.get(manifest.id)
+    assert store.list() == []
 
 
 def test_atomic_save_failure_preserves_previous_manifest(tmp_path, monkeypatch):
