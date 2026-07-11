@@ -7,6 +7,8 @@ venv/
 .pip-cache/
 .pycache-build/
 .tmp/
+.build-cache/
+.venv-build/
 .pi-subagents/
 
 # build artifacts

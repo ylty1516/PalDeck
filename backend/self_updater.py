@@ -84,25 +84,31 @@ def fetch_latest_release() -> dict[str, Any]:
 
 
 def _pick_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Prefer PalMod.exe / 帕鲁Mod.exe, then zip with panel name."""
+    """Prefer PalDeck releases while remaining compatible with legacy PalMod names."""
     if not assets:
         return None
 
     def score(a: dict) -> tuple:
         name = (a.get("name") or "").lower()
         # higher priority = lower score tuple
-        if name == "palmod.exe":
+        if name == "paldeck.exe":
             return (0, 0)
-        if name.endswith(".exe") and "palmod" in name:
+        if name.endswith(".exe") and "paldeck" in name:
             return (0, 1)
-        if name.endswith(".exe") and ("mod" in name or "panel" in name):
+        if name.endswith(".zip") and "paldeck" in name:
             return (1, 0)
-        if name.endswith(".zip") and ("palmod" in name or "modmanager" in name or "管理" in (a.get("name") or "")):
+        if name == "palmod.exe":
             return (2, 0)
-        if name.endswith(".zip"):
+        if name.endswith(".exe") and "palmod" in name:
+            return (2, 1)
+        if name.endswith(".exe") and ("mod" in name or "panel" in name):
             return (3, 0)
-        if name.endswith(".exe"):
+        if name.endswith(".zip") and ("palmod" in name or "modmanager" in name or "管理" in (a.get("name") or "")):
             return (4, 0)
+        if name.endswith(".zip"):
+            return (5, 0)
+        if name.endswith(".exe"):
+            return (6, 0)
         return (9, 0)
 
     ranked = sorted(assets, key=score)
@@ -153,16 +159,17 @@ def _download(url: str, dest: Path) -> None:
 
 def _extract_exe_from_zip(zip_path: Path, dest_exe: Path) -> Path:
     with zipfile.ZipFile(zip_path, "r") as zf:
-        # Prefer PalMod.exe / *Mod*.exe
+        # Prefer the current PalDeck name, then accept legacy PalMod/Chinese names.
         names = [n for n in zf.namelist() if n.lower().endswith(".exe") and not n.endswith("/")]
         if not names:
             raise RuntimeError("更新包 zip 内没有 .exe")
-        preferred = None
-        for n in names:
-            base = Path(n).name.lower()
-            if base == "palmod.exe" or "palmod" in base or "帕鲁" in Path(n).name:
-                preferred = n
-                break
+        preferred = next((n for n in names if Path(n).name.lower() == "paldeck.exe"), None)
+        if not preferred:
+            for n in names:
+                base = Path(n).name.lower()
+                if "paldeck" in base or base == "palmod.exe" or "palmod" in base or "帕鲁" in Path(n).name:
+                    preferred = n
+                    break
         if not preferred:
             preferred = names[0]
         target = dest_exe
@@ -185,13 +192,13 @@ def prepare_update(download_url: str | None = None) -> dict[str, Any]:
     asset = info.get("asset")
     url = download_url or (asset or {}).get("browser_download_url")
     if not url:
-        raise RuntimeError("Release 中没有可下载的更新文件（需要 PalMod.exe 或 zip）")
+        raise RuntimeError("Release 中没有可下载的更新文件（需要 PalDeck.exe、PalMod.exe 或 zip）")
 
     exe = executable_path()
     if not exe or not exe.is_file():
         # Dev mode: still download for testing into data/updates
         base = Path(os.environ.get("PALMOD_DATA_DIR") or Path.cwd() / "data")
-        target_exe = base / "updates" / "PalMod_update.exe"
+        target_exe = base / "updates" / "PalDeck_update.exe"
         staging_dir = base / "updates"
     else:
         staging_dir = exe.parent / "data" / "updates"
@@ -203,7 +210,7 @@ def prepare_update(download_url: str | None = None) -> dict[str, Any]:
 
     _download(url, raw_path)
 
-    new_exe = staging_dir / "PalMod_new.exe"
+    new_exe = staging_dir / "PalDeck_new.exe"
     if raw_path.suffix.lower() == ".zip":
         _extract_exe_from_zip(raw_path, new_exe)
     elif raw_path.suffix.lower() == ".exe":
