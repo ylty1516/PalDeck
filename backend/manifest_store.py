@@ -71,7 +71,8 @@ def _relative_path_key(value: Any) -> str:
     return "\\".join(part.casefold() for part in PureWindowsPath(normalized).parts)
 
 
-def _reject_reparse_ancestors(path: Path) -> Path:
+def validate_no_reparse_ancestors(path: str | os.PathLike[str]) -> Path:
+    """Return an absolute path after rejecting every existing reparse ancestor."""
     absolute = Path(os.path.abspath(path))
     ancestors: list[Path] = []
     current = absolute
@@ -84,6 +85,10 @@ def _reject_reparse_ancestors(path: Path) -> Path:
         if _is_reparse(ancestor):
             raise ValueError(f"symlink/reparse point is not allowed: {ancestor}")
     return absolute
+
+
+# Internal compatibility name retained for existing callers.
+_reject_reparse_ancestors = validate_no_reparse_ancestors
 
 
 def _manifest_file(value: Any) -> ManifestFile:

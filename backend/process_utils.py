@@ -13,6 +13,10 @@ from typing import Callable, Iterable
 _PROCESS_NAMES = {"palworld.exe", "palworld-win64-shipping.exe"}
 
 
+class ProcessCheckError(RuntimeError):
+    """The operating system process check could not be completed safely."""
+
+
 def _tasklist_process_names() -> list[str]:
     if os.name != "nt":
         return []
@@ -26,11 +30,12 @@ def _tasklist_process_names() -> list[str]:
             errors="replace",
             check=False,
             creationflags=flags,
+            timeout=10,
         )
-    except OSError:
-        return []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProcessCheckError("无法确认 Palworld 是否正在运行") from exc
     if completed.returncode:
-        return []
+        raise ProcessCheckError(f"tasklist 失败，退出码 {completed.returncode}")
     return [row[0] for row in csv.reader(completed.stdout.splitlines()) if row]
 
 
@@ -44,8 +49,10 @@ def is_palworld_running(
     provider = process_names_provider or _tasklist_process_names
     try:
         return any(str(name).casefold() in _PROCESS_NAMES for name in provider())
-    except (OSError, TypeError):
-        return False
+    except ProcessCheckError:
+        raise
+    except (OSError, TypeError) as exc:
+        raise ProcessCheckError("无法确认 Palworld 是否正在运行") from exc
 
 
 def is_directory_writable(path: str | os.PathLike[str]) -> bool:

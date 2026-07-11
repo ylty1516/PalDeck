@@ -1,4 +1,7 @@
+import json
 import os
+import threading
+import time
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -8,6 +11,7 @@ import pytest
 from backend.domain import AuditStatus, ModKind
 from backend.mod_service import GameRunningError, ModConflictError, ModService
 from backend.process_utils import (
+    ProcessCheckError,
     is_directory_writable,
     is_palworld_running,
     restart_as_admin,
@@ -41,6 +45,21 @@ def test_restart_as_admin_uses_runas_and_raises_for_shell_error(monkeypatch):
     monkeypatch.setattr(Shell, "ShellExecuteW", lambda self, *args: 5)
     with pytest.raises(OSError, match="5"):
         restart_as_admin(["manager.exe"])
+
+
+def test_tasklist_has_timeout_and_command_failure_is_fail_closed(monkeypatch):
+    from backend import process_utils
+
+    calls = []
+    monkeypatch.setattr(process_utils.os, "name", "nt")
+    monkeypatch.setattr(
+        process_utils.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(kwargs) or type("Result", (), {"returncode": 1, "stdout": ""})(),
+    )
+    with pytest.raises(ProcessCheckError):
+        is_palworld_running()
+    assert calls[0]["timeout"] == 10
 
 
 def test_restart_as_admin_rejects_non_windows(monkeypatch):
@@ -123,7 +142,7 @@ def test_partial_same_hash_group_merges_sidecar_into_existing_manifest(fake_game
 
     assert merged["id"] == original["id"]
     assert len(service.list_mods()) == 1
-    assert {item["relative_path"] for item in merged["files"]} == {"Merge.pak", "Merge.utoc"}
+    assert {item["relative_path"] for item in merged["manifest_files"]} == {"Merge.pak", "Merge.utoc"}
     service.delete(merged["id"])
     assert service.list_mods() == []
     assert not (_live(fake_game_root) / "Merge.pak").exists()
@@ -179,7 +198,7 @@ def test_direct_pak_collects_same_stem_sidecars(fake_game_root, tmp_path):
     pak.with_suffix(".ucas").write_bytes(b"ucas")
     result = _service(fake_game_root, tmp_path).install(pak, preferred_kind="logicpak")
     assert result["kind"] == "logicpak"
-    assert [item["relative_path"] for item in result["files"]] == [
+    assert [item["relative_path"] for item in result["manifest_files"]] == [
         "Direct.pak", "Direct.ucas", "Direct.utoc"
     ]
 
@@ -209,15 +228,50 @@ def test_conflict_cancel_replace_and_keep_both(fake_game_root, tmp_path):
     assert {item["id"] for item in service.list_mods()} == {replaced["id"]}
 
 
-def test_replace_refuses_unmanaged_conflict(fake_game_root, tmp_path):
+def test_identical_unmanaged_target_requires_replace_before_becoming_managed(fake_game_root, tmp_path):
+    target = _live(fake_game_root)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "Foreign.pak").write_bytes(b"same")
+    source = tmp_path / "Foreign.pak"
+    source.write_bytes(b"same")
+    service = _service(fake_game_root, tmp_path)
+
+    with pytest.raises(ModConflictError):
+        service.install(source)
+    assert service.list_mods() == []
+
+    installed = service.install(source, decision="replace")
+    assert installed["id"]
+    service.delete(installed["id"])
+    assert not (target / "Foreign.pak").exists()
+
+
+def test_mixed_managed_and_unmanaged_group_never_claims_external_file_without_confirmation(fake_game_root, tmp_path):
+    source = tmp_path / "Mixed.pak"
+    source.write_bytes(b"pak")
+    service = _service(fake_game_root, tmp_path)
+    managed = service.install(source)
+    external = _live(fake_game_root) / "Mixed.utoc"
+    external.write_bytes(b"external")
+    source.with_suffix(".utoc").write_bytes(b"external")
+
+    with pytest.raises(ModConflictError):
+        service.install(source)
+    service.delete(managed["id"])
+    assert external.read_bytes() == b"external"
+
+
+def test_explicit_replace_takes_ownership_of_unmanaged_conflict(fake_game_root, tmp_path):
     target = _live(fake_game_root)
     target.mkdir(parents=True, exist_ok=True)
     (target / "Same.pak").write_bytes(b"unmanaged")
     source = tmp_path / "Same.pak"
     source.write_bytes(b"new")
-    with pytest.raises(ModConflictError):
-        _service(fake_game_root, tmp_path).install(source, decision="replace")
-    assert (target / "Same.pak").read_bytes() == b"unmanaged"
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source, decision="replace")
+    assert (target / "Same.pak").read_bytes() == b"new"
+    service.delete(installed["id"])
+    assert not (target / "Same.pak").exists()
 
 
 @pytest.mark.parametrize("operation", ["install", "disable", "enable", "delete", "rescan"])
@@ -364,7 +418,7 @@ def test_rescan_groups_sidecars_is_idempotent_and_ignores_orphans(fake_game_root
     second = service.rescan()
     assert len(first) == len(second) == 1
     assert first[0]["id"] == second[0]["id"]
-    assert {f["relative_path"] for f in first[0]["files"]} == {"Found.pak", "Found.utoc"}
+    assert {f["relative_path"] for f in first[0]["manifest_files"]} == {"Found.pak", "Found.utoc"}
 
 
 def test_list_mods_returns_real_audit(fake_game_root, tmp_path):
@@ -376,6 +430,108 @@ def test_list_mods_returns_real_audit(fake_game_root, tmp_path):
     listed = service.list_mods()
     assert listed[0]["id"] == item["id"]
     assert listed[0]["audit"] == {"manifest_id": item["id"], "status": AuditStatus.MODIFIED.value}
+
+
+def test_transaction_lock_is_reentrant_in_same_thread(fake_game_root, tmp_path):
+    service = _service(fake_game_root, tmp_path)
+    with service._transaction_lock(timeout=0.1):
+        with service._transaction_lock(timeout=0.1):
+            pass
+    assert not (tmp_path / "data" / ".mod-service.lock").exists()
+
+
+def test_two_services_serialize_writes_without_deleting_each_others_manifests(fake_game_root, tmp_path, monkeypatch):
+    first_source = tmp_path / "First.pak"
+    second_source = tmp_path / "Second.pak"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    first = _service(fake_game_root, tmp_path)
+    second = _service(fake_game_root, tmp_path)
+    entered = threading.Event()
+    original_create = first.store.create
+
+    def delayed_create(*args, **kwargs):
+        entered.set()
+        time.sleep(0.2)
+        return original_create(*args, **kwargs)
+    monkeypatch.setattr(first.store, "create", delayed_create)
+    errors = []
+    one = threading.Thread(target=lambda: first.install(first_source), daemon=True)
+    two = threading.Thread(target=lambda: second.install(second_source), daemon=True)
+    one.start()
+    assert entered.wait(2)
+    two.start()
+    one.join(5)
+    two.join(5)
+    assert not errors
+    assert {item["name"] for item in first.list_mods()} == {"First", "Second"}
+
+
+def test_legacy_disabled_pak_migrates_once_to_disabled_storage(fake_game_root, tmp_path):
+    data = tmp_path / "data"
+    legacy = _live(fake_game_root) / "Legacy.pak.disabled"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"legacy")
+    manifest_id = "12345678123456781234567812345678"
+    data.mkdir()
+    (data / "mods_registry.json").write_text(json.dumps([{
+        "id": manifest_id, "name": "Legacy", "mod_type": "pak", "enabled": False,
+        "install_path": str(legacy), "files": [legacy.name], "source_name": "old.zip",
+    }]), encoding="utf-8")
+
+    service = ModService(fake_game_root, data, game_running=lambda: False)
+    listed = service.list_mods()
+    assert len(listed) == 1
+    assert listed[0]["status"] == "disabled"
+    assert listed[0]["files"] == ["Legacy.pak"]
+    assert (data / "disabled" / manifest_id / "Legacy.pak").read_bytes() == b"legacy"
+    assert not legacy.exists()
+    assert (data / "legacy-migration-v1.done").is_file()
+    ModService(fake_game_root, data, game_running=lambda: False)
+    assert len(service.list_mods()) == 1
+
+
+def test_legacy_disabled_migration_failure_rolls_back(fake_game_root, tmp_path, monkeypatch):
+    from backend.manifest_store import ManifestStore
+    data = tmp_path / "data"
+    data.mkdir()
+    legacy = _live(fake_game_root) / "Fail.pak.disabled"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"legacy")
+    (data / "mods_registry.json").write_text(json.dumps([{
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "Fail", "mod_type": "pak",
+        "enabled": False, "install_path": str(legacy), "files": [legacy.name],
+    }]), encoding="utf-8")
+    monkeypatch.setattr(ManifestStore, "save", lambda *args: (_ for _ in ()).throw(OSError("migration save failed")))
+
+    with pytest.raises(OSError, match="migration save failed"):
+        ModService(fake_game_root, data, game_running=lambda: False)
+    assert legacy.read_bytes() == b"legacy"
+    assert not (data / "legacy-migration-v1.done").exists()
+
+
+def test_reparse_precheck_happens_before_game_directory_creation(fake_game_root, tmp_path, monkeypatch):
+    import backend.mod_service as module
+    tilde = _live(fake_game_root)
+    if tilde.exists():
+        tilde.rmdir()
+    source = tmp_path / "Safe.pak"
+    source.write_bytes(b"pak")
+    monkeypatch.setattr(module, "validate_no_reparse_ancestors", lambda path: (_ for _ in ()).throw(ValueError("reparse")), raising=False)
+    with pytest.raises(ValueError, match="reparse"):
+        _service(fake_game_root, tmp_path).install(source)
+    assert not tilde.exists()
+
+
+def test_serialized_manifest_includes_legacy_alias_contract(fake_game_root, tmp_path):
+    source = tmp_path / "Contract.pak"
+    source.write_bytes(b"pak")
+    item = _service(fake_game_root, tmp_path).install(source, nexus_id=7)
+    required = {"id", "name", "mod_type", "enabled", "status", "install_path", "source_name", "files", "size_bytes", "notes", "nexus_id"}
+    assert required <= item.keys()
+    assert item["mod_type"] == "pak"
+    assert item["files"] == ["Contract.pak"]
+    assert item["manifest_files"][0]["relative_path"] == "Contract.pak"
 
 
 def test_mod_manager_facade_delegates_lazily(fake_game_root, tmp_path, monkeypatch):
@@ -390,7 +546,9 @@ def test_mod_manager_facade_delegates_lazily(fake_game_root, tmp_path, monkeypat
         def list_mods(self): calls.append(("list", (), {})); return []
     monkeypatch.setattr(mod_manager, "_mod_service_instance", FakeService())
 
-    assert mod_manager.import_mod_file("x.pak", preferred_type="pak") == {"ok": True}
+    imported = mod_manager.import_mod_file("x.pak", preferred_type="pak")
+    assert imported["ok"] is True
+    assert imported["mod"] == {"ok": True}
     mod_manager.set_mod_enabled("id", False)
     mod_manager.delete_mod("id")
     mod_manager.resync_from_disk()

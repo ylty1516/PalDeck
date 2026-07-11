@@ -3,24 +3,41 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Iterable
 
 from .archive_utils import inspect_and_extract
 from .domain import AuditStatus, ManifestFile, ModKind, ModManifest
 from .game_detector import ensure_mod_folders, get_mod_directories
-from .manifest_store import ManifestStore
+from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
 
 _SIDECARS = (".pak", ".utoc", ".ucas")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_LOCKS_GUARD = threading.Lock()
+_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_LOCK_DEPTHS = threading.local()
+
+
+def _locked_write(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._transaction_lock():
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class GameRunningError(RuntimeError):
@@ -65,16 +82,149 @@ class ModService:
     ) -> None:
         self.game_root = Path(game_root)
         self.data_dir = Path(data_dir)
-        self.store = ManifestStore(self.data_dir / "manifests")
+        dirs = get_mod_directories(self.game_root)
+        self.store = ManifestStore(
+            self.data_dir / "manifests",
+            known_roots=(dirs["tilde_mods"], dirs["logic_mods"]),
+        )
         self.game_running = game_running
+        self._migrate_legacy_once()
+
+    @contextmanager
+    def _transaction_lock(self, timeout: float = 10.0):
+        validate_no_reparse_ancestors(self.data_dir)
+        key = str(Path(os.path.abspath(self.data_dir))).casefold()
+        with _LOCKS_GUARD:
+            thread_lock = _THREAD_LOCKS.setdefault(key, threading.RLock())
+        if not thread_lock.acquire(timeout=timeout):
+            raise TimeoutError("等待 Mod 事务锁超时")
+        depths = getattr(_LOCK_DEPTHS, "values", None)
+        if depths is None:
+            depths = {}
+            _LOCK_DEPTHS.values = depths
+        if depths.get(key, 0):
+            depths[key] += 1
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+                thread_lock.release()
+            return
+        lock_path = self.data_dir / ".mod-service.lock"
+        acquired_file = False
+        deadline = time.monotonic() + timeout
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            while True:
+                try:
+                    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.close(descriptor)
+                    acquired_file = True
+                    depths[key] = 1
+                    break
+                except FileExistsError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("等待 Mod 跨进程事务锁超时")
+                    time.sleep(0.02)
+            yield
+        finally:
+            if acquired_file:
+                depths.pop(key, None)
+                lock_path.unlink(missing_ok=True)
+            thread_lock.release()
+
+    def _migrate_legacy_once(self) -> None:
+        legacy_path = self.data_dir / "mods_registry.json"
+        marker = self.data_dir / "legacy-migration-v1.done"
+        if marker.is_file() or not legacy_path.is_file():
+            return
+        with self._transaction_lock():
+            if marker.is_file():
+                return
+            self._assert_stopped()
+            dirs = get_mod_directories(self.game_root)
+            known = {
+                ModKind.PAK: validate_no_reparse_ancestors(dirs["tilde_mods"]),
+                ModKind.LOGICPAK: validate_no_reparse_ancestors(dirs["logic_mods"]),
+            }
+            try:
+                raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = []
+            entries = raw if isinstance(raw, list) else []
+            moved: list[tuple[Path, Path]] = []
+            created_ids: list[str] = []
+            try:
+                for item in entries:
+                    if not isinstance(item, dict):
+                        continue
+                    source = Path(str(item.get("install_path", "")))
+                    if not source.name.casefold().endswith(".pak.disabled") or not source.is_file():
+                        continue
+                    try:
+                        manifest_id = uuid.UUID(str(item.get("id", ""))).hex
+                        kind = ModKind(str(item.get("mod_type", "pak")))
+                    except ValueError:
+                        continue
+                    if kind not in known:
+                        continue
+                    safe_source = validate_no_reparse_ancestors(source)
+                    if safe_source.parent.resolve() != known[kind].resolve():
+                        continue
+                    try:
+                        self.store.get(manifest_id)
+                        continue
+                    except KeyError:
+                        pass
+                    relative_name = source.name[:-len(".disabled")]
+                    disabled = self.data_dir / "disabled" / manifest_id / relative_name
+                    validate_no_reparse_ancestors(disabled)
+                    disabled.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, disabled)
+                    moved.append((disabled, source))
+                    manifest = ModManifest(
+                        id=manifest_id,
+                        name=str(item.get("name", source.stem)),
+                        kind=kind,
+                        install_root=safe_source.parent.resolve(),
+                        source_name=str(item.get("source_name", source.name)),
+                        nexus_id=item.get("nexus_id") if type(item.get("nexus_id")) is int else None,
+                        installed_at=str(item.get("installed_at") or datetime.now(timezone.utc).isoformat()),
+                        enabled=False,
+                        files=(ManifestFile(relative_name, disabled.stat().st_size, _sha256(disabled)),),
+                    )
+                    self.store.save(manifest)
+                    created_ids.append(manifest_id)
+                self.store.migrate_legacy_registry(legacy_path)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                temporary = marker.with_name(f".{marker.name}.tmp")
+                temporary.write_text("1\n", encoding="ascii")
+                os.replace(temporary, marker)
+            except BaseException:
+                marker.with_name(f".{marker.name}.tmp").unlink(missing_ok=True)
+                for manifest_id in created_ids:
+                    self.store.delete(manifest_id)
+                for disabled, source in reversed(moved):
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    if disabled.exists():
+                        os.replace(disabled, source)
+                raise
 
     def _assert_stopped(self) -> None:
         if self.game_running():
             raise GameRunningError("幻兽帕鲁正在运行，无法修改模组")
 
     def _prepare_dirs(self) -> dict[str, Path]:
-        ensure_mod_folders(self.game_root)
         dirs = get_mod_directories(self.game_root)
+        for path in (
+            self.game_root,
+            dirs["tilde_mods"],
+            dirs["logic_mods"],
+            dirs["ue4ss_mods"],
+            self.data_dir,
+        ):
+            validate_no_reparse_ancestors(path)
+        ensure_mod_folders(self.game_root)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "staging").mkdir(parents=True, exist_ok=True)
         for path in (dirs["tilde_mods"], dirs["logic_mods"], self.data_dir):
@@ -100,7 +250,18 @@ class ModService:
         value = asdict(manifest)
         value["kind"] = manifest.kind.value
         value["install_root"] = str(manifest.install_root)
-        value["files"] = [asdict(item) for item in manifest.files]
+        value["manifest_files"] = [asdict(item) for item in manifest.files]
+        value["mod_type"] = manifest.kind.value
+        value["status"] = audit.status.value
+        value["enabled"] = manifest.enabled
+        value["install_path"] = str(
+            manifest.install_root / manifest.files[0].relative_path
+            if len(manifest.files) == 1
+            else manifest.install_root
+        )
+        value["files"] = [item.relative_path for item in manifest.files]
+        value["size_bytes"] = sum(item.size for item in manifest.files)
+        value["notes"] = "由 Palworld Mod Manager 管理"
         if manifest.ue4ss_enabled_txt is not None:
             value["ue4ss_enabled_txt"] = asdict(manifest.ue4ss_enabled_txt)
         value["audit"] = {
@@ -132,6 +293,7 @@ class ModService:
                 return manifest
         return None
 
+    @_locked_write
     def install(
         self,
         source: str | os.PathLike[str],
@@ -150,7 +312,6 @@ class ModService:
 
         transaction = self.data_dir / "staging" / uuid.uuid4().hex
         transaction.mkdir(parents=True)
-        manifest_before = {path.name for path in self.store.manifests_dir.glob("*.json")} if self.store.manifests_dir.is_dir() else set()
         published: list[Path] = []
         temporary_files: list[Path] = []
         backups: list[tuple[Path, Path]] = []
@@ -197,13 +358,9 @@ class ModService:
                 _sha256(incoming) == _sha256(destination)
                 for incoming, destination in overlaps
             )
+            has_unmanaged_overlap = any(owner is None for owner in overlap_owners)
             if identical_overlaps:
-                if owner_ids and any(owner is None for owner in overlap_owners):
-                    raise ModConflictError({
-                        "files": [str(destination) for _, destination in overlaps],
-                        "choices": ["cancel"],
-                    })
-                if len(owner_ids) == 1:
+                if len(owner_ids) == 1 and not has_unmanaged_overlap:
                     owner = next(owner for owner in overlap_owners if owner is not None)
                     if len(overlaps) == len(planned):
                         return self._listed(owner)
@@ -225,6 +382,9 @@ class ModService:
                 for incoming, destination in planned
                 if destination.exists() and _sha256(incoming) != _sha256(destination)
             ]
+            if has_unmanaged_overlap:
+                # Replacing a mixed group must republish every overlap so no file is shared.
+                conflicts = overlaps
             if conflicts:
                 details = {
                     "files": [str(destination) for _, destination in conflicts],
@@ -249,11 +409,6 @@ class ModService:
                         for _, destination in conflicts
                         if (owner := self._owned_by(manifests, destination)) is not None
                     }
-                    if len(owners) == 0 or any(
-                        self._owned_by(manifests, destination) is None
-                        for _, destination in conflicts
-                    ):
-                        raise ModConflictError(details)
                     old_manifests = owners
                     backup_root = transaction / "backup"
                     for owner in owners.values():
@@ -264,6 +419,13 @@ class ModService:
                                 backup.parent.mkdir(parents=True, exist_ok=True)
                                 os.replace(live, backup)
                                 backups.append((backup, live))
+                    owned_paths = {original.resolve() for _, original in backups}
+                    for _, destination in conflicts:
+                        if destination.is_file() and destination.resolve() not in owned_paths:
+                            backup = backup_root / "unmanaged" / destination.name
+                            backup.parent.mkdir(parents=True, exist_ok=True)
+                            os.replace(destination, backup)
+                            backups.append((backup, destination))
 
             for incoming, destination in planned:
                 if destination.exists():
@@ -320,14 +482,11 @@ class ModService:
                 rollback_path = merge_path.with_name(f".{merge_path.name}.rollback.tmp")
                 rollback_path.write_bytes(merge_manifest_bytes)
                 os.replace(rollback_path, merge_path)
-            if self.store.manifests_dir.is_dir():
-                for path in self.store.manifests_dir.glob("*.json"):
-                    if path.name not in manifest_before:
-                        path.unlink(missing_ok=True)
             raise
         finally:
             shutil.rmtree(transaction, ignore_errors=True)
 
+    @_locked_write
     def set_enabled(self, manifest_id: str, enabled: bool) -> dict[str, object]:
         self._assert_stopped()
         self._prepare_dirs()
@@ -418,6 +577,7 @@ class ModService:
                 break
             current = current.parent
 
+    @_locked_write
     def delete(self, manifest_id: str, force_modified: bool = False) -> dict[str, object]:
         self._assert_stopped()
         self._prepare_dirs()
@@ -452,6 +612,7 @@ class ModService:
             self._remove_empty_parents(original, stop)
         return {"ok": True, "deleted": manifest.id}
 
+    @_locked_write
     def rescan(self) -> list[dict[str, object]]:
         self._assert_stopped()
         self._prepare_dirs()

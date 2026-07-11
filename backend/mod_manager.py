@@ -111,13 +111,14 @@ def import_mod_file(
     nexus_id: int | None = None,
     decision: str = "cancel",
 ) -> dict[str, object]:
-    return _get_mod_service().install(
+    installed = _get_mod_service().install(
         file_path,
         preferred_kind=preferred_type,
         display_name=display_name,
         nexus_id=nexus_id,
         decision=decision,
     )
+    return {**installed, "ok": True, "mod": installed}
 
 
 def set_mod_enabled(mod_id: str, enabled: bool) -> dict[str, object]:
