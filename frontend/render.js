@@ -82,24 +82,33 @@ export function renderNexus(container, mods) {
   if (!mods.length) return renderMessage(container, "没有找到相关模组。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
-    const card = el("article", "nexus-card glass-panel");
+    const adult = mod.adultContent === true;
+    const card = el("article", `nexus-card glass-panel${adult ? " adult-hidden" : ""}`);
     const image = el("div", "nexus-image");
-    if (typeof mod.picture_url === "string" && /^https?:\/\//i.test(mod.picture_url)) {
-      image.style.backgroundImage = `url(${JSON.stringify(mod.picture_url)})`;
+    if (typeof mod.picture_url === "string" && /^https:\/\//i.test(mod.picture_url)) {
+      const picture = el("img", "nexus-picture");
+      picture.src = mod.picture_url;
+      picture.alt = "";
+      picture.loading = "lazy";
+      picture.referrerPolicy = "no-referrer";
+      picture.addEventListener("error", () => picture.remove(), { once: true });
+      image.append(picture);
     }
-    image.append(el("span", "badge", `#${mod.mod_id ?? mod.nexus_id ?? "-"}`));
+    image.append(el("span", "badge", `#${mod.nexus_id ?? "-"}`));
+    if (adult) image.append(el("span", "adult-label", "成人内容"));
     const body = el("div", "nexus-body");
     body.append(el("h3", "mod-title", mod.name || "未命名"), el("p", "nexus-summary", mod.summary || "暂无简介"));
-    const meta = el("p", "mod-meta", `下载 ${Number(mod.downloads || 0).toLocaleString("zh-CN")} · 作者 ${mod.author || "?"}`);
-    body.append(meta);
+    const stats = `作者 ${mod.author || "未知"} · 版本 ${mod.version || "未知"} · 下载 ${Number(mod.downloads || 0).toLocaleString("zh-CN")} · 推荐 ${Number(mod.endorsements || 0).toLocaleString("zh-CN")}`;
+    body.append(el("p", "mod-meta", stats));
     const actions = el("div", "button-row");
-    const id = String(mod.mod_id ?? mod.nexus_id ?? "");
+    const id = String(mod.nexus_id ?? "");
     const open = actionButton("打开 N 网", "openNexus", "btn");
     open.dataset.url = typeof mod.url === "string" ? mod.url : `https://www.nexusmods.com/palworld/mods/${encodeURIComponent(id)}`;
     const copy = actionButton("复制尾号", "copyNexusId", "btn");
     copy.dataset.id = id;
     copy.append(text(` #${id}`));
     actions.append(open, copy);
+    if (adult) actions.append(actionButton("显示成人内容", "revealAdult", "btn"));
     body.append(actions);
     card.append(image, body);
     fragment.append(card);

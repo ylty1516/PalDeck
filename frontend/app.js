@@ -11,7 +11,7 @@ const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
-  nexusRequestSequence: 0,
+  nexusRequestSequence: 0, nexusMode: "downloads",
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
@@ -62,7 +62,7 @@ async function switchView(name) {
   $("#viewTitle").textContent = copy[0];
   $("#viewSubtitle").textContent = copy[1];
   if (name === "mods") await loadMods();
-  if (name === "nexus" && !state.nexus.length) await loadNexus("popular");
+  if (name === "nexus") await loadNexus(state.nexusMode, true);
   if (name === "settings") await loadSettings();
 }
 
@@ -276,15 +276,22 @@ async function copyNexusId(target) {
   }
 }
 
-async function loadNexus(mode = "popular") {
+async function loadNexus(mode = "downloads", force = false) {
   const sequence = ++state.nexusRequestSequence;
   $("#nexusStatus").textContent = "正在连接 Nexus Mods…";
   const query = $("#nexusQuery").value.trim();
-  const path = mode === "search" ? `/api/nexus/search?q=${encodeURIComponent(query)}&count=24` : mode === "latest" ? "/api/nexus/latest?count=24" : "/api/nexus/popular?sort=downloads&count=24";
-  const nexus = await request(path);
+  state.nexusMode = mode;
+  const forceQuery = force ? "&force=1" : "";
+  const path = mode === "search"
+    ? `/api/nexus/search?q=${encodeURIComponent(query)}&count=24${forceQuery}`
+    : `/api/nexus/popular?sort=${encodeURIComponent(mode)}&count=24${forceQuery}`;
+  const result = await request(path);
   if (sequence !== state.nexusRequestSequence) return false;
-  state.nexus = nexus;
-  $("#nexusStatus").textContent = `已加载 ${state.nexus.length} 个模组`;
+  state.nexus = Array.isArray(result.items) ? result.items : [];
+  const source = result.source === "live" ? "实时" : (result.stale ? "过期缓存" : "缓存");
+  const fetched = result.fetched_at ? new Date(result.fetched_at).toLocaleString("zh-CN") : "未知时间";
+  const warning = result.warning ? ` · 警告：${result.warning}` : "";
+  $("#nexusStatus").textContent = `${source} · ${fetched} · ${state.nexus.length} 个模组${warning}`;
   renderNexus($("#nexusGrid"), state.nexus);
   return true;
 }
@@ -336,9 +343,11 @@ export const ACTION_HANDLERS = Object.freeze({
   editImportNexusId: noop,
   importMod: async () => importSelected(),
   editNexusQuery: noop,
-  searchNexus: async () => loadNexus("search"),
-  refreshNexus: async () => loadNexus("popular"),
-  latestNexus: async () => loadNexus("latest"),
+  searchNexus: async () => loadNexus("search", true),
+  downloadsNexus: async () => loadNexus("downloads", true),
+  endorsementsNexus: async () => loadNexus("endorsements", true),
+  refreshNexus: async () => loadNexus(state.nexusMode, true),
+  latestNexus: async () => loadNexus("latest", true),
   editGamePath: noop,
   autoDetectGame: async () => { const data = await request("/api/game/detect"); renderDetectedGames($("#detectList"), data.installs || []); },
   saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); toast("游戏路径已保存", "success"); },
@@ -432,6 +441,7 @@ async function handleDynamicAction(event) {
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
       case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;
+      case "revealAdult": target.closest(".nexus-card")?.classList.remove("adult-hidden"); target.remove(); break;
       default: return;
     }
   } catch (error) { if (!["toggleMod", "openModFolder", "openNexus", "copyNexusId"].includes(target.dataset.dynamicAction)) toast(actionableErrorMessage(error), "error"); }

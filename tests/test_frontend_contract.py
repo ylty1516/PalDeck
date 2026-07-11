@@ -21,7 +21,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "useGamePath", "openNexus", "copyNexusId"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "useGamePath", "openNexus", "copyNexusId", "revealAdult"}
 
 
 class ContractParser(HTMLParser):
@@ -198,6 +198,24 @@ def test_request_sequences_conflict_feedback_and_nexus_validation():
     assert "validatedNexusUrl" in app
 
 
+def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_adult_reveal():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    for action in ("downloadsNexus", "endorsementsNexus", "latestNexus", "refreshNexus"):
+        assert f'data-action="{action}"' in html
+    assert "result.source" in app and "result.fetched_at" in app and "result.warning" in app
+    assert "force=1" in app
+    assert "adultContent" in render and '"revealAdult"' in render
+    assert 'case "revealAdult":' in app
+    assert 'addEventListener("error"' in render
+    assert "/^https:\\/\\//i" in render
+    assert "下载" in render and "推荐" in render and "版本" in render and "作者" in render
+    assert ".adult-hidden" in css and "filter: blur" in css
+    assert "下载模组" not in render
+
+
 def test_nexus_url_validator_executable_contract():
     script = """
       import { validatedNexusUrl } from './frontend/render.js';
@@ -234,7 +252,7 @@ def test_resize_is_single_raf_throttled_and_destroy_cancels_pending_resize():
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
     app = APP.read_text(encoding="utf-8")
     assert "async function switchView" in app
-    for call in ("await loadMods()", "await loadNexus(\"popular\")", "await loadSettings()"):
+    for call in ("await loadMods()", "await loadNexus(state.nexusMode, true)", "await loadSettings()"):
         assert call in app
     assert "showMods: async () => switchView" in app
 

@@ -84,6 +84,7 @@ def create_app(
         default_background = _resolve_root() / "assets" / "default-background.webp"
     appearance = AppearanceService(writable, default_background)
     app.extensions["appearance_service"] = appearance
+    app.extensions["nexus_catalog"] = nexus_api.NexusCatalog(writable / "nexus-cache")
 
     game_path = os.environ.get("PALMOD_GAME_PATH")
     if not game_path:
@@ -479,32 +480,52 @@ def create_app(
         return success(result)
 
     def nexus_count() -> int:
-        try:
-            count = int(request.args.get("count", 24))
-        except (TypeError, ValueError) as exc:
-            raise ApiError("count 必须是整数", 400, "invalid_input") from exc
-        if not 1 <= count <= 100:
-            raise ApiError("count 必须介于 1 和 100", 400, "invalid_input")
+        raw = request.args.get("count", "24")
+        if not raw.isdecimal():
+            raise ApiError("count 必须是整数", 400, "invalid_input")
+        count = int(raw)
+        if not 1 <= count <= 50:
+            raise ApiError("count 必须介于 1 和 50", 400, "invalid_input")
         return count
+
+    def nexus_force() -> bool:
+        raw = request.args.get("force", "0").casefold()
+        if raw not in {"0", "1", "false", "true"}:
+            raise ApiError("force 必须是布尔值", 400, "invalid_input")
+        return raw in {"1", "true"}
+
+    def nexus_result(call):
+        try:
+            return success(call())
+        except ValueError as exc:
+            raise ApiError(str(exc), 400, "invalid_input") from exc
+        except ApiError:
+            raise
+        except Exception as exc:
+            app.logger.warning("Nexus request failed", exc_info=exc)
+            return failure(str(exc) or "Nexus 请求失败", 502, "upstream_error")
 
     @app.get("/api/nexus/popular")
     def nexus_popular():
-        count = nexus_count()
-        return upstream(lambda: nexus_api.fetch_popular(count=count, sort=request.args.get("sort", "downloads")))
+        sort = request.args.get("sort", "downloads")
+        if sort not in {"downloads", "endorsements", "latest"}:
+            raise ApiError("sort 必须是 downloads、endorsements 或 latest", 400, "invalid_input")
+        return nexus_result(lambda: app.extensions["nexus_catalog"].popular(
+            sort=sort, force=nexus_force(), count=nexus_count()))
 
     @app.get("/api/nexus/latest")
     def nexus_latest():
-        count = nexus_count()
-        return upstream(lambda: nexus_api.fetch_latest(count=count))
+        return nexus_result(lambda: app.extensions["nexus_catalog"].popular(
+            sort="latest", force=nexus_force(), count=nexus_count()))
 
     @app.get("/api/nexus/search")
     def nexus_search():
-        count = nexus_count()
-        return upstream(lambda: nexus_api.search_mods(request.args.get("q", ""), count=count))
+        return nexus_result(lambda: app.extensions["nexus_catalog"].search(
+            request.args.get("q", ""), force=nexus_force(), count=nexus_count()))
 
     @app.get("/api/nexus/mod/<int:mod_id>")
     def nexus_mod(mod_id: int):
-        return upstream(lambda: nexus_api.get_mod(mod_id))
+        return nexus_result(lambda: app.extensions["nexus_catalog"].get(mod_id, force=nexus_force()))
 
     @app.post("/api/system/restart-admin")
     def restart_admin():
