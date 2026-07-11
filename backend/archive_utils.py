@@ -78,12 +78,15 @@ def _validate_entries(
     if policy.max_files < 0 or policy.max_single_bytes < 0 or policy.max_total_bytes < 0:
         raise ValueError("解包限制不能为负数")
 
-    files = 0
+    entries = 0
     total = 0
     canonical_paths: set[tuple[str, ...]] = set()
     validated: list[tuple[zipfile.ZipInfo, tuple[str, ...], Path]] = []
     for info in infos:
         parts = _safe_parts(info)
+        entries += 1
+        if entries > policy.max_files:
+            raise ValueError(f"ZIP 文件数/条目数超过限制（最多 {policy.max_files} 个文件或目录）")
         canonical = tuple(part.rstrip(". ").casefold() for part in parts)
         if canonical in canonical_paths:
             raise ValueError(f"ZIP 包含 Windows 规范化后发生碰撞的路径：{info.filename!r}")
@@ -98,9 +101,6 @@ def _validate_entries(
             raise ValueError(f"ZIP 条目路径逃逸目标目录：{info.filename!r}")
 
         if not info.is_dir():
-            files += 1
-            if files > policy.max_files:
-                raise ValueError(f"ZIP 文件数超过限制（最多 {policy.max_files} 个）")
             if info.file_size > policy.max_single_bytes:
                 raise ValueError(
                     f"ZIP 单个文件声明大小超过限制（最多 {policy.max_single_bytes} 字节）"
@@ -219,7 +219,6 @@ def _is_reparse_path(path: Path) -> bool:
 def _assert_safe_chain(root: Path, target: Path) -> None:
     if not target.is_relative_to(root):
         raise _TargetError(f"目标路径逃逸私有暂存目录：{target}")
-    current = root
     for component in (Path(), *target.relative_to(root).parents[::-1], target.relative_to(root)):
         candidate = root if component == Path() else root / component
         if _is_reparse_path(candidate):
@@ -325,20 +324,6 @@ def inspect_and_extract(
         _assert_ancestor_chain_safe(destination.parent)
         if os.path.lexists(destination):
             raise _TargetError(f"目标目录已存在，请选择空的新目录：{destination}")
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            raise _TargetError(f"无法创建目标目录的父目录：{destination.parent}") from error
-        _assert_ancestor_chain_safe(destination.parent)
-        try:
-            staging = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-                )
-            )
-        except OSError as error:
-            raise _TargetError("无法创建私有目标暂存目录") from error
-        _assert_safe_chain(staging, staging)
 
         try:
             zip_file = zipfile.ZipFile(archive_path, "r")
@@ -349,9 +334,35 @@ def inspect_and_extract(
 
         with zip_file:
             try:
-                validated = _validate_entries(zip_file.infolist(), staging, selected_policy)
+                validated = _validate_entries(
+                    zip_file.infolist(), destination, selected_policy
+                )
                 inspected = _classify(validated, destination)
-                _extract(zip_file, validated, selected_policy, staging)
+
+                try:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                except OSError as error:
+                    raise _TargetError(
+                        f"无法创建目标目录的父目录：{destination.parent}"
+                    ) from error
+                _assert_ancestor_chain_safe(destination.parent)
+                try:
+                    staging = Path(
+                        tempfile.mkdtemp(
+                            prefix=f".{destination.name}.",
+                            suffix=".tmp",
+                            dir=destination.parent,
+                        )
+                    )
+                except OSError as error:
+                    raise _TargetError("无法创建私有目标暂存目录") from error
+                _assert_safe_chain(staging, staging)
+
+                staged_entries = [
+                    (info, parts, staging.joinpath(*parts))
+                    for info, parts, _ in validated
+                ]
+                _extract(zip_file, staged_entries, selected_policy, staging)
             except _ARCHIVE_ERRORS as error:
                 raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
 

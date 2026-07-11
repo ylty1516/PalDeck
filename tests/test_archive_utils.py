@@ -84,6 +84,28 @@ def test_rejects_file_count_limit(tmp_path: Path) -> None:
     assert not (tmp_path / "out").exists()
 
 
+def test_file_count_limit_includes_directory_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "directories.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("one/", b"")
+        archive.writestr("one/two/", b"")
+        archive.writestr("one/two/mod.pak", b"pak")
+    dest = tmp_path / "out"
+
+    def must_not_create_staging(*args, **kwargs):
+        raise AssertionError("entry limit must be checked before staging creation")
+
+    monkeypatch.setattr(archive_utils.tempfile, "mkdtemp", must_not_create_staging)
+
+    with pytest.raises(ValueError, match="文件数|条目数"):
+        inspect_and_extract(archive_path, dest, ArchivePolicy(max_files=1))
+
+    assert not dest.exists()
+    assert not list(tmp_path.glob(".out.*.tmp"))
+
+
 def test_rejects_declared_single_file_size_limit(tmp_path: Path) -> None:
     archive = make_zip(tmp_path / "large.zip", {"large.pak": b"12345"})
 
