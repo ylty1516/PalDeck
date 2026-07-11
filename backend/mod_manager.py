@@ -55,7 +55,7 @@ def get_manifest_store():
     if _manifest_store_instance is None:
         from .manifest_store import ManifestStore
 
-        _manifest_store_instance = ManifestStore(DATA_DIR)
+        _manifest_store_instance = ManifestStore(DATA_DIR / "manifests")
     return _manifest_store_instance
 
 

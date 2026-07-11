@@ -8,15 +8,21 @@ import os
 import re
 import stat
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 
 from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
 from .storage import JsonStore
 
 _REPARSE_POINT = 0x400
+_WINDOWS_FORBIDDEN = re.compile(r'[<>:"|?*\x00-\x1f]')
+_WINDOWS_DEVICES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 
 def _sha256(path: Path) -> str:
@@ -49,12 +55,35 @@ def _relative_path_key(value: Any) -> str:
     if type(value) is not str or not value:
         raise ValueError("relative_path must be a non-empty string")
     windows_path = PureWindowsPath(value)
-    posix_path = PurePosixPath(value.replace("\\", "/"))
     if windows_path.is_absolute() or windows_path.drive or windows_path.root:
         raise ValueError("relative_path must be purely relative")
-    if posix_path.is_absolute() or any(part in ("", ".", "..") for part in posix_path.parts):
+    components = windows_path.parts
+    if not components or any(part in ("", ".", "..") for part in components):
         raise ValueError("relative_path must be purely relative and contain no '..'")
-    return ntpath.normcase(ntpath.normpath(value.replace("/", "\\")))
+    for component in components:
+        if _WINDOWS_FORBIDDEN.search(component):
+            raise ValueError("relative_path contains a Windows-invalid character or ADS")
+        if component.endswith((".", " ")):
+            raise ValueError("relative_path component cannot end in a dot or space")
+        if component.split(".", 1)[0].casefold() in _WINDOWS_DEVICES:
+            raise ValueError("relative_path contains a reserved Windows device name")
+    normalized = ntpath.normpath(value.replace("/", "\\"))
+    return "\\".join(part.casefold() for part in PureWindowsPath(normalized).parts)
+
+
+def _reject_reparse_ancestors(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    ancestors: list[Path] = []
+    current = absolute
+    while True:
+        ancestors.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for ancestor in reversed(ancestors):
+        if _is_reparse(ancestor):
+            raise ValueError(f"symlink/reparse point is not allowed: {ancestor}")
+    return absolute
 
 
 def _manifest_file(value: Any) -> ManifestFile:
@@ -84,9 +113,14 @@ def _installed_datetime(value: Any) -> datetime:
 
 
 class ManifestStore:
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        known_roots: Iterable[str | os.PathLike[str]] | None = None,
+    ) -> None:
         self.root = Path(root)
-        self.manifests_dir = self.root / "manifests"
+        self.manifests_dir = self.root
+        self.known_roots = tuple(Path(path) for path in (known_roots or ()))
 
     def _path(self, manifest_id: str) -> Path:
         try:
@@ -101,15 +135,7 @@ class ManifestStore:
 
     @staticmethod
     def _validated_file(path: Path, root: Path) -> tuple[Path, str]:
-        candidate = Path(path)
-        # Check every existing lexical component before resolve follows it.
-        current = candidate
-        while True:
-            if _is_reparse(current):
-                raise ValueError(f"symlink/reparse point is not allowed: {candidate}")
-            if current == root or current.parent == current:
-                break
-            current = current.parent
+        candidate = _reject_reparse_ancestors(Path(path))
         try:
             resolved = candidate.resolve(strict=True)
         except OSError as exc:
@@ -119,24 +145,24 @@ class ManifestStore:
         if not resolved.is_file() or _is_reparse(resolved):
             raise ValueError(f"not a regular file: {candidate}")
         relative = resolved.relative_to(root).as_posix()
+        _relative_path_key(relative)
         return resolved, relative
 
-    def create(
+    def _build_manifest(
         self,
-        *,
         name: str,
         kind: ModKind,
         install_root: str | os.PathLike[str],
         files: Iterable[str | os.PathLike[str]],
+        *,
+        manifest_id: str,
         source_name: str = "",
         nexus_id: int | None = None,
         installed_at: str | None = None,
         enabled: bool = True,
         ue4ss_enabled_txt: str | os.PathLike[str] | None = None,
     ) -> ModManifest:
-        root_path = Path(install_root)
-        if _is_reparse(root_path):
-            raise ValueError("install_root cannot be a symlink/reparse point")
+        root_path = _reject_reparse_ancestors(Path(install_root))
         try:
             resolved_root = root_path.resolve(strict=True)
         except OSError as exc:
@@ -146,14 +172,12 @@ class ManifestStore:
 
         records: list[ManifestFile] = []
         seen: set[str] = set()
-        path_by_relative: dict[str, Path] = {}
         for supplied in files:
             resolved, relative = self._validated_file(Path(supplied), resolved_root)
-            normalized = relative.casefold() if os.name == "nt" else relative
+            normalized = _relative_path_key(relative)
             if normalized in seen:
                 raise ValueError(f"duplicate normalized path: {relative}")
             seen.add(normalized)
-            path_by_relative[relative] = resolved
             records.append(self._record(resolved, relative))
         if not records:
             raise ValueError("at least one file is required")
@@ -164,8 +188,8 @@ class ManifestStore:
             resolved, relative = self._validated_file(Path(ue4ss_enabled_txt), resolved_root)
             enabled_record = self._record(resolved, relative)
 
-        manifest = ModManifest(
-            id=uuid.uuid4().hex,
+        return ModManifest(
+            id=uuid.UUID(manifest_id).hex,
             name=name,
             kind=ModKind(kind),
             install_root=resolved_root,
@@ -175,6 +199,31 @@ class ManifestStore:
             enabled=bool(enabled),
             files=tuple(records),
             ue4ss_enabled_txt=enabled_record,
+        )
+
+    def create(
+        self,
+        name: str,
+        kind: ModKind,
+        install_root: str | os.PathLike[str],
+        files: Iterable[str | os.PathLike[str]],
+        source_name: str = "",
+        nexus_id: int | None = None,
+        installed_at: str | None = None,
+        enabled: bool = True,
+        ue4ss_enabled_txt: str | os.PathLike[str] | None = None,
+    ) -> ModManifest:
+        manifest = self._build_manifest(
+            name,
+            kind,
+            install_root,
+            files,
+            manifest_id=uuid.uuid4().hex,
+            source_name=source_name,
+            nexus_id=nexus_id,
+            installed_at=installed_at,
+            enabled=enabled,
+            ue4ss_enabled_txt=ue4ss_enabled_txt,
         )
         self.save(manifest)
         return manifest
@@ -304,26 +353,22 @@ class ManifestStore:
     @staticmethod
     def _audit_path(root: Path, relative_path: str) -> Path:
         _relative_path_key(relative_path)
-        resolved_root = root.resolve(strict=False)
-        if _is_reparse(root):
-            raise ValueError(f"symlink/reparse point is not allowed: {root}")
-        candidate = resolved_root / Path(relative_path)
-        current = candidate
-        while current != resolved_root:
-            if _is_reparse(current):
-                raise ValueError(f"symlink/reparse point is not allowed: {candidate}")
-            if current.parent == current:
-                raise ValueError("relative_path resolves outside its root")
-            current = current.parent
+        lexical_root = _reject_reparse_ancestors(root)
+        resolved_root = lexical_root.resolve(strict=False)
+        candidate = _reject_reparse_ancestors(resolved_root / Path(relative_path))
         resolved = candidate.resolve(strict=False)
         if not _inside(resolved, resolved_root):
             raise ValueError("relative_path resolves outside its root")
         return resolved
 
-    def audit(self, manifest_id: str) -> ManifestAudit:
-        manifest = self.get(manifest_id)
+    def audit(self, manifest_or_id: ModManifest | str) -> ManifestAudit:
+        manifest = (
+            manifest_or_id
+            if isinstance(manifest_or_id, ModManifest)
+            else self.get(manifest_or_id)
+        )
         live_root = manifest.install_root
-        alternate_root = self.root / "disabled" / manifest.id
+        alternate_root = self.root.parent / "disabled" / manifest.id
         live_count = disabled_count = 0
         changed = False
         for expected in manifest.files:
@@ -352,18 +397,22 @@ class ManifestStore:
     def migrate_legacy_registry(
         self,
         legacy_path: str | os.PathLike[str],
-        known_roots: Iterable[str | os.PathLike[str]],
+        known_roots: Iterable[str | os.PathLike[str]] | None = None,
     ) -> list[ModManifest]:
         raw = JsonStore(legacy_path).read([])
         if not isinstance(raw, list):
             return []
+        configured_roots = self.known_roots if known_roots is None else tuple(Path(root) for root in known_roots)
+        if not configured_roots:
+            return []
         roots: list[Path] = []
-        for root in known_roots:
+        for root in configured_roots:
             try:
-                resolved = Path(root).resolve(strict=True)
-                if resolved.is_dir() and not _is_reparse(Path(root)):
+                lexical_root = _reject_reparse_ancestors(Path(root))
+                resolved = lexical_root.resolve(strict=True)
+                if resolved.is_dir():
                     roots.append(resolved)
-            except OSError:
+            except (OSError, ValueError):
                 continue
         migrated: list[ModManifest] = []
         for item in raw:
@@ -376,9 +425,7 @@ class ManifestStore:
                     continue
                 except KeyError:
                     pass
-                raw_install_path = Path(item["install_path"])
-                if _is_reparse(raw_install_path):
-                    continue
+                raw_install_path = _reject_reparse_ancestors(Path(item["install_path"]))
                 install_path = raw_install_path.resolve(strict=True)
                 if not any(_inside(install_path, root) for root in roots):
                     continue
@@ -390,11 +437,12 @@ class ManifestStore:
                     if not isinstance(names, list) or not names:
                         continue
                     files = [install_root / str(name) for name in names]
-                created = self.create(
-                    name=str(item["name"]),
-                    kind=ModKind(item["mod_type"]),
-                    install_root=install_root,
-                    files=files,
+                manifest = self._build_manifest(
+                    str(item["name"]),
+                    ModKind(item["mod_type"]),
+                    install_root,
+                    files,
+                    manifest_id=legacy_id,
                     source_name=str(item.get("source_name", "")),
                     nexus_id=item.get("nexus_id"),
                     installed_at=str(item.get("installed_at") or datetime.now(timezone.utc).isoformat()),
@@ -404,11 +452,8 @@ class ManifestStore:
                     and (install_root / "enabled.txt").is_file()
                     else None,
                 )
-                # Preserve valid legacy UUID and remove the temporary create id.
-                self.delete(created.id)
-                created = replace(created, id=legacy_id)
-                self.save(created)
-                migrated.append(created)
+                self.save(manifest)
+                migrated.append(manifest)
             except (KeyError, OSError, TypeError, ValueError):
                 continue
         return migrated
