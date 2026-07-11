@@ -91,9 +91,11 @@ def validate_no_reparse_ancestors(path: str | os.PathLike[str]) -> Path:
 _reject_reparse_ancestors = validate_no_reparse_ancestors
 
 
-def _manifest_file(value: Any) -> ManifestFile:
+def _manifest_file(value: Any, *, strict: bool = False) -> ManifestFile:
     if not isinstance(value, dict):
         raise ValueError("file entry must be an object")
+    if strict and set(value) != {"relative_path", "size", "sha256"}:
+        raise ValueError("file entry must contain exactly relative_path, size and sha256")
     relative_path = value.get("relative_path")
     _relative_path_key(relative_path)
     size = value.get("size")
@@ -285,7 +287,11 @@ class ManifestStore:
         if len(keys) != len(set(keys)):
             raise ValueError("files contain duplicate Windows-normalized paths")
         enabled_value = value["ue4ss_enabled_txt"]
-        enabled_txt = _manifest_file(enabled_value) if enabled_value is not None else None
+        enabled_txt = (
+            _manifest_file(enabled_value, strict=True)
+            if enabled_value is not None
+            else None
+        )
         return ModManifest(
             id=manifest_id,
             name=value["name"],
@@ -400,6 +406,18 @@ class ManifestStore:
             status = AuditStatus.DISABLED
         else:
             status = AuditStatus.MISSING
+
+        if manifest.ue4ss_enabled_txt is not None:
+            metadata = self._audit_path(
+                alternate_root, manifest.ue4ss_enabled_txt.relative_path
+            )
+            if not metadata.is_file():
+                status = AuditStatus.MISSING
+            elif (
+                metadata.stat().st_size != manifest.ue4ss_enabled_txt.size
+                or _sha256(metadata) != manifest.ue4ss_enabled_txt.sha256
+            ):
+                status = AuditStatus.MODIFIED
         return ManifestAudit(manifest.id, status)
 
     def migrate_legacy_registry(

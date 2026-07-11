@@ -776,8 +776,12 @@ class ModService:
                         os.replace(source, backup)
                         moved.append((backup, source))
             if manifest.kind is ModKind.UE4SS:
-                metadata = disabled_root / "metadata" / "enabled.txt"
-                if metadata.is_file():
+                metadata = (
+                    disabled_root / manifest.ue4ss_enabled_txt.relative_path
+                    if manifest.ue4ss_enabled_txt is not None
+                    else None
+                )
+                if metadata is not None and metadata.is_file():
                     backup = transaction / "metadata" / "enabled.txt"
                     backup.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(metadata, backup)
@@ -807,11 +811,11 @@ class ModService:
         finally:
             shutil.rmtree(transaction, ignore_errors=True)
         for _, original in moved:
-            stop = manifest.install_root if original.is_relative_to(manifest.install_root) else self.data_dir / "disabled"
+            if manifest.kind is ModKind.UE4SS and original.is_relative_to(manifest.install_root):
+                stop = manifest.install_root.parent
+            else:
+                stop = manifest.install_root if original.is_relative_to(manifest.install_root) else self.data_dir / "disabled"
             self._remove_empty_parents(original, stop)
-        if manifest.kind is ModKind.UE4SS:
-            shutil.rmtree(manifest.install_root, ignore_errors=True)
-            shutil.rmtree(self.data_dir / "disabled" / manifest.id, ignore_errors=True)
         return {"ok": True, "deleted": manifest.id}
 
     @_locked_write
@@ -860,14 +864,25 @@ class ModService:
                 files = [path for path in candidate.rglob("*") if path.is_file() and not _is_reparse(path)]
                 enabled_txt = next((path for path in files if path.relative_to(candidate).as_posix().casefold() == "enabled.txt"), None)
                 payload = [path for path in files if path != enabled_txt]
-                enabled = self._mods_enabled(ue4ss_root / "mods.txt", candidate.name)
-                manifest = self.store.create(
-                    candidate.name, ModKind.UE4SS, candidate, payload,
-                    source_name="rescan", enabled=enabled is not False,
-                )
-                if enabled_txt is not None:
-                    metadata = self.data_dir / "disabled" / manifest.id / "metadata" / "enabled.txt"
-                    try:
+                mods_txt = ue4ss_root / "mods.txt"
+                enabled = self._mods_enabled(mods_txt, candidate.name)
+                old_config = mods_txt.read_bytes() if mods_txt.is_file() else None
+                manifest: ModManifest | None = None
+                metadata: Path | None = None
+                try:
+                    if enabled is None:
+                        current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                        self._write_mods_txt(
+                            mods_txt,
+                            self._updated_mods_text(current, candidate.name, False),
+                        )
+                        enabled = False
+                    manifest = self.store.create(
+                        candidate.name, ModKind.UE4SS, candidate, payload,
+                        source_name="rescan", enabled=enabled,
+                    )
+                    if enabled_txt is not None:
+                        metadata = self.data_dir / "disabled" / manifest.id / "metadata" / "enabled.txt"
                         metadata.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(enabled_txt, metadata)
                         manifest = replace(
@@ -877,13 +892,19 @@ class ModService:
                             ),
                         )
                         self.store.save(manifest)
-                    except BaseException:
-                        if metadata.exists():
-                            enabled_txt.parent.mkdir(parents=True, exist_ok=True)
-                            os.replace(metadata, enabled_txt)
+                except BaseException:
+                    if metadata is not None and metadata.exists():
+                        enabled_txt.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(metadata, enabled_txt)
+                    if manifest is not None:
                         self.store.delete(manifest.id)
+                    if metadata is not None:
                         shutil.rmtree(metadata.parent.parent, ignore_errors=True)
-                        raise
+                    if old_config is None:
+                        mods_txt.unlink(missing_ok=True)
+                    else:
+                        mods_txt.write_bytes(old_config)
+                    raise
                 tracked_roots.add(str(candidate.resolve()).casefold())
         return self.list_mods()
 

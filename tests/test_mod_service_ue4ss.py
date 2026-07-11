@@ -131,6 +131,93 @@ def test_rescan_ue4ss_is_idempotent_and_skips_framework_builtins(fake_game_root,
     assert first[0]["kind"] == "ue4ss"
 
 
+def test_delete_ue4ss_removes_only_owned_files_and_preserves_user_additions(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, False)
+    source = _zip(tmp_path / "owned.zip", {
+        "Owned/Scripts/main.lua": b"lua",
+        "Owned/config/managed.ini": b"managed",
+        "Owned/enabled.txt": b"marker",
+    })
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    user_file = mods / "Owned" / "config" / "user.ini"
+    user_file.write_bytes(b"user")
+    metadata_note = tmp_path / "data" / "disabled" / item["id"] / "metadata" / "user-note.txt"
+    metadata_note.write_bytes(b"keep")
+
+    service.delete(item["id"])
+
+    assert user_file.read_bytes() == b"user"
+    assert not (mods / "Owned" / "Scripts").exists()
+    assert metadata_note.read_bytes() == b"keep"
+    assert not (metadata_note.parent / "enabled.txt").exists()
+
+
+def test_rescan_missing_mods_entry_adds_disabled_entry_then_can_enable(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, False)
+    script = mods / "Discovered" / "Scripts" / "main.lua"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"lua")
+    (mods / "mods.txt").write_text("Other : 1 ; keep\n", encoding="utf-8")
+    service = _service(fake_game_root, tmp_path)
+
+    [item] = service.rescan()
+
+    assert item["enabled"] is False
+    assert item["status"] == "disabled"
+    assert (mods / "mods.txt").read_text(encoding="utf-8") == (
+        "Other : 1 ; keep\nDiscovered : 0\n"
+    )
+    enabled = service.set_enabled(item["id"], True)
+    assert enabled["status"] == "enabled"
+    assert "Discovered : 1" in (mods / "mods.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("damage", ["missing", "modified"])
+def test_ue4ss_enabled_metadata_participates_in_audit(
+    fake_game_root, tmp_path, damage
+):
+    mods = _layout(fake_game_root, False)
+    source = _zip(tmp_path / "metadata.zip", {
+        "Metadata/Scripts/main.lua": b"lua",
+        "Metadata/enabled.txt": b"marker",
+    })
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    metadata = tmp_path / "data" / "disabled" / item["id"] / "metadata" / "enabled.txt"
+    if damage == "missing":
+        metadata.unlink()
+    else:
+        metadata.write_bytes(b"changed")
+
+    [listed] = service.list_mods()
+
+    assert listed["status"] == damage
+
+
+def test_ue4ss_enabled_metadata_record_is_strictly_deserialized(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, False)
+    source = _zip(tmp_path / "strict.zip", {
+        "Strict/Scripts/main.lua": b"lua",
+        "Strict/enabled.txt": b"marker",
+    })
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    manifest_path = service.store.manifests_dir / f"{item['id']}.json"
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw["ue4ss_enabled_txt"]["unexpected"] = True
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid manifest"):
+        service.store.get(item["id"])
+
+
 def test_mod_manager_facade_accepts_ue4ss_preferred_type(monkeypatch):
     calls = []
     class FakeService:
