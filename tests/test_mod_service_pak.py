@@ -112,6 +112,59 @@ def test_identical_target_hash_is_deduplicated_across_sources(fake_game_root, tm
     assert len(service.list_mods()) == 1
 
 
+def test_partial_same_hash_group_merges_sidecar_into_existing_manifest(fake_game_root, tmp_path):
+    source = tmp_path / "Merge.pak"
+    source.write_bytes(b"pak")
+    service = _service(fake_game_root, tmp_path)
+    original = service.install(source)
+    source.with_suffix(".utoc").write_bytes(b"utoc")
+
+    merged = service.install(source)
+
+    assert merged["id"] == original["id"]
+    assert len(service.list_mods()) == 1
+    assert {item["relative_path"] for item in merged["files"]} == {"Merge.pak", "Merge.utoc"}
+    service.delete(merged["id"])
+    assert service.list_mods() == []
+    assert not (_live(fake_game_root) / "Merge.pak").exists()
+    assert not (_live(fake_game_root) / "Merge.utoc").exists()
+
+
+def test_partial_group_manifest_save_failure_rolls_back_sidecar(fake_game_root, tmp_path, monkeypatch):
+    source = tmp_path / "RollbackMerge.pak"
+    source.write_bytes(b"pak")
+    service = _service(fake_game_root, tmp_path)
+    original = service.install(source)
+    source.with_suffix(".utoc").write_bytes(b"utoc")
+    monkeypatch.setattr(service.store, "save", lambda manifest: (_ for _ in ()).throw(OSError("merge save failed")))
+
+    with pytest.raises(OSError, match="merge save failed"):
+        service.install(source)
+
+    restored = service.store.get(original["id"])
+    assert [item.relative_path for item in restored.files] == ["RollbackMerge.pak"]
+    assert (_live(fake_game_root) / "RollbackMerge.pak").is_file()
+    assert not (_live(fake_game_root) / "RollbackMerge.utoc").exists()
+    assert len(service.list_mods()) == 1
+
+
+def test_partial_group_overlap_owned_by_multiple_manifests_conflicts(fake_game_root, tmp_path):
+    source = tmp_path / "Split.pak"
+    source.write_bytes(b"pak")
+    service = _service(fake_game_root, tmp_path)
+    service.install(source)
+    live_utoc = _live(fake_game_root) / "Split.utoc"
+    live_utoc.write_bytes(b"utoc")
+    service.store.create("split-sidecar", ModKind.PAK, _live(fake_game_root), [live_utoc])
+    source.with_suffix(".utoc").write_bytes(b"utoc")
+    source.with_suffix(".ucas").write_bytes(b"ucas")
+
+    with pytest.raises(ModConflictError):
+        service.install(source)
+    assert not (_live(fake_game_root) / "Split.ucas").exists()
+    assert len(service.list_mods()) == 2
+
+
 def test_logic_zip_installs_to_logicmods(fake_game_root, tmp_path):
     source = _zip(tmp_path / "logic.zip", {"LogicMods/Logic.pak": b"logic"})
     result = _service(fake_game_root, tmp_path).install(source)

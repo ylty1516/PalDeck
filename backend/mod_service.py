@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .archive_utils import inspect_and_extract
-from .domain import AuditStatus, ModKind, ModManifest
+from .domain import AuditStatus, ManifestFile, ModKind, ModManifest
 from .game_detector import ensure_mod_folders, get_mod_directories
 from .manifest_store import ManifestStore
 from .process_utils import check_directory_writable, is_palworld_running
@@ -155,6 +155,8 @@ class ModService:
         temporary_files: list[Path] = []
         backups: list[tuple[Path, Path]] = []
         old_manifests: dict[str, ModManifest] = {}
+        merge_owner: ModManifest | None = None
+        merge_manifest_bytes: bytes | None = None
         created: ModManifest | None = None
         try:
             if source_path.suffix.casefold() == ".zip":
@@ -176,13 +178,48 @@ class ModService:
 
             planned = [(path, target / path.name) for group in groups for path in group]
             manifests = self.store.list()
-            if planned and all(
-                destination.is_file() and _sha256(incoming) == _sha256(destination)
+            overlaps = [
+                (incoming, destination)
                 for incoming, destination in planned
-            ):
-                owners = [self._owned_by(manifests, destination) for _, destination in planned]
-                if owners[0] is not None and all(owner is not None and owner.id == owners[0].id for owner in owners):
-                    return self._listed(owners[0])
+                if destination.is_file()
+            ]
+            overlap_owners = [
+                self._owned_by(manifests, destination)
+                for _, destination in overlaps
+            ]
+            owner_ids = {owner.id for owner in overlap_owners if owner is not None}
+            if len(owner_ids) > 1:
+                raise ModConflictError({
+                    "files": [str(destination) for _, destination in overlaps],
+                    "choices": ["cancel"],
+                })
+            identical_overlaps = overlaps and all(
+                _sha256(incoming) == _sha256(destination)
+                for incoming, destination in overlaps
+            )
+            if identical_overlaps:
+                if owner_ids and any(owner is None for owner in overlap_owners):
+                    raise ModConflictError({
+                        "files": [str(destination) for _, destination in overlaps],
+                        "choices": ["cancel"],
+                    })
+                if len(owner_ids) == 1:
+                    owner = next(owner for owner in overlap_owners if owner is not None)
+                    if len(overlaps) == len(planned):
+                        return self._listed(owner)
+                    stems = {destination.stem.casefold() for _, destination in planned}
+                    additions = [incoming for incoming, destination in planned if not destination.exists()]
+                    if (
+                        len(stems) != 1
+                        or any(path.suffix.casefold() not in {".utoc", ".ucas"} for path in additions)
+                    ):
+                        raise ModConflictError({
+                            "files": [str(destination) for _, destination in overlaps],
+                            "choices": ["cancel"],
+                        })
+                    merge_owner = owner
+                    merge_path = self.store.manifests_dir / f"{owner.id}.json"
+                    merge_manifest_bytes = merge_path.read_bytes()
             conflicts = [
                 (incoming, destination)
                 for incoming, destination in planned
@@ -240,6 +277,19 @@ class ModService:
                 published.append(destination)
 
             installed_files = [destination for _, destination in planned]
+            if merge_owner is not None:
+                known = {item.relative_path.casefold() for item in merge_owner.files}
+                added_records = [
+                    ManifestFile(path.name, path.stat().st_size, _sha256(path))
+                    for path in published
+                    if path.name.casefold() not in known
+                ]
+                merged = replace(
+                    merge_owner,
+                    files=tuple(sorted((*merge_owner.files, *added_records), key=lambda item: item.relative_path)),
+                )
+                self.store.save(merged)
+                return self._listed(merged)
             created = self.store.create(
                 name=_safe_label(name),
                 kind=kind,
@@ -265,6 +315,11 @@ class ModService:
             for manifest in old_manifests.values():
                 if not (self.store.manifests_dir / f"{manifest.id}.json").exists():
                     self.store.save(manifest)
+            if merge_owner is not None and merge_manifest_bytes is not None:
+                merge_path = self.store.manifests_dir / f"{merge_owner.id}.json"
+                rollback_path = merge_path.with_name(f".{merge_path.name}.rollback.tmp")
+                rollback_path.write_bytes(merge_manifest_bytes)
+                os.replace(rollback_path, merge_path)
             if self.store.manifests_dir.is_dir():
                 for path in self.store.manifests_dir.glob("*.json"):
                     if path.name not in manifest_before:
