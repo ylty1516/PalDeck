@@ -6,14 +6,48 @@ from pathlib import Path
 import pytest
 
 from backend.domain import AuditStatus, ModKind
-from backend.mod_service import ModConflictError, ModService
-from backend.process_utils import is_palworld_running
+from backend.mod_service import GameRunningError, ModConflictError, ModService
+from backend.process_utils import (
+    is_directory_writable,
+    is_palworld_running,
+    restart_as_admin,
+)
 
 
 def test_process_detection_supports_safe_dependency_injection():
     assert is_palworld_running(lambda: ["other.exe", "PALWORLD.EXE"])
     assert is_palworld_running(lambda: ["Palworld-Win64-Shipping.exe"])
     assert not is_palworld_running(lambda: ["steam.exe"])
+
+
+def test_public_directory_writable_probe_cleans_up(tmp_path):
+    assert is_directory_writable(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_restart_as_admin_uses_runas_and_raises_for_shell_error(monkeypatch):
+    from backend import process_utils
+
+    calls = []
+    class Shell:
+        def ShellExecuteW(self, *args):
+            calls.append(args)
+            return 33
+    monkeypatch.setattr(process_utils.os, "name", "nt")
+    monkeypatch.setattr(process_utils.ctypes, "windll", type("Windll", (), {"shell32": Shell()})(), raising=False)
+    assert restart_as_admin(["manager.exe", "--path", "two words"]) is None
+    assert calls[0][1:4] == ("runas", "manager.exe", '--path "two words"')
+
+    monkeypatch.setattr(Shell, "ShellExecuteW", lambda self, *args: 5)
+    with pytest.raises(OSError, match="5"):
+        restart_as_admin(["manager.exe"])
+
+
+def test_restart_as_admin_rejects_non_windows(monkeypatch):
+    from backend import process_utils
+    monkeypatch.setattr(process_utils.os, "name", "posix")
+    with pytest.raises(RuntimeError, match="Windows"):
+        restart_as_admin(["manager"])
 
 
 def _service(game, tmp_path, *, running=False):
@@ -58,6 +92,24 @@ def test_zip_pak_group_install_disable_enable_delete(fake_game_root, tmp_path):
     assert service.delete(manifest_id) == {"ok": True, "deleted": manifest_id}
     assert service.list_mods() == []
     assert not any(_live(fake_game_root).iterdir())
+
+
+def test_identical_target_hash_is_deduplicated_across_sources(fake_game_root, tmp_path):
+    first = tmp_path / "one" / "Duplicate.pak"
+    second = tmp_path / "two" / "Duplicate.pak"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"same")
+    second.write_bytes(b"same")
+    service = _service(fake_game_root, tmp_path)
+
+    installed = service.install(first)
+    repeated = service.install(first)
+    other_source = service.install(second)
+
+    assert repeated["id"] == installed["id"]
+    assert other_source["id"] == installed["id"]
+    assert len(service.list_mods()) == 1
 
 
 def test_logic_zip_installs_to_logicmods(fake_game_root, tmp_path):
@@ -124,7 +176,7 @@ def test_running_game_rejects_all_mutations(fake_game_root, tmp_path, operation)
     if operation == "enable":
         stopped.set_enabled(manifest_id, False)
     running = _service(fake_game_root, tmp_path, running=True)
-    with pytest.raises(RuntimeError, match="运行"):
+    with pytest.raises(GameRunningError, match="运行"):
         if operation == "install":
             running.install(source, display_name="Other", decision="keep_both")
         elif operation == "disable":
@@ -193,6 +245,47 @@ def test_modified_delete_requires_force_and_disabled_is_supported(fake_game_root
     disabled.write_bytes(b"changed again")
     assert service.delete(item["id"], force_modified=True)["ok"] is True
     assert not disabled.exists()
+
+
+@pytest.mark.parametrize("initial_enabled", [True, False], ids=["disable", "enable"])
+@pytest.mark.parametrize("failure", ["save", "audit"])
+def test_toggle_failure_restores_files_and_manifest(fake_game_root, tmp_path, monkeypatch, initial_enabled, failure):
+    source = tmp_path / "Restore.pak"
+    source.write_bytes(b"managed")
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    if not initial_enabled:
+        service.set_enabled(item["id"], False)
+    manifest = service.store.get(item["id"])
+    original_save = service.store.save
+    original_audit = service.store.audit
+
+    if failure == "save":
+        def fail_changed(value):
+            if value.enabled != initial_enabled:
+                raise OSError("save fault")
+            return original_save(value)
+        monkeypatch.setattr(service.store, "save", fail_changed)
+    else:
+        def fail_changed_audit(value):
+            candidate = value if not isinstance(value, str) else service.store.get(value)
+            if candidate.enabled != initial_enabled:
+                raise OSError("audit fault")
+            return original_audit(value)
+        monkeypatch.setattr(service.store, "audit", fail_changed_audit)
+
+    with pytest.raises(OSError, match=f"{failure} fault"):
+        service.set_enabled(item["id"], not initial_enabled)
+
+    restored = service.store.get(item["id"])
+    assert restored.enabled is initial_enabled
+    live = _live(fake_game_root) / "Restore.pak"
+    disabled = tmp_path / "data" / "disabled" / item["id"] / "Restore.pak"
+    assert live.is_file() is initial_enabled
+    assert disabled.is_file() is (not initial_enabled)
+    if initial_enabled:
+        assert not disabled.parent.exists()
+    assert original_audit(restored).status == (AuditStatus.ENABLED if initial_enabled else AuditStatus.DISABLED)
 
 
 def test_enable_checks_conflict_before_restoring_group(fake_game_root, tmp_path):

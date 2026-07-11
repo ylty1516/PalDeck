@@ -23,6 +23,10 @@ _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+class GameRunningError(RuntimeError):
+    """A filesystem mutation was rejected while Palworld was running."""
+
+
 class ModConflictError(RuntimeError):
     def __init__(self, details: dict[str, object]):
         self.details = details
@@ -66,7 +70,7 @@ class ModService:
 
     def _assert_stopped(self) -> None:
         if self.game_running():
-            raise RuntimeError("幻兽帕鲁正在运行，无法修改模组")
+            raise GameRunningError("幻兽帕鲁正在运行，无法修改模组")
 
     def _prepare_dirs(self) -> dict[str, Path]:
         ensure_mod_folders(self.game_root)
@@ -171,6 +175,14 @@ class ModService:
                 raise OSError("磁盘空间不足，无法安装模组")
 
             planned = [(path, target / path.name) for group in groups for path in group]
+            manifests = self.store.list()
+            if planned and all(
+                destination.is_file() and _sha256(incoming) == _sha256(destination)
+                for incoming, destination in planned
+            ):
+                owners = [self._owned_by(manifests, destination) for _, destination in planned]
+                if owners[0] is not None and all(owner is not None and owner.id == owners[0].id for owner in owners):
+                    return self._listed(owners[0])
             conflicts = [
                 (incoming, destination)
                 for incoming, destination in planned
@@ -195,7 +207,6 @@ class ModService:
                             renamed.append((incoming, destination))
                     planned = renamed
                 else:
-                    manifests = self.store.list()
                     owners = {
                         owner.id: owner
                         for _, destination in conflicts
@@ -289,6 +300,9 @@ class ModService:
         transaction.mkdir(parents=True)
         moves: list[tuple[Path, Path]] = []
         changed = replace(manifest, enabled=enabled)
+        manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
+        manifest_bytes = manifest_path.read_bytes()
+        result: dict[str, object]
         try:
             if not enabled:
                 holding = transaction / "group"
@@ -319,19 +333,25 @@ class ModService:
                     os.replace(source, destination)
                     moves.append((destination, source))
             self.store.save(changed)
+            result = self._listed(changed)
         except BaseException:
             for current, original in reversed(moves):
                 original.parent.mkdir(parents=True, exist_ok=True)
                 if current.exists():
                     os.replace(current, original)
-            self.store.save(manifest)
+            rollback_manifest = manifest_path.with_name(f".{manifest_path.name}.rollback.tmp")
+            rollback_manifest.parent.mkdir(parents=True, exist_ok=True)
+            rollback_manifest.write_bytes(manifest_bytes)
+            os.replace(rollback_manifest, manifest_path)
+            if manifest.enabled:
+                self._remove_empty_parents(disabled_root, self.data_dir / "disabled")
             raise
         finally:
             shutil.rmtree(transaction, ignore_errors=True)
         if enabled:
             shutil.rmtree(disabled_root, ignore_errors=True)
         self._remove_empty_parents(disabled_root, self.data_dir / "disabled")
-        return self._listed(changed)
+        return result
 
     @staticmethod
     def _remove_empty_parents(path: Path, stop: Path) -> None:

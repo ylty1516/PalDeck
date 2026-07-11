@@ -48,7 +48,7 @@ def is_palworld_running(
         return False
 
 
-def check_directory_writable(path: str | os.PathLike[str]) -> bool:
+def is_directory_writable(path: str | os.PathLike[str]) -> bool:
     """Test directory writability with a real temporary file and always clean it."""
     directory = Path(path)
     try:
@@ -66,8 +66,28 @@ def check_directory_writable(path: str | os.PathLike[str]) -> bool:
         return False
 
 
+# Backward-compatible name used by the first service revision.
+check_directory_writable = is_directory_writable
+
+
+def restart_as_admin(argv: Iterable[str | os.PathLike[str]]) -> None:
+    """Restart an argv vector through Windows UAC, or raise a precise error."""
+    arguments = [os.fspath(value) for value in argv]
+    if not arguments:
+        raise ValueError("argv must include an executable")
+    if os.name != "nt":
+        raise RuntimeError("administrator restart is only supported on Windows")
+    parameters = subprocess.list2cmdline(arguments[1:]) or None
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", arguments[0], parameters, None, 1
+    )
+    code = int(result)
+    if code <= 32:
+        raise OSError(code, f"ShellExecuteW runas failed with error code {code}")
+
+
 def run_as_admin(executable: str, parameters: str = "", directory: str | None = None) -> bool:
-    """Request elevation through ShellExecuteW; unsupported platforms return false."""
+    """Legacy boolean elevation helper retained for existing callers."""
     if os.name != "nt":
         return False
     result = ctypes.windll.shell32.ShellExecuteW(
