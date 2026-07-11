@@ -57,7 +57,7 @@ def parsed_html() -> ContractParser:
 def test_html_has_exactly_four_pages_and_required_layers():
     parser = parsed_html()
     assert parser.views == ["view-mods", "view-import", "view-nexus", "view-settings"]
-    assert {"backgroundLayer", "petalCanvas", "toastHost", "busyOverlay", "conflictModal", "deleteModal"} <= set(parser.ids)
+    assert {"backgroundLayer", "petalCanvas", "toastHost", "busyOverlay", "conflictModal", "deleteModal", "modConflictNotice"} <= set(parser.ids)
     assert parser.scripts == [{"type": "module", "src": "app.js"}]
 
 
@@ -165,6 +165,69 @@ def test_modals_and_aria_are_real_accessible_actions():
     assert 'importSelected("replace")' in app
     assert 'importSelected("keep_both")' in app
     assert not re.search(r'case "[^"]+":\s*break;', app)
+
+
+def test_local_inputs_are_not_disabled_or_dispatched_through_run():
+    app = APP.read_text(encoding="utf-8")
+    assert "async function run(trigger, operation, { disable = true" in app
+    assert 'trigger.tagName === "BUTTON" || trigger.type === "submit"' in app
+    assert "const LOCAL_INPUT_ACTIONS = new Set" in app
+    dispatch = re.search(r"async function dispatchStatic\(event\) \{(.*?)^\}", app, re.S | re.M)
+    assert dispatch
+    body = dispatch.group(1)
+    assert body.index("LOCAL_INPUT_ACTIONS.has") < body.index("await run(")
+    assert "ACTION_HANDLERS[target.dataset.action](actionEvent);" in body
+    input_branch = 'if (target.tagName === "INPUT" || target.tagName === "SELECT")'
+    assert input_branch in body
+    assert body.index(input_branch) < body.index("await run(")
+    assert "await ACTION_HANDLERS[target.dataset.action](actionEvent)" in body
+    assert "filterMods" in app and "changeMask" in app and "changeBlur" in app
+
+
+def test_request_sequences_conflict_feedback_and_nexus_validation():
+    app = APP.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    assert "modsRequestSequence" in app and "nexusRequestSequence" in app
+    assert "sequence !== state.modsRequestSequence" in app
+    assert "sequence !== state.nexusRequestSequence" in app
+    assert 'error.code === "mod_conflict"' in app
+    assert 'renderConflict($("#modConflictNotice"), error.details)' in app
+    assert 'await loadMods()' in app
+    assert "details?.files" in render and "details?.conflicts" in render
+    assert "validatedNexusUrl" in app
+
+
+def test_nexus_url_validator_executable_contract():
+    script = """
+      import { validatedNexusUrl } from './frontend/render.js';
+      const valid = [
+        'https://www.nexusmods.com/palworld/mods/123',
+        'https://nexusmods.com/palworld/mods/9/'
+      ];
+      const invalid = [
+        'http://www.nexusmods.com/palworld/mods/123',
+        'https://evil.example/palworld/mods/123',
+        'https://nexusmods.com/skyrim/mods/123',
+        'https://nexusmods.com/palworld/mods/not-a-number',
+        'https://nexusmods.com.evil.example/palworld/mods/123'
+      ];
+      if (!valid.every(value => validatedNexusUrl(value))) process.exit(1);
+      if (!invalid.every(value => validatedNexusUrl(value) === null)) process.exit(2);
+    """
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script], cwd=ROOT,
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_resize_is_single_raf_throttled_and_destroy_cancels_pending_resize():
+    effects = EFFECTS.read_text(encoding="utf-8")
+    assert "let resizeFrame = 0" in effects
+    assert "function scheduleResize()" in effects
+    assert 'window.addEventListener("resize", scheduleResize)' in effects
+    assert "cancelAnimationFrame(resizeFrame)" in effects
+    assert 'window.removeEventListener("resize", scheduleResize)' in effects
 
 
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():

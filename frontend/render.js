@@ -1,5 +1,14 @@
 const text = (value) => document.createTextNode(String(value ?? ""));
 
+export function validatedNexusUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  const host = url.hostname.toLocaleLowerCase();
+  const trustedHost = host === "nexusmods.com" || host.endsWith(".nexusmods.com");
+  if (url.protocol !== "https:" || !trustedHost || !/^\/palworld\/mods\/\d+\/?$/.test(url.pathname)) return null;
+  return url;
+}
+
 function el(tag, className, content) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -93,10 +102,12 @@ export function renderDetectedGames(container, installs) {
 
 export function renderConflict(container, details) {
   const list = el("ul", "stack");
-  const conflicts = Array.isArray(details?.conflicts) ? details.conflicts : [];
-  for (const conflict of conflicts.slice(0, 20)) list.append(el("li", "mod-path", conflict.path || conflict));
-  if (!conflicts.length) list.append(el("li", "muted", "目标位置已有文件。"));
-  container.replaceChildren(list);
+  const files = Array.isArray(details?.files)
+    ? details.files
+    : (Array.isArray(details?.conflicts) ? details.conflicts : []);
+  for (const file of files.slice(0, 20)) list.append(el("li", "mod-path", file?.path || file));
+  if (!files.length) list.append(el("li", "muted", "目标位置已有文件。"));
+  container.replaceChildren(el("p", "muted", "请处理以下冲突文件后重试："), list);
 }
 
 export function formatBytes(value) {

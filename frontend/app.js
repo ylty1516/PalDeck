@@ -1,11 +1,12 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
-import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
+  modsRequestSequence: 0, nexusRequestSequence: 0,
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
@@ -13,6 +14,11 @@ const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
 });
+const LOCAL_INPUT_ACTIONS = new Set([
+  "filterMods", "changeImportType", "editImportName", "editImportNexusId",
+  "editNexusQuery", "editGamePath", "changeMask", "changeBlur", "changePetals",
+]);
+
 function toast(message, kind = "info") {
   const item = document.createElement("div");
   item.className = `toast ${kind}`;
@@ -28,16 +34,17 @@ function setBusy(active, message = "处理中…") {
   document.documentElement.classList.toggle("is-busy", active);
 }
 
-async function run(trigger, operation, { global = false, busyText = "处理中…" } = {}) {
-  if (trigger?.disabled) return undefined;
-  if (trigger) { trigger.disabled = true; trigger.classList.add("loading"); trigger.setAttribute("aria-busy", "true"); }
+async function run(trigger, operation, { disable = true, global = false, busyText = "处理中…" } = {}) {
+  const canDisable = disable && trigger && (trigger.tagName === "BUTTON" || trigger.type === "submit");
+  if (canDisable && trigger.disabled) return undefined;
+  if (canDisable) { trigger.disabled = true; trigger.classList.add("loading"); trigger.setAttribute("aria-busy", "true"); }
   if (global) setBusy(true, busyText);
   try { return await operation(); }
   catch (error) {
-    if (!(error instanceof ApiError && error.status === 409)) toast(error.message || "操作失败", "error");
+    toast(error.message || "操作失败", "error");
     throw error;
   } finally {
-    if (trigger) { trigger.disabled = false; trigger.classList.remove("loading"); trigger.removeAttribute("aria-busy"); }
+    if (canDisable) { trigger.disabled = false; trigger.classList.remove("loading"); trigger.removeAttribute("aria-busy"); }
     if (global) setBusy(false);
   }
 }
@@ -83,9 +90,14 @@ function refreshBackground() {
 }
 
 async function loadMods() {
+  const sequence = ++state.modsRequestSequence;
   renderMessage($("#modList"), "正在加载模组…", "empty-state glass-panel");
-  state.mods = await request("/api/mods");
+  const mods = await request("/api/mods");
+  if (sequence !== state.modsRequestSequence) return false;
+  state.mods = mods;
+  $("#modConflictNotice").hidden = true;
   filterMods();
+  return true;
 }
 
 function filterMods() {
@@ -121,6 +133,7 @@ async function importSelected(decision = "cancel") {
       state.pendingUploadToken = error.details?.upload_token || null;
       renderConflict($("#conflictDetails"), error.details);
       openModal($("#conflictModal"));
+      return null;
     }
     throw error;
   }
@@ -166,9 +179,8 @@ async function deletePendingMod() {
 }
 
 function openValidatedNexus(target) {
-  let url;
-  try { url = new URL(target.dataset.url); } catch { throw new ApiError("N 网地址无效"); }
-  if (url.protocol !== "https:") throw new ApiError("仅允许打开安全的 HTTPS 地址");
+  const url = validatedNexusUrl(target.dataset.url);
+  if (!url) throw new ApiError("仅允许打开 Nexus Mods 的帕鲁模组详情页");
   window.open(url, "_blank", "noopener");
 }
 
@@ -188,12 +200,16 @@ async function copyNexusId(target) {
 }
 
 async function loadNexus(mode = "popular") {
+  const sequence = ++state.nexusRequestSequence;
   $("#nexusStatus").textContent = "正在连接 Nexus Mods…";
   const query = $("#nexusQuery").value.trim();
   const path = mode === "search" ? `/api/nexus/search?q=${encodeURIComponent(query)}&count=24` : mode === "latest" ? "/api/nexus/latest?count=24" : "/api/nexus/popular?sort=downloads&count=24";
-  state.nexus = await request(path);
+  const nexus = await request(path);
+  if (sequence !== state.nexusRequestSequence) return false;
+  state.nexus = nexus;
   $("#nexusStatus").textContent = `已加载 ${state.nexus.length} 个模组`;
   renderNexus($("#nexusGrid"), state.nexus);
+  return true;
 }
 
 function showPathInfo(status) {
@@ -289,8 +305,35 @@ async function dispatchStatic(event) {
   if (!expected.includes(event.type)) return;
   if (target.tagName === "INPUT" && ["file", "range"].includes(target.type) && event.type !== "change" && target.type !== "range") return;
   const actionEvent = { currentTarget: target, target: event.target, type: event.type };
+  if (LOCAL_INPUT_ACTIONS.has(target.dataset.action)) {
+    ACTION_HANDLERS[target.dataset.action](actionEvent);
+    return;
+  }
+  if (target.tagName === "INPUT" || target.tagName === "SELECT") {
+    try { await ACTION_HANDLERS[target.dataset.action](actionEvent); }
+    catch (error) { toast(error.message || "操作失败", "error"); }
+    return;
+  }
   try { await run(target, () => ACTION_HANDLERS[target.dataset.action](actionEvent), { global: target.dataset.action === "importMod" || target.dataset.action === "installUe4ss" || target.dataset.action === "applyUpdate", busyText: "请稍候，正在处理…" }); }
   catch { /* errors are surfaced by run or a conflict modal */ }
+}
+
+async function toggleMod(target, id) {
+  try {
+    await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
+      method: "POST", body: { enabled: target.dataset.enabled === "true" },
+    });
+    await loadMods();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
+      await loadMods();
+      renderConflict($("#modConflictNotice"), error.details);
+      $("#modConflictNotice").hidden = false;
+      toast("切换失败：请先处理冲突文件后重试", "error");
+      return;
+    }
+    throw error;
+  }
 }
 
 async function handleDynamicAction(event) {
@@ -299,7 +342,7 @@ async function handleDynamicAction(event) {
   const id = target.dataset.id;
   try {
     switch (target.dataset.dynamicAction) {
-      case "toggleMod": await run(target, async () => { await request(`/api/mods/${encodeURIComponent(id)}/toggle`, { method: "POST", body: { enabled: target.dataset.enabled === "true" } }); await loadMods(); }); break;
+      case "toggleMod": await run(target, () => toggleMod(target, id)); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`)); break;
       case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;

@@ -32,6 +32,7 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
   let level = "off";
   let particles = [];
   let frame = 0;
+  let resizeFrame = 0;
   let previous = 0;
   let destroyed = false;
 
@@ -43,6 +44,14 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
     canvas.style.width = `${innerWidth}px`;
     canvas.style.height = `${innerHeight}px`;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function scheduleResize() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      if (!destroyed) resize();
+    });
   }
 
   function newPetal(seed = Math.random()) {
@@ -94,16 +103,18 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
   function motionChanged() { syncParticles(); start(); }
 
   resize();
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", scheduleResize);
   document.addEventListener("visibilitychange", visibilitychange);
   reduced.addEventListener("change", motionChanged);
 
   function destroy() {
     destroyed = true;
     if (frame) cancelAnimationFrame(frame);
+    if (resizeFrame) cancelAnimationFrame(resizeFrame);
     frame = 0;
+    resizeFrame = 0;
     particles = [];
-    window.removeEventListener("resize", resize);
+    window.removeEventListener("resize", scheduleResize);
     document.removeEventListener("visibilitychange", visibilitychange);
     reduced.removeEventListener("change", motionChanged);
   }

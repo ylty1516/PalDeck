@@ -77,6 +77,8 @@ input, select { width: 100%; min-height: 40px; border: 1px solid var(--line); bo
 input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 input[type="range"] { min-height: 24px; padding: 0; accent-color: var(--accent); }
 .card-list, .stack { display: grid; gap: 10px; }
+.conflict-notice { margin-bottom: 12px; padding: 14px 16px; border-radius: var(--radius); border-color: var(--danger); }
+.conflict-notice[hidden] { display: none; }
 .mod-card { border-radius: var(--radius); padding: 15px 17px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .disabled-mod { opacity: .68; }
 .mod-title { font-size: 15px; }
