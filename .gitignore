@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 venv/
 .env
+.pip-cache/
+.pycache-build/
+.tmp/
 
 # build artifacts
 build/
