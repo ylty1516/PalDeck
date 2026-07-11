@@ -1,16 +1,14 @@
-"""Detect Palworld installation and ensure mod directories exist."""
+"""Detect Palworld installation and manage client mod directories."""
 
 from __future__ import annotations
 
-import os
 import re
+import string
 import winreg
 from pathlib import Path
-from typing import Any
 
 
 APP_ID = "1623730"
-PALWORLD_EXE_NAMES = ("Palworld.exe", "Palworld-Win64-Shipping.exe")
 
 
 def _read_steam_path_from_registry() -> Path | None:
@@ -31,18 +29,25 @@ def _read_steam_path_from_registry() -> Path | None:
     return None
 
 
+def _read_vdf(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, UnicodeError):
+        return ""
+
+
 def _parse_library_folders(vdf_path: Path) -> list[Path]:
     libraries: list[Path] = []
-    if not vdf_path.is_file():
-        return libraries
-    text = vdf_path.read_text(encoding="utf-8", errors="ignore")
-    # Matches path"..." or "path" "..."
-    for match in re.finditer(r'"path"\s*"([^"]+)"', text):
+    for match in re.finditer(r'"path"\s*"([^"]+)"', _read_vdf(vdf_path), re.I):
         raw = match.group(1).replace("\\\\", "\\")
-        path = Path(raw)
-        if path.exists():
-            libraries.append(path)
+        libraries.append(Path(raw))
     return libraries
+
+
+def _manifest_installdir(library: Path) -> str | None:
+    manifest = library / "steamapps" / f"appmanifest_{APP_ID}.acf"
+    match = re.search(r'"installdir"\s*"([^"]+)"', _read_vdf(manifest), re.I)
+    return match.group(1) if match else None
 
 
 def _is_valid_game_root(path: Path) -> bool:
@@ -50,59 +55,64 @@ def _is_valid_game_root(path: Path) -> bool:
         return False
     if (path / "Palworld.exe").is_file():
         return True
-    if (path / "Pal" / "Binaries" / "Win64" / "Palworld-Win64-Shipping.exe").is_file():
-        return True
-    if (path / "Pal" / "Content" / "Paks").is_dir():
-        return True
-    return False
+    shipping = path / "Pal" / "Binaries" / "Win64" / "Palworld-Win64-Shipping.exe"
+    paks = path / "Pal" / "Content" / "Paks"
+    return shipping.is_file() and paks.is_dir()
 
 
-def find_palworld_installs() -> list[dict[str, Any]]:
-    """Search Steam libraries and common paths for Palworld."""
-    candidates: list[Path] = []
-    steam = _read_steam_path_from_registry()
-    libraries: list[Path] = []
-    if steam:
-        libraries.append(steam)
-        libraries.extend(_parse_library_folders(steam / "steamapps" / "libraryfolders.vdf"))
-
-    # Deduplicate libraries
-    seen_lib: set[str] = set()
-    unique_libs: list[Path] = []
-    for lib in libraries:
-        key = str(lib).lower()
-        if key not in seen_lib:
-            seen_lib.add(key)
-            unique_libs.append(lib)
-
-    for lib in unique_libs:
-        candidates.append(lib / "steamapps" / "common" / "Palworld")
-        # Steam workshop content path hint only; game root is common/Palworld
-
-    # Common fallbacks
-    for drive in "CDEFGHIJ":
-        for rel in (
-            rf"{drive}:\Steam\steamapps\common\Palworld",
-            rf"{drive}:\SteamLibrary\steamapps\common\Palworld",
-            rf"{drive}:\Program Files (x86)\Steam\steamapps\common\Palworld",
-            rf"{drive}:\Program Files\Steam\steamapps\common\Palworld",
-            rf"{drive}:\Games\Palworld",
-            rf"{drive}:\XboxGames\Palworld\Content",
-        ):
-            candidates.append(Path(rel))
-
-    found: list[dict[str, Any]] = []
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    unique: list[Path] = []
     seen: set[str] = set()
-    for path in candidates:
+    for path in paths:
         try:
-            resolved = path.resolve() if path.exists() else path
+            key = str(path.resolve()).casefold()
         except OSError:
-            resolved = path
-        key = str(resolved).lower()
-        if key in seen:
-            continue
-        if _is_valid_game_root(path):
+            key = str(path).casefold()
+        if key not in seen:
             seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def find_palworld_installs(
+    *, steam_roots: list[Path] | None = None
+) -> list[dict[str, object]]:
+    """Find manifest-backed Palworld installs in Steam libraries."""
+    supplied_roots = steam_roots is not None
+    roots = list(steam_roots or [])
+    if not supplied_roots:
+        registry_root = _read_steam_path_from_registry()
+        if registry_root:
+            roots.append(registry_root)
+
+    libraries: list[Path] = []
+    for root in roots:
+        libraries.append(Path(root))
+        libraries.extend(
+            _parse_library_folders(Path(root) / "steamapps" / "libraryfolders.vdf")
+        )
+
+    candidates: list[Path] = []
+    for library in _unique_paths(libraries):
+        installdir = _manifest_installdir(library)
+        if installdir:
+            candidates.append(library / "steamapps" / "common" / installdir)
+
+    if not supplied_roots:
+        for drive in string.ascii_uppercase:
+            for relative in (
+                rf"{drive}:\Steam\steamapps\common\Palworld",
+                rf"{drive}:\SteamLibrary\steamapps\common\Palworld",
+                rf"{drive}:\Program Files (x86)\Steam\steamapps\common\Palworld",
+                rf"{drive}:\Program Files\Steam\steamapps\common\Palworld",
+                rf"{drive}:\Games\Palworld",
+                rf"{drive}:\XboxGames\Palworld\Content",
+            ):
+                candidates.append(Path(relative))
+
+    found: list[dict[str, object]] = []
+    for path in _unique_paths(candidates):
+        if _is_valid_game_root(path):
             found.append(
                 {
                     "path": str(path),
@@ -115,33 +125,37 @@ def find_palworld_installs() -> list[dict[str, Any]]:
 
 
 def has_ue4ss(game_root: Path | str) -> bool:
-    root = Path(game_root)
-    win64 = root / "Pal" / "Binaries" / "Win64"
-    markers = [
+    win64 = Path(game_root) / "Pal" / "Binaries" / "Win64"
+    markers = (
         win64 / "UE4SS.dll",
         win64 / "dwmapi.dll",
-        win64 / "ue4ss" / "UE4SS.dll",
         win64 / "UE4SS-settings.ini",
+        win64 / "ue4ss" / "UE4SS.dll",
         win64 / "ue4ss" / "UE4SS-settings.ini",
-    ]
-    return any(p.is_file() for p in markers)
+    )
+    return any(marker.is_file() for marker in markers)
+
+
+def resolve_ue4ss_mods_dir(game_root: Path | str) -> Path:
+    """Resolve nested UE4SS layouts before the classic Win64/Mods layout."""
+    win64 = Path(game_root) / "Pal" / "Binaries" / "Win64"
+    nested_root = win64 / "ue4ss"
+    if (nested_root / "Mods").is_dir() or nested_root.is_dir():
+        return nested_root / "Mods"
+    return win64 / "Mods"
 
 
 def get_mod_directories(game_root: Path | str) -> dict[str, Path]:
     root = Path(game_root)
     win64 = root / "Pal" / "Binaries" / "Win64"
-    # Prefer modern ue4ss/Mods if present, else classic Mods
-    if (win64 / "ue4ss" / "Mods").is_dir() or (win64 / "ue4ss").is_dir():
-        ue4ss_mods = win64 / "ue4ss" / "Mods"
-    else:
-        ue4ss_mods = win64 / "Mods"
     return {
         "root": root,
         "paks": root / "Pal" / "Content" / "Paks",
         "tilde_mods": root / "Pal" / "Content" / "Paks" / "~mods",
         "logic_mods": root / "Pal" / "Content" / "Paks" / "LogicMods",
-        "ue4ss_mods": ue4ss_mods,
+        "ue4ss_mods": resolve_ue4ss_mods_dir(root),
         "win64": win64,
+        # Legacy paths remain descriptive only; ensure_mod_folders never creates them.
         "official_mods": root / "Mods",
         "workshop": root / "Mods" / "Workshop",
         "pal_mod_settings": root / "Mods" / "PalModSettings.ini",
@@ -149,19 +163,18 @@ def get_mod_directories(game_root: Path | str) -> dict[str, Path]:
 
 
 def describe_mod_paths(game_root: Path | str) -> dict[str, str]:
-    dirs = get_mod_directories(game_root)
-    return {k: str(v) for k, v in dirs.items()}
+    return {key: str(value) for key, value in get_mod_directories(game_root).items()}
 
 
-def ensure_mod_folders(game_root: Path | str) -> dict[str, Any]:
-    """Create standard mod folders and ensure official settings exist."""
+def ensure_mod_folders(game_root: Path | str) -> dict[str, object]:
+    """Create only the folders used by manually installed Steam client mods."""
     root = Path(game_root)
     if not _is_valid_game_root(root):
         raise ValueError(f"无效的幻兽帕鲁游戏目录: {root}")
 
     dirs = get_mod_directories(root)
     created: list[str] = []
-    for key in ("tilde_mods", "logic_mods", "ue4ss_mods", "workshop", "official_mods"):
+    for key in ("tilde_mods", "logic_mods", "ue4ss_mods"):
         path = dirs[key]
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
@@ -169,49 +182,27 @@ def ensure_mod_folders(game_root: Path | str) -> dict[str, Any]:
         elif not path.is_dir():
             raise ValueError(f"路径存在但不是文件夹: {path}")
 
-    settings = dirs["pal_mod_settings"]
-    settings_created = False
-    if not settings.is_file():
-        settings.write_text(
-            "[PalModSettings]\n"
-            "bGlobalEnableMod=True\n"
-            "WorkshopRootDir=\n"
-            "ConfigVersion=1.0\n"
-            "bNeedShowErrorOnNextStart=False\n",
-            encoding="utf-8",
-        )
-        settings_created = True
-    else:
-        # Ensure global enable is on so workshop/official mods can load
-        text = settings.read_text(encoding="utf-8", errors="ignore")
-        if re.search(r"bGlobalEnableMod\s*=\s*False", text, re.I):
-            text = re.sub(
-                r"bGlobalEnableMod\s*=\s*False",
-                "bGlobalEnableMod=True",
-                text,
-                flags=re.I,
-            )
-            settings.write_text(text, encoding="utf-8")
-
     return {
         "ok": True,
         "game_path": str(root),
         "created": created,
-        "settings_created": settings_created,
+        "settings_created": False,
         "has_ue4ss": has_ue4ss(root),
         "mod_paths": describe_mod_paths(root),
     }
 
 
-def validate_game_path(path: str | Path) -> dict[str, Any]:
+def validate_game_path(
+    path: str | Path, *, create: bool = False
+) -> dict[str, object]:
     p = Path(path)
     valid = _is_valid_game_root(p)
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "path": str(p),
         "valid": valid,
         "has_ue4ss": has_ue4ss(p) if valid else False,
         "mod_paths": describe_mod_paths(p) if valid else {},
     }
-    if valid:
+    if valid and create:
         result["ensure"] = ensure_mod_folders(p)
     return result
