@@ -63,6 +63,48 @@ def test_mods_success_uses_standard_envelope(auth_client):
     assert response.json == {"ok": True, "data": []}
 
 
+def test_open_mod_folder_requires_authentication(app):
+    response = app.test_client().get("/api/mods/open-folder")
+    assert response.status_code == 403
+    assert response.json["error_code"] == "invalid_session"
+
+
+def test_open_mod_folder_without_id_opens_tilde_mods(app, auth_client):
+    opened = []
+    app.config["OPEN_FOLDER"] = lambda path: opened.append(path)
+
+    response = auth_client.get("/api/mods/open-folder")
+
+    assert response.status_code == 200
+    assert Path(response.json["data"]["path"]).parts[-4:] == ("Pal", "Content", "Paks", "~mods")
+    assert opened == [response.json["data"]["path"]]
+
+
+def test_open_mod_folder_with_id_opens_managed_install_root(app, auth_client):
+    opened = []
+    app.config["OPEN_FOLDER"] = lambda path: opened.append(path)
+    installed = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(), "Example.zip")},
+        content_type="multipart/form-data",
+    ).json["data"]
+
+    response = auth_client.get(f"/api/mods/open-folder?id={installed['id']}")
+
+    assert response.status_code == 200
+    assert Path(response.json["data"]["path"]).name == "~mods"
+    assert opened == [response.json["data"]["path"]]
+
+
+def test_open_mod_folder_rejects_unknown_id(app, auth_client):
+    app.config["OPEN_FOLDER"] = lambda _path: None
+
+    response = auth_client.get("/api/mods/open-folder?id=not-managed")
+
+    assert response.status_code == 404
+    assert response.json["error_code"] == "mod_not_found"
+
+
 def test_import_conflict_returns_retry_token(auth_client):
     first = auth_client.post(
         "/api/mods/import",

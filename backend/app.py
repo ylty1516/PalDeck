@@ -67,6 +67,7 @@ def create_app(
         DATA_DIR=str(writable),
         SESSION_TOKEN=token,
         MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
+        OPEN_FOLDER=getattr(os, "startfile", None),
     )
     writable.mkdir(parents=True, exist_ok=True)
 
@@ -237,6 +238,21 @@ def create_app(
         finally:
             if dest is not None and dest.parent == writable / "uploads" and not retained:
                 dest.unlink(missing_ok=True)
+
+    @app.get("/api/mods/open-folder")
+    def open_mod_folder():
+        current = service()
+        mod_id = request.args.get("id") or None
+        try:
+            folder = current.folder_for(mod_id)
+        except KeyError as exc:
+            raise ApiError("未找到该模组", 404, "mod_not_found") from exc
+        opener = app.config.get("OPEN_FOLDER")
+        if not callable(opener):
+            raise ApiError("当前系统不支持打开目录", 500, "open_folder_unavailable")
+        path = str(folder)
+        opener(path)
+        return success({"path": path})
 
     @app.post("/api/mods/<mod_id>/toggle")
     def toggle_mod(mod_id: str):

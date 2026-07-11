@@ -923,5 +923,22 @@ class ModService:
                 tracked_roots.add(str(candidate.resolve()).casefold())
         return self.list_mods()
 
+    def folder_for(self, mod_id: str | None = None) -> Path:
+        """Return only a configured mod root or a managed manifest's install root."""
+        directories = get_mod_directories(self.game_root)
+        allowed_roots = tuple(
+            validate_no_reparse_ancestors(directories[key]).resolve(strict=False)
+            for key in ("tilde_mods", "logic_mods", "ue4ss_mods")
+        )
+        candidate = (
+            self.store.get(mod_id).install_root
+            if mod_id
+            else directories["tilde_mods"]
+        )
+        resolved = validate_no_reparse_ancestors(candidate).resolve(strict=False)
+        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
+            raise PermissionError("模组目录超出受管范围")
+        return resolved
+
     def list_mods(self) -> list[dict[str, object]]:
         return [self._listed(manifest) for manifest in self.store.list()]
