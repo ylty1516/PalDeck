@@ -44,6 +44,36 @@ DATA_DIR = _data_dir()
 CONFIG_PATH = DATA_DIR / "config.json"
 REGISTRY_PATH = DATA_DIR / "mods_registry.json"
 
+# Compatibility wiring is deliberately lazy: task 4 can ship before ModService,
+# and importing this legacy facade must keep working during that transition.
+_manifest_store_instance: Any | None = None
+_mod_service_instance: Any | None = None
+
+
+def get_manifest_store():
+    global _manifest_store_instance
+    if _manifest_store_instance is None:
+        from .manifest_store import ManifestStore
+
+        _manifest_store_instance = ManifestStore(DATA_DIR)
+    return _manifest_store_instance
+
+
+def get_mod_service(*, required: bool = True):
+    global _mod_service_instance
+    if _mod_service_instance is not None:
+        return _mod_service_instance
+    try:
+        from .mod_service import ModService
+    except ModuleNotFoundError as exc:
+        if exc.name != f"{__package__}.mod_service":
+            raise
+        if required:
+            raise RuntimeError("ModService is not available yet") from exc
+        return None
+    _mod_service_instance = ModService(get_manifest_store())
+    return _mod_service_instance
+
 
 @dataclass
 class ManagedMod:

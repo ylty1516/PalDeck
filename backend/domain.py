@@ -14,6 +14,41 @@ class ModKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class ManifestFile:
+    relative_path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ModManifest:
+    id: str
+    name: str
+    kind: ModKind
+    install_root: Path
+    source_name: str
+    nexus_id: int | None
+    installed_at: str
+    enabled: bool
+    files: tuple[ManifestFile, ...]
+    ue4ss_enabled_txt: ManifestFile | None = None
+
+
+class AuditStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    MODIFIED = "modified"
+    MISSING = "missing"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class ManifestAudit:
+    manifest_id: str
+    status: AuditStatus
+
+
+@dataclass(frozen=True)
 class ArchivePolicy:
     max_files: int = 5000
     max_single_bytes: int = 2 * 1024**3
