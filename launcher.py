@@ -40,7 +40,7 @@ def main() -> None:
 
     from backend.app import main as app_main
 
-    app_main()
+    app_main(root=root, data_dir=_writable_data_dir())
 
 
 if __name__ == "__main__":

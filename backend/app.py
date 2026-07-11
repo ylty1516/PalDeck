@@ -1,487 +1,437 @@
-"""Flask application for Palworld Mod Manager."""
+"""Flask application factory and hardened loopback API."""
 
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
+from typing import Any
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
+
+from backend import game_detector, mod_config, nexus_api, process_utils, self_updater, ue4ss_installer
+from backend.mod_service import GameRunningError, ModConflictError, ModService
+from backend.version import APP_VERSION
+
+COOKIE_NAME = "paldeck_session"
+UPLOAD_TTL_SECONDS = 15 * 60
+MAX_UPLOAD_BYTES = 2 * 1024**3
+
 
 def _resolve_root() -> Path:
-    env = os.environ.get("PALMOD_ROOT")
-    if env:
-        return Path(env)
+    configured = os.environ.get("PALMOD_ROOT")
+    if configured:
+        return Path(configured)
     if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            return Path(meipass)
-        return Path(sys.executable).resolve().parent
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     return Path(__file__).resolve().parent.parent
 
 
-# Allow running as script, package, or frozen EXE
-ROOT = _resolve_root()
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from backend import game_detector, mod_config, mod_manager, nexus_api, self_updater, ue4ss_installer
-from backend.version import APP_VERSION
-
-STATIC_DIR = ROOT / "frontend"
-if not STATIC_DIR.is_dir():
-    # Fallback: frontend next to executable
-    alt = Path(sys.executable).resolve().parent / "frontend" if getattr(sys, "frozen", False) else ROOT / "frontend"
-    if alt.is_dir():
-        STATIC_DIR = alt
-
-app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
+class ApiError(Exception):
+    def __init__(self, message: str, status: int, code: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.code = code
+        self.details = details or {}
 
 
-def ok(data=None, **extra):
-    payload = {"ok": True}
-    if data is not None:
-        payload["data"] = data
-    payload.update(extra)
-    return jsonify(payload)
-
-
-def err(message: str, status: int = 400):
-    return jsonify({"ok": False, "error": message}), status
-
-
-@app.get("/")
-def index():
-    return send_from_directory(STATIC_DIR, "index.html")
-
-
-@app.get("/api/health")
-def health():
-    return ok(
-        {
-            "status": "up",
-            "version": APP_VERSION,
-            "frozen": self_updater.is_frozen(),
-        }
+def create_app(
+    *,
+    root: str | os.PathLike[str] | None = None,
+    data_dir: str | os.PathLike[str] | None = None,
+    session_token: str | None = None,
+    testing: bool = False,
+) -> Flask:
+    """Build an isolated application. Authentication is never disabled in tests."""
+    app_root = Path(root) if root is not None else _resolve_root()
+    writable = Path(data_dir) if data_dir is not None else Path(
+        os.environ.get("PALMOD_DATA_DIR", app_root / "data")
     )
+    token = session_token or secrets.token_urlsafe(32)
+    static_dir = app_root / "frontend"
+    if not static_dir.is_dir():
+        static_dir = _resolve_root() / "frontend"
 
+    app = Flask(__name__, static_folder=str(static_dir), static_url_path="")
+    app.config.update(
+        TESTING=testing,
+        DATA_DIR=str(writable),
+        SESSION_TOKEN=token,
+        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
+    )
+    writable.mkdir(parents=True, exist_ok=True)
 
-@app.get("/api/update/check")
-def api_update_check():
-    try:
-        return ok(self_updater.check_for_update())
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 502)
-
-
-@app.post("/api/update/apply")
-def api_update_apply():
-    body = request.get_json(silent=True) or {}
-    url = body.get("url")  # optional override
-    try:
-        result = self_updater.prepare_update(download_url=url)
-        if result.get("should_exit"):
-            # Let response flush, then quit so batch can replace EXE
-            def _quit():
-                time.sleep(1.2)
-                os._exit(0)
-
-            threading.Thread(target=_quit, daemon=True).start()
-        return ok(result)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
-
-
-@app.get("/api/game/detect")
-def api_detect():
-    try:
-        found = game_detector.find_palworld_installs()
-        current = mod_manager.get_game_path()
-        return ok({"installs": found, "current": current})
-    except Exception as e:
-        return err(str(e), 500)
-
-
-@app.post("/api/game/set")
-def api_set_game():
-    body = request.get_json(silent=True) or {}
-    path = (body.get("path") or "").strip()
-    if not path:
-        return err("请提供游戏路径")
-    try:
-        result = mod_manager.set_game_path(path)
-        return ok(result)
-    except Exception as e:
-        return err(str(e), 400)
-
-
-@app.get("/api/game/status")
-def api_game_status():
-    path = mod_manager.get_game_path()
-    if not path:
-        return ok({"configured": False, "path": None})
-    try:
-        info = game_detector.validate_game_path(path)
-        return ok({"configured": True, **info})
-    except Exception as e:
-        return err(str(e), 500)
-
-
-@app.post("/api/game/ensure-folders")
-def api_ensure_folders():
-    path = mod_manager.get_game_path()
-    if not path:
-        return err("尚未设置游戏路径")
-    try:
-        return ok(game_detector.ensure_mod_folders(path))
-    except Exception as e:
-        return err(str(e), 400)
-
-
-@app.get("/api/mod-config")
-def api_list_mod_configs():
-    try:
-        return ok(mod_config.list_configurable_mods())
-    except Exception as e:
-        return err(str(e), 500)
-
-
-@app.get("/api/mod-config/<mod_folder>")
-def api_get_mod_config(mod_folder: str):
-    try:
-        return ok(mod_config.get_mod_config(mod_folder))
-    except KeyError as e:
-        return err(str(e), 404)
-    except Exception as e:
-        return err(str(e), 400)
-
-
-@app.post("/api/mod-config/<mod_folder>")
-def api_update_mod_config(mod_folder: str):
-    body = request.get_json(silent=True) or {}
-    values = body.get("values") if isinstance(body.get("values"), dict) else body
-    if not isinstance(values, dict):
-        return err("请提供 values 对象")
-    try:
-        return ok(mod_config.update_mod_config(mod_folder, values))
-    except KeyError as e:
-        return err(str(e), 404)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
-
-
-@app.post("/api/mod-config/install-bundled")
-def api_install_bundled():
-    body = request.get_json(silent=True) or {}
-    name = (body.get("name") or "ConfigurableBagExpand").strip()
-    try:
-        return ok(mod_config.install_bundled_mod(name))
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
-
-
-@app.get("/api/ue4ss/status")
-def api_ue4ss_status():
-    path = mod_manager.get_game_path()
-    if not path:
-        return err("尚未设置游戏路径")
-    try:
-        return ok(ue4ss_installer.status(path))
-    except Exception as e:
-        return err(str(e), 500)
-
-
-@app.post("/api/ue4ss/install-latest")
-def api_ue4ss_install_latest():
-    """Download official UE4SS zip from GitHub and install (auto extract)."""
-    path = mod_manager.get_game_path()
-    if not path:
-        return err("尚未设置游戏路径")
-    try:
-        cache = mod_manager.DATA_DIR / "ue4ss_cache"
-        result = ue4ss_installer.install_latest(path, cache_dir=cache)
-        return ok(result)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
-
-
-@app.post("/api/ue4ss/install-zip")
-def api_ue4ss_install_zip():
-    """Install UE4SS from uploaded .zip (no manual extract needed)."""
-    path = mod_manager.get_game_path()
-    if not path:
-        return err("尚未设置游戏路径")
-    if "file" not in request.files:
-        return err("请上传 UE4SS 的 .zip 文件")
-    f = request.files["file"]
-    if not f or not f.filename:
-        return err("未选择文件")
-    upload_dir = mod_manager.DATA_DIR / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = Path(f.filename).name
-    dest = upload_dir / safe_name
-    f.save(dest)
-    try:
-        result = ue4ss_installer.install_from_zip(path, dest)
-        return ok(result)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
-    finally:
-        try:
-            dest.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-@app.get("/api/mods")
-def api_list_mods():
-    try:
-        return ok(mod_manager.list_mods())
-    except Exception as e:
-        return err(str(e), 500)
-
-
-@app.post("/api/mods/import")
-def api_import_mod():
-    preferred = request.form.get("type") or request.args.get("type") or "auto"
-    display_name = request.form.get("name") or None
-    nexus_id = request.form.get("nexus_id")
-    nexus_id_val = int(nexus_id) if nexus_id and str(nexus_id).isdigit() else None
-
-    # Multipart file upload
-    if "file" in request.files:
-        f = request.files["file"]
-        if not f or not f.filename:
-            return err("未选择文件")
-        upload_dir = mod_manager.DATA_DIR / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        # Sanitize filename
-        safe_name = Path(f.filename).name
-        dest = upload_dir / safe_name
-        # Avoid overwrite collisions
-        if dest.exists():
-            dest = upload_dir / f"{Path(safe_name).stem}_{os.getpid()}{Path(safe_name).suffix}"
-        f.save(dest)
-        try:
-            result = mod_manager.import_mod_file(
-                dest,
-                preferred_type=None if preferred == "auto" else preferred,
-                display_name=display_name,
-                nexus_id=nexus_id_val,
-            )
-            return ok(result)
-        except Exception as e:
-            traceback.print_exc()
-            return err(str(e), 400)
-        finally:
+    game_path = os.environ.get("PALMOD_GAME_PATH")
+    if not game_path:
+        config_path = writable / "config.json"
+        if config_path.is_file():
             try:
-                dest.unlink(missing_ok=True)
-            except OSError:
+                import json
+                candidate = json.loads(config_path.read_text(encoding="utf-8")).get("game_path")
+                if candidate and Path(candidate).is_dir():
+                    game_path = str(candidate)
+            except (OSError, ValueError, AttributeError):
                 pass
+    if game_path:
+        app.extensions["mod_service"] = ModService(game_path, writable)
+    app.extensions["pending_uploads"] = {}
 
-    body = request.get_json(silent=True) or {}
-    path = body.get("path")
-    if not path:
-        return err("请上传文件或提供本地路径")
-    try:
-        result = mod_manager.import_mod_file(
-            path,
-            preferred_type=None if (body.get("type") or preferred) == "auto" else (body.get("type") or preferred),
-            display_name=body.get("name") or display_name,
-            nexus_id=body.get("nexus_id") or nexus_id_val,
-        )
-        return ok(result)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
+    def success(data: Any = None):
+        return jsonify({"ok": True, "data": data})
 
+    def failure(message: str, status: int, code: str, details: dict[str, Any] | None = None):
+        return jsonify({
+            "ok": False,
+            "error": message,
+            "error_code": code,
+            "details": details or {},
+        }), status
 
-@app.post("/api/mods/<mod_id>/toggle")
-def api_toggle_mod(mod_id: str):
-    body = request.get_json(silent=True) or {}
-    if "enabled" not in body:
-        return err("缺少 enabled 字段")
-    try:
-        result = mod_manager.set_mod_enabled(mod_id, bool(body["enabled"]))
-        return ok(result)
-    except KeyError:
-        return err("未找到该模组", 404)
-    except Exception as e:
-        traceback.print_exc()
-        return err(str(e), 400)
+    def service(required: bool = True) -> ModService | None:
+        current = app.extensions.get("mod_service")
+        if current is None and required:
+            raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
+        return current
 
+    @app.before_request
+    def require_session():
+        if not request.path.startswith("/api/") or request.path == "/api/health":
+            return None
+        supplied = request.cookies.get(COOKIE_NAME, "")
+        if not supplied or not secrets.compare_digest(supplied, token):
+            return failure("会话无效", 403, "invalid_session")
+        return None
 
-@app.delete("/api/mods/<mod_id>")
-def api_delete_mod(mod_id: str):
-    try:
-        return ok(mod_manager.delete_mod(mod_id))
-    except KeyError:
-        return err("未找到该模组", 404)
-    except Exception as e:
-        return err(str(e), 400)
+    @app.errorhandler(ApiError)
+    def handle_api_error(exc: ApiError):
+        return failure(exc.message, exc.status, exc.code, exc.details)
 
+    @app.errorhandler(ModConflictError)
+    def handle_conflict(exc: ModConflictError):
+        return failure("模组文件冲突", 409, "mod_conflict", exc.details)
 
-@app.post("/api/mods/resync")
-def api_resync():
-    try:
-        return ok(mod_manager.resync_from_disk())
-    except Exception as e:
-        return err(str(e), 500)
+    @app.errorhandler(GameRunningError)
+    def handle_game_running(_exc: GameRunningError):
+        return failure("幻兽帕鲁正在运行，无法修改模组", 423, "game_running")
 
+    @app.errorhandler(PermissionError)
+    def handle_permission(_exc: PermissionError):
+        return failure("没有执行此操作所需的文件权限", 403, "permission_denied")
 
-@app.get("/api/mods/open-folder")
-def api_open_folder():
-    mod_id = request.args.get("id")
-    try:
-        folder = mod_manager.open_mod_folder(mod_id)
-        os.startfile(folder)  # type: ignore[attr-defined]
-        return ok({"path": folder})
-    except Exception as e:
-        return err(str(e), 400)
+    @app.errorhandler(RequestEntityTooLarge)
+    def handle_too_large(_exc: RequestEntityTooLarge):
+        return failure("上传文件过大", 400, "upload_too_large")
 
+    @app.errorhandler(ValueError)
+    @app.errorhandler(KeyError)
+    @app.errorhandler(FileNotFoundError)
+    def handle_bad_input(exc: Exception):
+        text = str(exc).strip("'") or "输入无效"
+        return failure(text, 400, "invalid_input")
 
-@app.get("/api/nexus/popular")
-def api_nexus_popular():
-    sort = request.args.get("sort") or "downloads"
-    count = int(request.args.get("count") or 24)
-    try:
-        return ok(nexus_api.fetch_popular(count=count, sort=sort))
-    except Exception as e:
-        return err(str(e), 502)
+    @app.errorhandler(Exception)
+    def handle_internal(exc: Exception):
+        app.logger.error("Unhandled API error", exc_info=exc)
+        return failure("内部操作失败", 500, "internal_error")
 
+    @app.get("/")
+    def index():
+        supplied = request.args.get("token", "")
+        cookie = request.cookies.get(COOKIE_NAME, "")
+        if supplied:
+            if not secrets.compare_digest(supplied, token):
+                return failure("会话无效", 403, "invalid_session")
+            response = redirect("/", code=302)
+            response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="Strict", path="/")
+            return response
+        if not cookie or not secrets.compare_digest(cookie, token):
+            return failure("会话无效", 403, "invalid_session")
+        return send_from_directory(static_dir, "index.html")
 
-@app.get("/api/nexus/latest")
-def api_nexus_latest():
-    count = int(request.args.get("count") or 24)
-    try:
-        return ok(nexus_api.fetch_latest(count=count))
-    except Exception as e:
-        return err(str(e), 502)
+    @app.get("/api/health")
+    def health():
+        return success({"status": "up", "version": APP_VERSION, "frozen": self_updater.is_frozen()})
 
+    @app.get("/api/mods")
+    def list_mods():
+        current = service(required=False)
+        return success(current.list_mods() if current else [])
 
-@app.get("/api/nexus/search")
-def api_nexus_search():
-    q = request.args.get("q") or ""
-    count = int(request.args.get("count") or 24)
-    try:
-        return ok(nexus_api.search_mods(q, count=count))
-    except Exception as e:
-        return err(str(e), 502)
+    def cleanup_expired_uploads() -> None:
+        now = time.time()
+        pending = app.extensions["pending_uploads"]
+        for upload_token, item in list(pending.items()):
+            if item["expires"] <= now:
+                Path(item["path"]).unlink(missing_ok=True)
+                pending.pop(upload_token, None)
 
+    @app.post("/api/mods/import")
+    def import_mod():
+        cleanup_expired_uploads()
+        current = service()
+        body = request.get_json(silent=True) or {}
+        retry_token = body.get("upload_token")
+        pending = app.extensions["pending_uploads"]
+        retained = False
+        dest: Path | None = None
+        if retry_token:
+            item = pending.pop(str(retry_token), None)
+            if not item:
+                raise ApiError("上传暂存已过期", 400, "upload_expired")
+            dest = Path(item["path"])
+            options = item["options"]
+            decision = body.get("decision", "cancel")
+        elif "file" in request.files:
+            uploaded = request.files["file"]
+            if not uploaded or not uploaded.filename:
+                raise ApiError("未选择文件", 400, "missing_file")
+            filename = secure_filename(Path(uploaded.filename).name)
+            if not filename:
+                raise ApiError("文件名无效", 400, "invalid_filename")
+            upload_dir = writable / "uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            dest = upload_dir / f"{uuid.uuid4().hex}-{filename}"
+            uploaded.save(dest)
+            nexus = request.form.get("nexus_id")
+            if nexus and not nexus.isdigit():
+                dest.unlink(missing_ok=True)
+                raise ApiError("nexus_id 必须是整数", 400, "invalid_input")
+            options = {
+                "preferred_kind": None if request.form.get("type", "auto") == "auto" else request.form.get("type"),
+                "display_name": request.form.get("name") or None,
+                "nexus_id": int(nexus) if nexus else None,
+            }
+            decision = request.form.get("decision", "cancel")
+        else:
+            path = body.get("path")
+            if not path:
+                raise ApiError("请上传文件或提供本地路径", 400, "missing_file")
+            dest = Path(path)
+            options = {
+                "preferred_kind": None if body.get("type", "auto") == "auto" else body.get("type"),
+                "display_name": body.get("name"),
+                "nexus_id": body.get("nexus_id"),
+            }
+            decision = body.get("decision", "cancel")
+        try:
+            return success(current.install(dest, decision=decision, **options))
+        except ModConflictError as exc:
+            if dest is not None and (retry_token or dest.parent == writable / "uploads"):
+                new_token = secrets.token_urlsafe(24)
+                pending[new_token] = {
+                    "path": str(dest), "options": options,
+                    "expires": time.time() + UPLOAD_TTL_SECONDS,
+                }
+                retained = True
+                raise ModConflictError({**exc.details, "upload_token": new_token}) from exc
+            raise
+        finally:
+            if dest is not None and dest.parent == writable / "uploads" and not retained:
+                dest.unlink(missing_ok=True)
 
-@app.get("/api/nexus/mod/<int:mod_id>")
-def api_nexus_mod(mod_id: int):
-    try:
-        mod = nexus_api.get_mod(mod_id)
-        if not mod:
-            return err("未找到该 N 网模组", 404)
-        return ok(mod)
-    except Exception as e:
-        return err(str(e), 502)
+    @app.post("/api/mods/<mod_id>/toggle")
+    def toggle_mod(mod_id: str):
+        body = request.get_json(silent=True) or {}
+        if type(body.get("enabled")) is not bool:
+            raise ApiError("缺少布尔型 enabled 字段", 400, "invalid_input")
+        return success(service().set_enabled(mod_id, body["enabled"]))
 
+    @app.delete("/api/mods/<mod_id>")
+    def delete_mod(mod_id: str):
+        force = request.args.get("force_modified", "false").casefold() == "true"
+        return success(service().delete(mod_id, force_modified=force))
 
-def create_app() -> Flask:
+    @app.post("/api/mods/resync")
+    def resync_mods():
+        current = service(required=False)
+        return success(current.rescan() if current else [])
+
+    @app.get("/api/game/detect")
+    def detect_game():
+        current = service(required=False)
+        return success({"installs": game_detector.find_palworld_installs(), "current": str(current.game_root) if current else None})
+
+    @app.post("/api/game/set")
+    def set_game():
+        body = request.get_json(silent=True) or {}
+        path = str(body.get("path", "")).strip()
+        if not path:
+            raise ApiError("请提供游戏路径", 400, "invalid_input")
+        info = game_detector.validate_game_path(path)
+        game_detector.ensure_mod_folders(path)
+        import json
+        config_path = writable / "config.json"
+        config_path.write_text(json.dumps({"game_path": path}, ensure_ascii=False), encoding="utf-8")
+        app.extensions["mod_service"] = ModService(path, writable)
+        return success(info)
+
+    @app.get("/api/game/status")
+    def game_status():
+        current = service(required=False)
+        if current is None:
+            return success({"configured": False, "path": None})
+        return success({"configured": True, **game_detector.validate_game_path(current.game_root)})
+
+    @app.post("/api/game/ensure-folders")
+    def ensure_folders():
+        return success(game_detector.ensure_mod_folders(service().game_root))
+
+    @app.get("/api/mod-config")
+    def list_mod_configs():
+        return success(mod_config.list_configurable_mods())
+
+    @app.get("/api/mod-config/<mod_folder>")
+    def get_mod_config(mod_folder: str):
+        return success(mod_config.get_mod_config(mod_folder))
+
+    @app.post("/api/mod-config/<mod_folder>")
+    def update_mod_config(mod_folder: str):
+        body = request.get_json(silent=True) or {}
+        values = body.get("values", body)
+        if not isinstance(values, dict):
+            raise ApiError("请提供 values 对象", 400, "invalid_input")
+        return success(mod_config.update_mod_config(mod_folder, values))
+
+    @app.post("/api/mod-config/install-bundled")
+    def install_bundled():
+        body = request.get_json(silent=True) or {}
+        return success(mod_config.install_bundled_mod(str(body.get("name") or "ConfigurableBagExpand").strip()))
+
+    @app.get("/api/ue4ss/status")
+    def ue4ss_status():
+        return success(ue4ss_installer.status(service().game_root))
+
+    @app.post("/api/ue4ss/install-latest")
+    def ue4ss_latest():
+        current = service()
+        return success(ue4ss_installer.install_latest(current.game_root, cache_dir=writable / "ue4ss_cache"))
+
+    @app.post("/api/ue4ss/install-zip")
+    def ue4ss_zip():
+        current = service()
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            raise ApiError("请上传 UE4SS 的 .zip 文件", 400, "missing_file")
+        name = secure_filename(Path(uploaded.filename).name)
+        if not name or Path(name).suffix.casefold() != ".zip":
+            raise ApiError("仅支持 .zip 文件", 400, "invalid_filename")
+        upload_dir = writable / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        dest = upload_dir / f"{uuid.uuid4().hex}-{name}"
+        uploaded.save(dest)
+        try:
+            return success(ue4ss_installer.install_from_zip(current.game_root, dest))
+        finally:
+            dest.unlink(missing_ok=True)
+
+    def upstream(call):
+        try:
+            return success(call())
+        except Exception as exc:
+            app.logger.warning("Upstream request failed", exc_info=exc)
+            return failure("远程服务请求失败", 502, "upstream_error")
+
+    @app.get("/api/update/check")
+    def update_check():
+        return upstream(self_updater.check_for_update)
+
+    @app.post("/api/update/apply")
+    def update_apply():
+        body = request.get_json(silent=True) or {}
+        return upstream(lambda: self_updater.prepare_update(download_url=body.get("url")))
+
+    def nexus_count() -> int:
+        try:
+            count = int(request.args.get("count", 24))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("count 必须是整数", 400, "invalid_input") from exc
+        if not 1 <= count <= 100:
+            raise ApiError("count 必须介于 1 和 100", 400, "invalid_input")
+        return count
+
+    @app.get("/api/nexus/popular")
+    def nexus_popular():
+        count = nexus_count()
+        return upstream(lambda: nexus_api.fetch_popular(count=count, sort=request.args.get("sort", "downloads")))
+
+    @app.get("/api/nexus/latest")
+    def nexus_latest():
+        count = nexus_count()
+        return upstream(lambda: nexus_api.fetch_latest(count=count))
+
+    @app.get("/api/nexus/search")
+    def nexus_search():
+        count = nexus_count()
+        return upstream(lambda: nexus_api.search_mods(request.args.get("q", ""), count=count))
+
+    @app.get("/api/nexus/mod/<int:mod_id>")
+    def nexus_mod(mod_id: int):
+        return upstream(lambda: nexus_api.get_mod(mod_id))
+
+    @app.post("/api/system/restart-admin")
+    def restart_admin():
+        argv = list(sys.argv) if getattr(sys, "frozen", False) else [sys.executable, *sys.argv]
+        process_utils.restart_as_admin(argv)
+        return success({"restarting": True})
+
     return app
 
 
-def _port_free(host: str, p: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind((host, p))
-            return True
-        except OSError:
-            return False
-
-
-def _pick_port(host: str, preferred: int) -> int:
-    if _port_free(host, preferred):
-        return preferred
-    for candidate in range(preferred + 1, preferred + 30):
-        if _port_free(host, candidate):
-            return candidate
-    return preferred
+def _pick_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 
 def _wait_server(url: str, timeout: float = 15.0) -> bool:
-    import urllib.error
     import urllib.request
-
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url + "api/health", timeout=1.0) as resp:
-                if resp.status == 200:
+            with urllib.request.urlopen(url + "api/health", timeout=1.0) as response:
+                if response.status == 200:
                     return True
         except Exception:
             time.sleep(0.15)
     return False
 
 
-def _run_flask(host: str, port: int) -> None:
-    # werkzeug logs to stderr; keep quiet in desktop mode
-    import logging
+def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
+    """Start the authenticated API on a random loopback port and open the UI."""
+    host = "127.0.0.1"
+    port = _pick_port(host)
+    token = secrets.token_urlsafe(32)
+    application = create_app(root=root, data_dir=data_dir, session_token=token)
+    base_url = f"http://{host}:{port}/"
+    launch_url = f"{base_url}?token={token}"
 
-    log = logging.getLogger("werkzeug")
-    log.setLevel(logging.ERROR)
-    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+    def run() -> None:
+        import logging
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
+        application.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
 
-
-def _icon_path() -> str | None:
-    candidates = [
-        ROOT / "assets" / "app.ico",
-        Path(sys.executable).resolve().parent / "assets" / "app.ico" if getattr(sys, "frozen", False) else None,
-        Path(__file__).resolve().parent.parent / "assets" / "app.ico",
-    ]
-    for c in candidates:
-        if c and c.is_file():
-            return str(c)
-    return None
-
-
-def main():
-    """Start local API + native desktop window (no system browser)."""
-    host = os.environ.get("PALMOD_HOST", "127.0.0.1")
-    port = _pick_port(host, int(os.environ.get("PALMOD_PORT", "17865")))
-    url = f"http://{host}:{port}/"
-    force_browser = os.environ.get("PALMOD_BROWSER", "").strip() in ("1", "true", "yes")
-
-    server = threading.Thread(target=_run_flask, args=(host, port), daemon=True)
+    server = threading.Thread(target=run, daemon=True)
     server.start()
+    if not _wait_server(base_url):
+        print("服务启动超时，请检查防火墙。")
 
-    if not _wait_server(url):
-        # Last resort: still try to open something so user sees an error surface
-        print("服务启动超时，请检查防火墙或端口占用。")
-
-    if force_browser:
-        import webbrowser
-
-        webbrowser.open(url)
-        # Keep process alive while using browser mode
-        try:
-            while server.is_alive():
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            pass
-        return
-
+    force_browser = os.environ.get("PALMOD_BROWSER", "").strip().casefold() in {"1", "true", "yes"}
     try:
+        if force_browser:
+            raise ImportError
         import webview
     except ImportError:
         import webbrowser
-
-        print("未安装 pywebview，回退为浏览器模式。可执行: pip install pywebview")
-        webbrowser.open(url)
+        webbrowser.open(launch_url)
         try:
             while server.is_alive():
                 time.sleep(0.5)
@@ -489,22 +439,8 @@ def main():
             pass
         return
 
-    webview.create_window(
-        title="幻兽帕鲁 Mod 管理面板",
-        url=url,
-        width=1280,
-        height=820,
-        min_size=(960, 640),
-        background_color="#EEF4FF",
-        text_select=True,
-        confirm_close=False,
-        resizable=True,
-    )
-
-    # Block until user closes the window — then process exits
-    # private_mode=False allows cache; gui auto-selects Edge WebView2 on Windows
+    webview.create_window("幻兽帕鲁 Mod 管理面板", launch_url, width=1280, height=820, min_size=(960, 640), background_color="#EEF4FF", text_select=True, confirm_close=False, resizable=True)
     webview.start(debug=False, private_mode=False)
-    os._exit(0)
 
 
 if __name__ == "__main__":
