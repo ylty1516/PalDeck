@@ -20,6 +20,7 @@ data/
 # temp previews
 assets/_*.png
 assets/icon_imagine_raw.jpg
+.superpowers/
 
 # IDE
 .idea/
