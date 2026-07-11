@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import io
 import sys
+import time
 import types
 import zipfile
 from pathlib import Path
+
+from backend.app import create_app
 
 
 def _pak_zip(name: str = "Example.pak", content: bytes = b"pak-data") -> io.BytesIO:
@@ -129,6 +132,12 @@ def test_import_conflict_returns_retry_token(auth_client):
         json={"upload_token": details["upload_token"], "decision": "keep_both"},
     )
     assert retry.status_code == 200
+    reused = auth_client.post(
+        "/api/mods/import",
+        json={"upload_token": details["upload_token"], "decision": "keep_both"},
+    )
+    assert reused.status_code == 400
+    assert reused.json["error_code"] == "upload_expired"
 
 
 def test_game_running_maps_to_423(app, auth_client):
@@ -157,6 +166,98 @@ def test_upload_temporary_file_is_cleaned_after_error(app, auth_client, monkeypa
     assert response.status_code == 400
     upload_dir = Path(app.config["DATA_DIR"]) / "uploads"
     assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_mod_config_routes_are_not_exposed(auth_client):
+    assert auth_client.get("/api/mod-config").status_code == 404
+    assert auth_client.get("/api/mod-config/example").status_code == 404
+    assert auth_client.post("/api/mod-config/install-bundled", json={}).status_code in {404, 405}
+
+
+def test_update_apply_exits_after_response(app, auth_client, monkeypatch):
+    exited = []
+    app.config["EXIT_PROCESS"] = lambda code: exited.append(code)
+    app.config["UPDATE_EXIT_DELAY"] = 0.01
+    monkeypatch.setattr(
+        "backend.app.self_updater.prepare_update",
+        lambda download_url=None: {"should_exit": True, "prepared": True},
+    )
+
+    response = auth_client.post("/api/update/apply", json={})
+
+    assert response.status_code == 200
+    assert response.json["data"]["prepared"] is True
+    deadline = time.time() + 1
+    while not exited and time.time() < deadline:
+        time.sleep(0.01)
+    assert exited == [0]
+
+
+def test_create_app_removes_orphaned_uploads(tmp_path, fake_game_root, monkeypatch):
+    uploads = tmp_path / "data" / "uploads"
+    uploads.mkdir(parents=True)
+    orphan = uploads / "orphan.zip"
+    orphan.write_bytes(b"orphan")
+    monkeypatch.setenv("PALMOD_GAME_PATH", str(fake_game_root))
+
+    create_app(data_dir=tmp_path / "data", session_token="cleanup", testing=True)
+
+    assert not orphan.exists()
+
+
+def test_pending_upload_count_limit_returns_429(app, auth_client):
+    app.config["PENDING_MAX_ITEMS"] = 1
+    installed = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(), "Example.zip")},
+        content_type="multipart/form-data",
+    )
+    assert installed.status_code == 200
+    first = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(content=b"different-1"), "Example.zip")},
+        content_type="multipart/form-data",
+    )
+    assert first.status_code == 409
+
+    second = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(content=b"different-2"), "Example.zip")},
+        content_type="multipart/form-data",
+    )
+
+    assert second.status_code == 429
+    assert second.json["error_code"] == "pending_upload_limit"
+
+
+def test_single_upload_size_limit_returns_413(app, auth_client):
+    app.config["MAX_CONTENT_LENGTH"] = 100
+
+    response = auth_client.post(
+        "/api/mods/import",
+        data={"file": (io.BytesIO(b"x" * 1024), "large.zip")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 413
+    assert response.json["error_code"] == "upload_too_large"
+
+
+def test_deep_value_error_does_not_leak_paths(app, auth_client, monkeypatch):
+    secret = "SECRET_PRIVATE_PATH"
+
+    def fail(*args, **kwargs):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(app.extensions["mod_service"], "install", fail)
+    response = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(), "safe.zip")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert secret not in response.get_data(as_text=True)
 
 
 def test_invalid_nexus_count_is_400(auth_client):

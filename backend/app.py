@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -14,16 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, redirect, request, send_from_directory
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from backend import game_detector, mod_config, nexus_api, process_utils, self_updater, ue4ss_installer
+from backend import game_detector, nexus_api, process_utils, self_updater, ue4ss_installer
 from backend.mod_service import GameRunningError, ModConflictError, ModService
 from backend.version import APP_VERSION
 
 COOKIE_NAME = "paldeck_session"
 UPLOAD_TTL_SECONDS = 15 * 60
 MAX_UPLOAD_BYTES = 2 * 1024**3
+MAX_PENDING_ITEMS = 8
+MAX_PENDING_BYTES = 4 * 1024**3
 
 
 def _resolve_root() -> Path:
@@ -67,7 +70,11 @@ def create_app(
         DATA_DIR=str(writable),
         SESSION_TOKEN=token,
         MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
+        PENDING_MAX_ITEMS=MAX_PENDING_ITEMS,
+        PENDING_MAX_TOTAL_BYTES=MAX_PENDING_BYTES,
         OPEN_FOLDER=getattr(os, "startfile", None),
+        EXIT_PROCESS=os._exit,
+        UPDATE_EXIT_DELAY=1.2,
     )
     writable.mkdir(parents=True, exist_ok=True)
 
@@ -84,7 +91,44 @@ def create_app(
                 pass
     if game_path:
         app.extensions["mod_service"] = ModService(game_path, writable)
-    app.extensions["pending_uploads"] = {}
+    pending: dict[str, dict[str, Any]] = {}
+    pending_lock = threading.Lock()
+    app.extensions["pending_uploads"] = pending
+    app.extensions["pending_uploads_lock"] = pending_lock
+    upload_dir = writable / "uploads"
+
+    def cleanup_pending_uploads(*, remove_all_orphans: bool = False) -> None:
+        now = time.time()
+        with pending_lock:
+            for upload_token, item in list(pending.items()):
+                if item["expires"] <= now or not Path(item["path"]).is_file():
+                    Path(item["path"]).unlink(missing_ok=True)
+                    pending.pop(upload_token, None)
+            tracked = {Path(item["path"]).resolve() for item in pending.values()}
+        if not upload_dir.is_dir():
+            return
+        for child in upload_dir.iterdir():
+            try:
+                if child.resolve() in tracked:
+                    continue
+                expired = now - child.stat().st_mtime >= UPLOAD_TTL_SECONDS
+                if remove_all_orphans or expired:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    cleanup_pending_uploads(remove_all_orphans=True)
+
+    if not testing:
+        def periodic_cleanup() -> None:
+            while True:
+                time.sleep(60)
+                cleanup_pending_uploads()
+
+        threading.Thread(target=periodic_cleanup, daemon=True).start()
 
     def success(data: Any = None):
         return jsonify({"ok": True, "data": data})
@@ -105,6 +149,7 @@ def create_app(
 
     @app.before_request
     def require_session():
+        cleanup_pending_uploads()
         if not request.path.startswith("/api/") or request.path == "/api/health":
             return None
         supplied = request.cookies.get(COOKIE_NAME, "")
@@ -130,14 +175,20 @@ def create_app(
 
     @app.errorhandler(RequestEntityTooLarge)
     def handle_too_large(_exc: RequestEntityTooLarge):
-        return failure("上传文件过大", 400, "upload_too_large")
+        return failure("上传文件过大", 413, "upload_too_large")
 
     @app.errorhandler(ValueError)
-    @app.errorhandler(KeyError)
     @app.errorhandler(FileNotFoundError)
-    def handle_bad_input(exc: Exception):
-        text = str(exc).strip("'") or "输入无效"
-        return failure(text, 400, "invalid_input")
+    def handle_bad_input(_exc: Exception):
+        return failure("输入无效或请求的文件不存在", 400, "invalid_input")
+
+    @app.errorhandler(KeyError)
+    def handle_missing(_exc: KeyError):
+        return failure("请求的对象不存在", 404, "not_found")
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(exc: HTTPException):
+        return failure("请求的资源不存在" if exc.code == 404 else "请求失败", exc.code or 500, "not_found" if exc.code == 404 else "http_error")
 
     @app.errorhandler(Exception)
     def handle_internal(exc: Exception):
@@ -167,25 +218,16 @@ def create_app(
         current = service(required=False)
         return success(current.list_mods() if current else [])
 
-    def cleanup_expired_uploads() -> None:
-        now = time.time()
-        pending = app.extensions["pending_uploads"]
-        for upload_token, item in list(pending.items()):
-            if item["expires"] <= now:
-                Path(item["path"]).unlink(missing_ok=True)
-                pending.pop(upload_token, None)
-
     @app.post("/api/mods/import")
     def import_mod():
-        cleanup_expired_uploads()
         current = service()
         body = request.get_json(silent=True) or {}
         retry_token = body.get("upload_token")
-        pending = app.extensions["pending_uploads"]
         retained = False
         dest: Path | None = None
         if retry_token:
-            item = pending.pop(str(retry_token), None)
+            with pending_lock:
+                item = pending.pop(str(retry_token), None)
             if not item:
                 raise ApiError("上传暂存已过期", 400, "upload_expired")
             dest = Path(item["path"])
@@ -198,10 +240,22 @@ def create_app(
             filename = secure_filename(Path(uploaded.filename).name)
             if not filename:
                 raise ApiError("文件名无效", 400, "invalid_filename")
-            upload_dir = writable / "uploads"
             upload_dir.mkdir(parents=True, exist_ok=True)
             dest = upload_dir / f"{uuid.uuid4().hex}-{filename}"
             uploaded.save(dest)
+            file_size = dest.stat().st_size
+            if file_size > int(app.config["MAX_CONTENT_LENGTH"]):
+                dest.unlink(missing_ok=True)
+                raise ApiError("上传文件过大", 413, "upload_too_large")
+            with pending_lock:
+                pending_bytes = sum(
+                    Path(item["path"]).stat().st_size
+                    for item in pending.values()
+                    if Path(item["path"]).is_file()
+                )
+            if pending_bytes + file_size > int(app.config["PENDING_MAX_TOTAL_BYTES"]):
+                dest.unlink(missing_ok=True)
+                raise ApiError("上传暂存空间已满", 413, "pending_upload_too_large")
             nexus = request.form.get("nexus_id")
             if nexus and not nexus.isdigit():
                 dest.unlink(missing_ok=True)
@@ -226,17 +280,20 @@ def create_app(
         try:
             return success(current.install(dest, decision=decision, **options))
         except ModConflictError as exc:
-            if dest is not None and (retry_token or dest.parent == writable / "uploads"):
+            if dest is not None and (retry_token or dest.parent == upload_dir):
                 new_token = secrets.token_urlsafe(24)
-                pending[new_token] = {
-                    "path": str(dest), "options": options,
-                    "expires": time.time() + UPLOAD_TTL_SECONDS,
-                }
+                with pending_lock:
+                    if len(pending) >= int(app.config["PENDING_MAX_ITEMS"]):
+                        raise ApiError("待处理上传过多", 429, "pending_upload_limit") from exc
+                    pending[new_token] = {
+                        "path": str(dest), "options": options,
+                        "expires": time.time() + UPLOAD_TTL_SECONDS,
+                    }
                 retained = True
                 raise ModConflictError({**exc.details, "upload_token": new_token}) from exc
             raise
         finally:
-            if dest is not None and dest.parent == writable / "uploads" and not retained:
+            if dest is not None and dest.parent == upload_dir and not retained:
                 dest.unlink(missing_ok=True)
 
     @app.get("/api/mods/open-folder")
@@ -301,27 +358,6 @@ def create_app(
     def ensure_folders():
         return success(game_detector.ensure_mod_folders(service().game_root))
 
-    @app.get("/api/mod-config")
-    def list_mod_configs():
-        return success(mod_config.list_configurable_mods())
-
-    @app.get("/api/mod-config/<mod_folder>")
-    def get_mod_config(mod_folder: str):
-        return success(mod_config.get_mod_config(mod_folder))
-
-    @app.post("/api/mod-config/<mod_folder>")
-    def update_mod_config(mod_folder: str):
-        body = request.get_json(silent=True) or {}
-        values = body.get("values", body)
-        if not isinstance(values, dict):
-            raise ApiError("请提供 values 对象", 400, "invalid_input")
-        return success(mod_config.update_mod_config(mod_folder, values))
-
-    @app.post("/api/mod-config/install-bundled")
-    def install_bundled():
-        body = request.get_json(silent=True) or {}
-        return success(mod_config.install_bundled_mod(str(body.get("name") or "ConfigurableBagExpand").strip()))
-
     @app.get("/api/ue4ss/status")
     def ue4ss_status():
         return success(ue4ss_installer.status(service().game_root))
@@ -363,7 +399,18 @@ def create_app(
     @app.post("/api/update/apply")
     def update_apply():
         body = request.get_json(silent=True) or {}
-        return upstream(lambda: self_updater.prepare_update(download_url=body.get("url")))
+        try:
+            result = self_updater.prepare_update(download_url=body.get("url"))
+        except Exception as exc:
+            app.logger.warning("Update preparation failed", exc_info=exc)
+            return failure("远程服务请求失败", 502, "upstream_error")
+        if result.get("should_exit"):
+            def delayed_exit() -> None:
+                time.sleep(float(app.config["UPDATE_EXIT_DELAY"]))
+                app.config["EXIT_PROCESS"](0)
+
+            threading.Thread(target=delayed_exit, daemon=True).start()
+        return success(result)
 
     def nexus_count() -> int:
         try:
