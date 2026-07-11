@@ -59,7 +59,7 @@ def get_manifest_store():
     return _manifest_store_instance
 
 
-def get_mod_service(*, required: bool = True):
+def _get_mod_service(*, required: bool = True):
     global _mod_service_instance
     if _mod_service_instance is not None:
         return _mod_service_instance

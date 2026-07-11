@@ -1,10 +1,11 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from backend.domain import ModKind
+from backend.domain import ManifestFile, ModKind
 from backend.manifest_store import ManifestStore
 
 
@@ -48,17 +49,18 @@ def test_create_roundtrips_unicode_and_ue4ss_metadata(tmp_path):
     assert (tmp_path / "data" / "manifests" / f"{created.id}.json").is_file()
 
 
-def test_list_is_stably_sorted_by_id(tmp_path, monkeypatch):
+def test_list_is_stably_sorted_by_installed_at_then_id(tmp_path, monkeypatch):
     root = tmp_path / "mods"
     root.mkdir()
     payload = root / "a.pak"
     payload.write_bytes(b"a")
-    values = iter(["f" * 32, "0" * 32])
+    values = iter(["0" * 32, "f" * 32, "1" * 32])
     monkeypatch.setattr("backend.manifest_store.uuid.uuid4", lambda: type("U", (), {"hex": next(values)})())
     store = ManifestStore(tmp_path / "data")
-    _create(store, root, [payload], name="z")
-    _create(store, root, [payload], name="a")
-    assert [item.id for item in store.list()] == ["0" * 32, "f" * 32]
+    _create(store, root, [payload], installed_at="2026-01-02T00:00:00+00:00")
+    _create(store, root, [payload], installed_at="2026-01-01T00:00:00+00:00")
+    _create(store, root, [payload], installed_at="2026-01-01T00:00:00+00:00")
+    assert [item.id for item in store.list()] == ["1" * 32, "f" * 32, "0" * 32]
 
 
 def test_get_missing_raises_key_error_and_delete_is_idempotent(tmp_path):
@@ -66,6 +68,48 @@ def test_get_missing_raises_key_error_and_delete_is_idempotent(tmp_path):
     with pytest.raises(KeyError):
         store.get("missing")
     store.delete("missing")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda value: value.update(id="not-a-uuid"),
+        lambda value: value.update(name=3),
+        lambda value: value.update(kind="loose"),
+        lambda value: value.update(install_root=3),
+        lambda value: value.update(source_name=[]),
+        lambda value: value.update(nexus_id=True),
+        lambda value: value.update(installed_at="not-a-date"),
+        lambda value: value.update(enabled=1),
+        lambda value: value.update(files="not-a-list"),
+        lambda value: value["files"][0].update(relative_path="../outside.pak"),
+        lambda value: value["files"][0].update(relative_path="C:\\outside.pak"),
+        lambda value: value["files"][0].update(size=-1),
+        lambda value: value["files"][0].update(size=True),
+        lambda value: value["files"][0].update(sha256="not-a-sha256"),
+        lambda value: value.update(files=[value["files"][0], {**value["files"][0], "relative_path": "A.PAK"}]),
+    ],
+    ids=[
+        "uuid", "name-type", "kind", "install-root-type", "source-name-type", "nexus-id-type",
+        "installed-at", "enabled-type", "files-type", "parent-traversal", "windows-absolute",
+        "negative-size", "bool-size", "sha256", "windows-normalized-duplicate",
+    ],
+)
+def test_invalid_persisted_manifest_is_rejected_by_get_and_skipped_by_list(tmp_path, change):
+    root = tmp_path / "mods"
+    root.mkdir()
+    payload = root / "a.pak"
+    payload.write_bytes(b"a")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, root, [payload])
+    path = store.manifests_dir / f"{manifest.id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    change(value)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"invalid manifest: {manifest.id}"):
+        store.get(manifest.id)
+    assert store.list() == []
 
 
 def test_audit_detects_modified_missing_disabled_and_conflict(tmp_path):
@@ -83,11 +127,61 @@ def test_audit_detects_modified_missing_disabled_and_conflict(tmp_path):
     assert store.audit(manifest.id, disabled).status == "modified"
     payload.unlink()
     assert store.audit(manifest.id, disabled).status == "missing"
-    disabled_payload = disabled / "a.pak"
+    disabled_payload = disabled / manifest.id / "a.pak"
+    disabled_payload.parent.mkdir()
     disabled_payload.write_bytes(b"original")
     assert store.audit(manifest.id, disabled).status == "disabled"
     payload.write_bytes(b"original")
     assert store.audit(manifest.id, disabled).status == "conflict"
+
+
+def test_audit_uses_default_disabled_root_and_manifest_id(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    payload = live / "a.pak"
+    payload.write_bytes(b"original")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, live, [payload])
+    payload.unlink()
+    disabled_payload = tmp_path / "disabled" / manifest.id / "a.pak"
+    disabled_payload.parent.mkdir(parents=True)
+    disabled_payload.write_bytes(b"original")
+
+    assert store.audit(manifest.id).status == "disabled"
+
+
+def test_audit_rejects_traversal_without_hashing_external_file(tmp_path, monkeypatch):
+    live = tmp_path / "live"
+    live.mkdir()
+    payload = live / "a.pak"
+    payload.write_bytes(b"original")
+    outside = tmp_path / "outside.pak"
+    outside.write_bytes(b"outside")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, live, [payload])
+    unsafe = replace(
+        manifest,
+        files=(ManifestFile("../outside.pak", outside.stat().st_size, "0" * 64),),
+    )
+    monkeypatch.setattr(store, "get", lambda manifest_id: unsafe)
+    monkeypatch.setattr("backend.manifest_store._sha256", lambda path: pytest.fail("external file was hashed"))
+
+    with pytest.raises(ValueError, match="relative_path"):
+        store.audit(manifest.id)
+
+
+def test_audit_rejects_reparse_before_hashing(tmp_path, monkeypatch):
+    live = tmp_path / "live"
+    live.mkdir()
+    payload = live / "a.pak"
+    payload.write_bytes(b"original")
+    store = ManifestStore(tmp_path / "data")
+    manifest = _create(store, live, [payload])
+    monkeypatch.setattr("backend.manifest_store._is_reparse", lambda path: Path(path) == payload)
+    monkeypatch.setattr("backend.manifest_store._sha256", lambda path: pytest.fail("reparse point was hashed"))
+
+    with pytest.raises(ValueError, match="symlink/reparse"):
+        store.audit(manifest.id)
 
 
 def test_create_rejects_outside_duplicate_and_symlink(tmp_path):
@@ -222,4 +316,4 @@ def test_mod_manager_lazily_exposes_manifest_store_without_mod_service(tmp_path,
     first = mod_manager.get_manifest_store()
     assert isinstance(first, ManifestStore)
     assert first is mod_manager.get_manifest_store()
-    assert mod_manager.get_mod_service(required=False) is None
+    assert mod_manager._get_mod_service(required=False) is None
