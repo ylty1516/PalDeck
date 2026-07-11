@@ -2,6 +2,13 @@ import pytest
 
 
 @pytest.fixture
+def data_dir(tmp_path):
+    path = tmp_path / "data"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
 def fake_game_root(tmp_path):
     root = tmp_path / "Palworld"
     (root / "Pal" / "Binaries" / "Win64").mkdir(parents=True)
