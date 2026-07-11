@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import string
 import winreg
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 APP_ID = "1623730"
@@ -36,18 +35,128 @@ def _read_vdf(path: Path) -> str:
         return ""
 
 
+def _tokenize_keyvalues(text: str) -> list[str]:
+    tokens: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        if char in "{}":
+            tokens.append(char)
+            index += 1
+            continue
+        if char != '"':
+            raise ValueError("invalid KeyValues token")
+
+        index += 1
+        value: list[str] = []
+        while index < len(text) and text[index] != '"':
+            if text[index] == "\\" and index + 1 < len(text):
+                escaped = text[index + 1]
+                if escaped in ('"', "\\"):
+                    value.append(escaped)
+                    index += 2
+                    continue
+            value.append(text[index])
+            index += 1
+        if index >= len(text):
+            raise ValueError("unterminated KeyValues string")
+        tokens.append("".join(value))
+        index += 1
+    return tokens
+
+
+def _parse_keyvalues(text: str) -> dict[str, object]:
+    tokens = _tokenize_keyvalues(text)
+    index = 0
+
+    def parse_object(*, nested: bool) -> dict[str, object]:
+        nonlocal index
+        parsed: dict[str, object] = {}
+        while index < len(tokens):
+            key = tokens[index]
+            index += 1
+            if key == "}":
+                if nested:
+                    return parsed
+                raise ValueError("unexpected KeyValues closing brace")
+            if key == "{":
+                raise ValueError("unexpected KeyValues opening brace")
+            if index >= len(tokens):
+                raise ValueError("missing KeyValues value")
+            value = tokens[index]
+            index += 1
+            if value == "{":
+                parsed[key] = parse_object(nested=True)
+            elif value == "}":
+                raise ValueError("missing KeyValues value")
+            else:
+                parsed[key] = value
+        if nested:
+            raise ValueError("unterminated KeyValues object")
+        return parsed
+
+    return parse_object(nested=False)
+
+
+def _load_keyvalues(path: Path) -> dict[str, object]:
+    try:
+        return _parse_keyvalues(_read_vdf(path))
+    except ValueError:
+        return {}
+
+
+def _get_casefold(mapping: dict[str, object], key: str) -> object | None:
+    wanted = key.casefold()
+    for candidate, value in mapping.items():
+        if candidate.casefold() == wanted:
+            return value
+    return None
+
+
 def _parse_library_folders(vdf_path: Path) -> list[Path]:
+    root = _get_casefold(_load_keyvalues(vdf_path), "libraryfolders")
+    if not isinstance(root, dict):
+        return []
+
     libraries: list[Path] = []
-    for match in re.finditer(r'"path"\s*"([^"]+)"', _read_vdf(vdf_path), re.I):
-        raw = match.group(1).replace("\\\\", "\\")
-        libraries.append(Path(raw))
+    for entry in root.values():
+        if not isinstance(entry, dict):
+            continue
+        raw = _get_casefold(entry, "path")
+        if isinstance(raw, str) and raw:
+            libraries.append(Path(raw))
     return libraries
+
+
+def _is_safe_installdir(value: str) -> bool:
+    windows_path = PureWindowsPath(value)
+    return bool(
+        value.strip()
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and not windows_path.is_absolute()
+        and not windows_path.drive
+    )
 
 
 def _manifest_installdir(library: Path) -> str | None:
     manifest = library / "steamapps" / f"appmanifest_{APP_ID}.acf"
-    match = re.search(r'"installdir"\s*"([^"]+)"', _read_vdf(manifest), re.I)
-    return match.group(1) if match else None
+    app_state = _get_casefold(_load_keyvalues(manifest), "AppState")
+    if not isinstance(app_state, dict):
+        return None
+    appid = _get_casefold(app_state, "appid")
+    installdir = _get_casefold(app_state, "installdir")
+    if appid != APP_ID or not isinstance(installdir, str):
+        return None
+    return installdir if _is_safe_installdir(installdir) else None
 
 
 def _is_valid_game_root(path: Path) -> bool:
@@ -199,14 +308,16 @@ def ensure_mod_folders(game_root: Path | str) -> dict[str, object]:
         raise ValueError(f"无效的幻兽帕鲁游戏目录: {root}")
 
     dirs = get_mod_directories(root)
+    targets = [dirs[key] for key in ("tilde_mods", "logic_mods", "ue4ss_mods")]
+    for path in targets:
+        if path.exists() and not path.is_dir():
+            raise ValueError(f"路径存在但不是文件夹: {path}")
+
     created: list[str] = []
-    for key in ("tilde_mods", "logic_mods", "ue4ss_mods"):
-        path = dirs[key]
+    for path in targets:
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
             created.append(str(path))
-        elif not path.is_dir():
-            raise ValueError(f"路径存在但不是文件夹: {path}")
 
     return {
         "ok": True,

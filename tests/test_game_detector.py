@@ -66,6 +66,72 @@ def test_find_install_does_not_guess_without_manifest(tmp_path):
     assert find_palworld_installs(steam_roots=[steam_root]) == []
 
 
+def test_manifest_rejects_wrong_appid(tmp_path):
+    steam_root = tmp_path / "Steam"
+    write_manifest(steam_root, "Palworld")
+    manifest = steam_root / "steamapps" / "appmanifest_1623730.acf"
+    manifest.write_text(
+        '"AppState" { "appid" "999999" "installdir" "Palworld" }',
+        encoding="utf-8",
+    )
+    make_shipping_game(steam_root / "steamapps" / "common" / "Palworld")
+
+    assert find_palworld_installs(steam_roots=[steam_root]) == []
+
+
+def test_libraryfolders_ignores_commented_path(tmp_path):
+    steam_root = tmp_path / "Steam"
+    commented_library = tmp_path / "CommentedLibrary"
+    (steam_root / "steamapps").mkdir(parents=True)
+    escaped = str(commented_library).replace("\\", "\\\\")
+    (steam_root / "steamapps" / "libraryfolders.vdf").write_text(
+        f'"libraryfolders" {{ // "0" {{ "path" "{escaped}" }}\n }}',
+        encoding="utf-8",
+    )
+    write_manifest(commented_library, "Palworld")
+    make_shipping_game(commented_library / "steamapps" / "common" / "Palworld")
+
+    assert find_palworld_installs(steam_roots=[steam_root]) == []
+
+
+def test_manifest_ignores_commented_installdir(tmp_path):
+    steam_root = tmp_path / "Steam"
+    steamapps = steam_root / "steamapps"
+    steamapps.mkdir(parents=True)
+    (steamapps / "appmanifest_1623730.acf").write_text(
+        '"AppState" { "appid" "1623730"\n'
+        '// "installdir" "Commented"\n "installdir" "Real" }',
+        encoding="utf-8",
+    )
+    make_shipping_game(steamapps / "common" / "Commented")
+    real = make_shipping_game(steamapps / "common" / "Real")
+
+    installs = find_palworld_installs(steam_roots=[steam_root])
+
+    assert [item["path"] for item in installs] == [str(real)]
+
+
+@pytest.mark.parametrize(
+    "installdir",
+    ["", ".", "..", "../Escaped", "..\\Escaped", "Pal/world", "Pal\\world"],
+)
+def test_manifest_rejects_non_single_relative_installdir(tmp_path, installdir):
+    steam_root = tmp_path / "Steam"
+    write_manifest(steam_root, installdir)
+    candidate = steam_root / "steamapps" / "common" / installdir
+    make_shipping_game(candidate)
+
+    assert find_palworld_installs(steam_roots=[steam_root]) == []
+
+
+def test_manifest_rejects_absolute_installdir(tmp_path):
+    steam_root = tmp_path / "Steam"
+    absolute_game = make_shipping_game(tmp_path / "AbsolutePalworld")
+    write_manifest(steam_root, str(absolute_game).replace("\\", "\\\\"))
+
+    assert find_palworld_installs(steam_roots=[steam_root]) == []
+
+
 def test_default_fallback_is_not_scanned_when_manifest_finds_valid_install(
     tmp_path, monkeypatch
 ):
@@ -210,6 +276,20 @@ def test_resolve_ue4ss_mods_dir_defaults_to_classic(tmp_path):
     win64 = root / "Pal" / "Binaries" / "Win64"
 
     assert resolve_ue4ss_mods_dir(root) == win64 / "Mods"
+
+
+def test_ensure_mod_folders_preflights_all_targets_before_creating(tmp_path):
+    root = make_shipping_game(tmp_path / "Palworld")
+    tilde_mods = root / "Pal" / "Content" / "Paks" / "~mods"
+    logic_mods = root / "Pal" / "Content" / "Paks" / "LogicMods"
+    logic_mods.touch()
+
+    with pytest.raises(ValueError, match="不是文件夹"):
+        ensure_mod_folders(root)
+
+    assert not tilde_mods.exists()
+    assert logic_mods.is_file()
+    assert not (root / "Pal" / "Binaries" / "Win64" / "Mods").exists()
 
 
 def test_validate_with_create_creates_only_client_mod_folders(tmp_path):
