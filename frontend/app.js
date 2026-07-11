@@ -1,5 +1,6 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
+import { actionableErrorMessage, dynamicActionKey } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -33,12 +34,6 @@ function setBusy(active, message = "处理中…") {
   overlay.hidden = !active;
   $("#busyText").textContent = message;
   document.documentElement.classList.toggle("is-busy", active);
-}
-
-function actionableErrorMessage(error) {
-  if (error instanceof ApiError && error.status === 423 && error.code === "game_running") return "请先退出游戏，再重试此操作";
-  if (error instanceof ApiError && error.status === 403 && error.code === "permission_denied") return "权限不足，请点击“以管理员身份重启”后重试";
-  return error.message || "操作失败";
 }
 
 async function run(trigger, operation, { disable = true, global = false, busyText = "处理中…" } = {}) {
@@ -125,6 +120,16 @@ function selectModFile(file) {
   state.selectedModFile = file || null;
   $("#selectedModFile").textContent = file ? `已选择：${file.name}` : "尚未选择文件";
   $("#importResult").textContent = file ? `识别结果：${/\.pak$/i.test(file.name) ? "PAK 模组" : "ZIP 压缩包（安装时自动识别）"}` : "";
+}
+
+async function executeModFileSelection(file) {
+  try {
+    selectModFile(file);
+    return true;
+  } catch (error) {
+    toast(actionableErrorMessage(error), "error");
+    return false;
+  }
 }
 
 async function importSelected(decision = "cancel") {
@@ -283,7 +288,7 @@ export const ACTION_HANDLERS = Object.freeze({
   openModsFolder: async () => request("/api/mods/open-folder"),
   filterMods: () => filterMods(),
   chooseModFile: () => $("#modFileInput").click(),
-  selectModFile: (event) => selectModFile(event.currentTarget.files?.[0] || null),
+  selectModFile: async (event) => executeModFileSelection(event.currentTarget.files?.[0] || null),
   changeImportType: noop,
   editImportName: noop,
   editImportNexusId: noop,
@@ -349,7 +354,6 @@ async function dispatchStatic(event) {
 }
 
 async function toggleMod(target, id) {
-  const previousMods = state.mods;
   try {
     const updated = await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
       method: "POST", body: { enabled: target.dataset.enabled === "true" },
@@ -357,10 +361,8 @@ async function toggleMod(target, id) {
     state.mods = state.mods.map((mod) => String(mod.id) === String(updated.id) ? updated : mod);
     filterMods();
   } catch (error) {
-    state.mods = previousMods;
-    filterMods();
+    await loadMods();
     if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
-      await loadMods();
       renderConflict($("#modConflictNotice"), error.details);
       $("#modConflictNotice").hidden = false;
       toast("切换失败：请先处理冲突文件后重试", "error");
@@ -375,7 +377,7 @@ async function handleDynamicAction(event) {
   if (!target) return;
   if (target.disabled) return;
   const id = target.dataset.id;
-  const actionKey = `${target.dataset.dynamicAction}:${id || "global"}`;
+  const actionKey = dynamicActionKey(target.dataset.dynamicAction, id);
   if (inFlightDynamicActions.has(actionKey)) return;
   inFlightDynamicActions.add(actionKey);
   target.disabled = true;
@@ -399,13 +401,10 @@ async function handleDynamicAction(event) {
 
 function setupDropzone() {
   const zone = $("#dropzone");
-  for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, (event) => {
+  for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, async (event) => {
     event.preventDefault();
     zone.classList.toggle("dragging", name === "dragenter" || name === "dragover");
-    if (name === "drop") {
-      try { selectModFile(event.dataTransfer?.files?.[0] || null); }
-      catch (error) { toast(error.message, "error"); }
-    }
+    if (name === "drop") await executeModFileSelection(event.dataTransfer?.files?.[0] || null);
   });
 }
 

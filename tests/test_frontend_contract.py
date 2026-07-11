@@ -12,6 +12,7 @@ APP = FRONTEND / "app.js"
 API = FRONTEND / "api.js"
 EFFECTS = FRONTEND / "effects.js"
 RENDER = FRONTEND / "render.js"
+INTERACTION = FRONTEND / "interaction-policy.js"
 CSS = FRONTEND / "styles.css"
 
 REQUIRED_ACTIONS = {
@@ -101,7 +102,7 @@ def test_dynamic_cards_use_delegation_and_cover_all_cases():
 
 
 def test_modules_are_safe_and_have_required_contracts():
-    joined = "\n".join(p.read_text(encoding="utf-8") for p in (APP, API, EFFECTS, RENDER))
+    joined = "\n".join(p.read_text(encoding="utf-8") for p in (APP, API, EFFECTS, RENDER, INTERACTION))
     assert "innerHTML" not in joined
     assert "mod-config" not in joined.lower()
     assert "textContent" in RENDER.read_text(encoding="utf-8")
@@ -252,10 +253,12 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
     assert "mod.mod_type" in render
     assert "mod.nexus_id" in render
     assert "mod.size_bytes" in render
-    assert "const previousMods = state.mods" in app
+    assert "previousMods" not in app
     assert "const updated = await request" in app
     assert "state.mods = state.mods.map" in app
-    assert "state.mods = previousMods" in app
+    toggle = re.search(r"async function toggleMod\(target, id\) \{(.*?)^\}", app, re.S | re.M)
+    assert toggle
+    assert toggle.group(1).index("await loadMods()") < toggle.group(1).index('error.code === "mod_conflict"')
     assert "target.disabled = true" in app
     assert "target.disabled = false" in app
 
@@ -270,12 +273,11 @@ def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
     for stage in ("已选择", "正在上传", "正在识别并安装", "安装成功"):
         assert stage in app
     assert '正在识别并安装：正在上传 ${state.selectedModFile.name}' in app
+    assert "executeModFileSelection" in app
     assert 'error.status === 410 && error.code === "upload_expired"' in app
-    assert "请重新选择文件" in app
-    assert 'error.status === 423 && error.code === "game_running"' in app
-    assert "请先退出游戏" in app
-    assert 'error.status === 403 && error.code === "permission_denied"' in app
-    assert "管理员身份重启" in app
+    assert "请重新选择文件" in INTERACTION.read_text(encoding="utf-8")
+    assert "请先退出游戏" in INTERACTION.read_text(encoding="utf-8")
+    assert "管理员身份重启" in INTERACTION.read_text(encoding="utf-8")
     assert 'renderConflict($("#deleteDetails"), error.details)' in app
     assert 'id="deleteDetails"' in html
     assert "isSupportedModFile" in app
@@ -287,11 +289,32 @@ def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
     assert '"rescanMods"' in RENDER.read_text(encoding="utf-8")
     assert "if (target.disabled) return" in app
     assert "inFlightDynamicActions" in app
+    assert 'dynamicActionKey(target.dataset.dynamicAction, id)' in app
     assert "innerHTML" not in app
 
 
+def test_interaction_policy_executable_contract():
+    script = """
+      import { actionableErrorMessage, dynamicActionKey } from './frontend/interaction-policy.js';
+      if (dynamicActionKey('rescanMods', 'card-a') !== 'rescan-mods') process.exit(1);
+      if (dynamicActionKey('rescanMods', 'card-b') !== 'rescan-mods') process.exit(2);
+      if (dynamicActionKey('toggleMod', 'card-a') !== 'toggleMod:card-a') process.exit(3);
+      const cases = [
+        [{ status: 403, code: 'permission_denied' }, '管理员身份重启'],
+        [{ status: 423, code: 'game_running' }, '退出游戏'],
+        [{ status: 410, code: 'upload_expired' }, '重新选择文件'],
+      ];
+      if (!cases.every(([error, expected]) => actionableErrorMessage(error).includes(expected))) process.exit(4);
+    """
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script], cwd=ROOT,
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_all_javascript_modules_pass_node_syntax_check():
-    for path in (APP, API, EFFECTS, RENDER):
+    for path in (APP, API, EFFECTS, RENDER, INTERACTION):
         result = subprocess.run(
             ["node", "--check", str(path)], cwd=ROOT, text=True,
             capture_output=True, check=False,
