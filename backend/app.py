@@ -14,12 +14,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from backend import game_detector, nexus_api, process_utils, self_updater, ue4ss_installer
+from backend.appearance import AppearanceService
 from backend.mod_service import GameRunningError, ModConflictError, ModService
+from backend.storage import JsonStore
 from backend.version import APP_VERSION
 
 COOKIE_NAME = "paldeck_session"
@@ -77,6 +79,11 @@ def create_app(
         UPDATE_EXIT_DELAY=1.2,
     )
     writable.mkdir(parents=True, exist_ok=True)
+    default_background = app_root / "assets" / "default-background.webp"
+    if not default_background.is_file():
+        default_background = _resolve_root() / "assets" / "default-background.webp"
+    appearance = AppearanceService(writable, default_background)
+    app.extensions["appearance_service"] = appearance
 
     game_path = os.environ.get("PALMOD_GAME_PATH")
     if not game_path:
@@ -213,6 +220,46 @@ def create_app(
     def health():
         return success({"status": "up", "version": APP_VERSION, "frozen": self_updater.is_frozen()})
 
+    @app.get("/api/appearance")
+    def get_appearance():
+        return success(appearance.get_settings())
+
+    @app.post("/api/appearance")
+    def update_appearance():
+        body = request.get_json(silent=True)
+        if body is None:
+            raise ApiError("请提供外观设置", 400, "invalid_input")
+        return success(appearance.update_settings(body))
+
+    @app.post("/api/appearance/background")
+    def upload_background():
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            raise ApiError("请选择背景图片", 400, "missing_file")
+        suffix = Path(uploaded.filename).suffix.casefold()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ApiError("仅支持 PNG、JPEG 和 WEBP 图片", 400, "invalid_filename")
+        temporary_dir = writable / "uploads"
+        temporary_dir.mkdir(parents=True, exist_ok=True)
+        temporary = temporary_dir / f"appearance-{uuid.uuid4().hex}{suffix}"
+        uploaded.save(temporary)
+        try:
+            appearance.set_background(temporary, declared_mime=uploaded.mimetype)
+            return success(appearance.get_settings())
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.delete("/api/appearance/background")
+    def reset_background():
+        return success(appearance.reset_background())
+
+    @app.get("/api/appearance/background/current")
+    def current_background():
+        response = send_file(appearance.current_background(), conditional=False, max_age=0)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
     @app.get("/api/mods")
     def list_mods():
         current = service(required=False)
@@ -339,9 +386,12 @@ def create_app(
             raise ApiError("请提供游戏路径", 400, "invalid_input")
         info = game_detector.validate_game_path(path)
         game_detector.ensure_mod_folders(path)
-        import json
-        config_path = writable / "config.json"
-        config_path.write_text(json.dumps({"game_path": path}, ensure_ascii=False), encoding="utf-8")
+        config_store = JsonStore(writable / "config.json")
+        config = config_store.read({})
+        if not isinstance(config, dict):
+            config = {}
+        config["game_path"] = path
+        config_store.write(config)
         app.extensions["mod_service"] = ModService(path, writable)
         return success(info)
 

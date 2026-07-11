@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from backend.appearance import AppearanceService
+from scripts.prepare_default_background import prepare
+
+
+def _image(path: Path, *, size: tuple[int, int] = (64, 48), format: str | None = None) -> Path:
+    Image.new("RGB", size, "royalblue").save(path, format=format)
+    return path
+
+
+def _service(tmp_path: Path) -> AppearanceService:
+    default = _image(tmp_path / "default.webp", format="WEBP")
+    return AppearanceService(tmp_path / "data", default)
+
+
+def test_prepare_crops_header_and_writes_rgb_webp(tmp_path):
+    source = tmp_path / "source.png"
+    target = tmp_path / "nested" / "default.webp"
+    image = Image.new("RGB", (100, 1000), "red")
+    image.paste("blue", (0, 64, 100, 1000))
+    image.save(source)
+
+    prepare(source, target)
+
+    with Image.open(target) as result:
+        assert result.format == "WEBP"
+        assert result.mode == "RGB"
+        assert result.size == (100, 936)
+        assert result.getpixel((50, 0))[2] > result.getpixel((50, 0))[0]
+
+
+def test_rejects_extension_disguised_as_image(tmp_path):
+    fake = tmp_path / "wallpaper.png"
+    fake.write_text("not an image", encoding="utf-8")
+    with pytest.raises(ValueError, match="有效图片"):
+        _service(tmp_path).set_background(fake)
+
+
+def test_rejects_real_image_with_mismatched_extension(tmp_path):
+    disguised = _image(tmp_path / "wallpaper.png", format="JPEG")
+    with pytest.raises(ValueError, match="扩展名"):
+        _service(tmp_path).set_background(disguised)
+
+
+def test_rejects_oversized_file_without_changing_settings(tmp_path):
+    service = _service(tmp_path)
+    before = service.get_settings()
+    oversized = tmp_path / "large.png"
+    oversized.write_bytes(b"x" * (25 * 1024 * 1024 + 1))
+
+    with pytest.raises(ValueError, match="25 MiB"):
+        service.set_background(oversized)
+
+    assert service.get_settings() == before
+    assert not list((tmp_path / "data" / "backgrounds").glob("*"))
+
+
+def test_rejects_image_over_dimension_limit(tmp_path):
+    too_wide = _image(tmp_path / "wide.png", size=(12001, 1))
+    with pytest.raises(ValueError, match="12000"):
+        _service(tmp_path).set_background(too_wide)
+
+
+def test_rejects_animated_multiframe_image(tmp_path):
+    animated = tmp_path / "animated.png"
+    frames = [Image.new("RGB", (10, 10), color) for color in ("red", "blue")]
+    frames[0].save(animated, save_all=True, append_images=frames[1:], duration=20)
+
+    with pytest.raises(ValueError, match="动画"):
+        _service(tmp_path).set_background(animated)
+
+
+def test_rejects_pillow_decompression_bomb(tmp_path, monkeypatch):
+    source = _image(tmp_path / "bomb.png", size=(10, 3))
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+
+    with pytest.raises(ValueError, match="解压炸弹"):
+        _service(tmp_path).set_background(source)
+
+
+def test_rejects_symlink_or_reparse_source(tmp_path):
+    source = _image(tmp_path / "real.png")
+    link = tmp_path / "linked.png"
+    try:
+        link.symlink_to(source)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    with pytest.raises(ValueError, match="链接"):
+        _service(tmp_path).set_background(link)
+
+
+def test_copies_background_with_uuid_and_never_deletes_source(tmp_path):
+    source = _image(tmp_path / "user.png")
+    service = _service(tmp_path)
+
+    saved = service.set_background(source)
+
+    assert source.exists()
+    assert saved.exists()
+    assert saved.parent == tmp_path / "data" / "backgrounds"
+    assert len(saved.stem) == 32
+    assert service.current_background() == saved
+
+
+def test_settings_are_strictly_validated_and_persisted(tmp_path):
+    service = _service(tmp_path)
+    settings = service.update_settings({
+        "theme": "ivory-sakura",
+        "mask": 0.85,
+        "blur": 24,
+        "position": "bottom-right",
+        "petals": "high",
+    })
+
+    assert settings == {
+        "theme": "ivory-sakura", "mask": 0.85, "blur": 24,
+        "position": "bottom-right", "petals": "high", "background": "default",
+    }
+    assert AppearanceService(tmp_path / "data", tmp_path / "default.webp").get_settings() == settings
+    assert json.loads((tmp_path / "data" / "config.json").read_text(encoding="utf-8"))["appearance"] == settings
+
+
+@pytest.mark.parametrize("theme", ["aurora-glass", "ivory-sakura", "starlit-night"])
+def test_accepts_all_three_themes(tmp_path, theme):
+    assert _service(tmp_path).update_settings({"theme": theme})["theme"] == theme
+
+
+@pytest.mark.parametrize("patch", [
+    {"theme": "other"}, {"mask": -0.01}, {"mask": 0.86}, {"mask": True},
+    {"blur": 25}, {"blur": "2"}, {"position": "center-ish"}, {"petals": "many"},
+    {"unknown": 1},
+])
+def test_rejects_invalid_or_unknown_settings_without_partial_update(tmp_path, patch):
+    service = _service(tmp_path)
+    before = service.get_settings()
+    with pytest.raises(ValueError):
+        service.update_settings(patch)
+    assert service.get_settings() == before
+
+
+def test_replacement_rolls_back_new_file_and_keeps_old_on_config_failure(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    old = service.set_background(_image(tmp_path / "old.png"))
+    before = service.get_settings()
+
+    def fail(_config):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "_write_config", fail)
+    with pytest.raises(OSError):
+        service.set_background(_image(tmp_path / "new.png"))
+
+    assert old.exists()
+    assert service.get_settings() == before
+    assert list((tmp_path / "data" / "backgrounds").iterdir()) == [old]
+
+
+def test_successful_replacement_deletes_only_old_managed_copy(tmp_path):
+    service = _service(tmp_path)
+    first_source = _image(tmp_path / "first.png")
+    second_source = _image(tmp_path / "second.jpg", format="JPEG")
+    old = service.set_background(first_source)
+
+    new = service.set_background(second_source)
+
+    assert not old.exists()
+    assert new.exists() and first_source.exists() and second_source.exists()
+
+
+def test_reset_restores_default_and_removes_managed_copy(tmp_path):
+    service = _service(tmp_path)
+    managed = service.set_background(_image(tmp_path / "custom.webp", format="WEBP"))
+
+    settings = service.reset_background()
+
+    assert settings["background"] == "default"
+    assert service.current_background() == tmp_path / "default.webp"
+    assert not managed.exists()
+
+
+def test_appearance_api_requires_authentication(app):
+    client = app.test_client()
+    for method, url in [
+        ("get", "/api/appearance"), ("post", "/api/appearance"),
+        ("post", "/api/appearance/background"), ("delete", "/api/appearance/background"),
+        ("get", "/api/appearance/background/current"),
+    ]:
+        assert getattr(client, method)(url).status_code == 403
+
+
+def test_appearance_api_updates_uploads_serves_and_resets(app, auth_client):
+    updated = auth_client.post("/api/appearance", json={
+        "theme": "starlit-night", "mask": 0.4, "blur": 3,
+        "position": "top-center", "petals": "low",
+    })
+    assert updated.status_code == 200
+    assert updated.json["data"]["theme"] == "starlit-night"
+
+    payload = io.BytesIO()
+    Image.new("RGB", (32, 24), "green").save(payload, "PNG")
+    payload.seek(0)
+    uploaded = auth_client.post(
+        "/api/appearance/background",
+        data={"file": (payload, "自定义背景.png")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    current = auth_client.get("/api/appearance/background/current")
+    assert current.status_code == 200
+    assert current.mimetype == "image/png"
+    assert current.headers["Cache-Control"] == "no-store, max-age=0"
+
+    reset = auth_client.delete("/api/appearance/background")
+    assert reset.status_code == 200
+    assert reset.json["data"]["background"] == "default"
+
+
+def test_game_path_update_preserves_appearance_config(app, auth_client, fake_game_root):
+    assert auth_client.post("/api/appearance", json={"theme": "ivory-sakura"}).status_code == 200
+
+    response = auth_client.post("/api/game/set", json={"path": str(fake_game_root)})
+
+    assert response.status_code == 200
+    assert auth_client.get("/api/appearance").json["data"]["theme"] == "ivory-sakura"
+
+
+def test_failed_api_upload_preserves_current_background(app, auth_client):
+    payload = io.BytesIO()
+    Image.new("RGB", (20, 20), "purple").save(payload, "PNG")
+    payload.seek(0)
+    assert auth_client.post(
+        "/api/appearance/background",
+        data={"file": (payload, "good.png")},
+        content_type="multipart/form-data",
+    ).status_code == 200
+    before = app.extensions["appearance_service"].current_background()
+
+    failed = auth_client.post(
+        "/api/appearance/background",
+        data={"file": (io.BytesIO(b"fake"), "bad.png")},
+        content_type="multipart/form-data",
+    )
+
+    assert failed.status_code == 400
+    assert app.extensions["appearance_service"].current_background() == before
+    assert before.exists()
