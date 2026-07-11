@@ -5,7 +5,6 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const state = {
   mods: [],
-  configs: [],
   gamePath: null,
   nexusMode: "popular",
   updateInfo: null,
@@ -114,137 +113,8 @@ async function loadMods() {
     const mods = await api("/api/mods");
     state.mods = mods || [];
     renderMods();
-    await loadConfigs();
   } catch (e) {
     list.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}<br/><br/>请先在「游戏路径」中配置目录</div>`;
-  }
-}
-
-async function loadConfigs() {
-  const host = $("#configList");
-  if (!host) return;
-  try {
-    const configs = await api("/api/mod-config");
-    state.configs = configs || [];
-    renderConfigs();
-  } catch (e) {
-    host.innerHTML = "";
-  }
-}
-
-function renderConfigs() {
-  const host = $("#configList");
-  if (!host) return;
-  const configs = state.configs || [];
-  if (!configs.length) {
-    host.innerHTML = `
-      <div class="config-card">
-        <h3>可调节参数模组</h3>
-        <p class="cfg-desc">尚未安装带配置的模组。可点击上方「安装可配置背包扩容」一键安装（默认 100 格，可改）。</p>
-      </div>`;
-    return;
-  }
-  host.innerHTML = configs
-    .map((c) => {
-      const schema = c.schema || {};
-      const fields = schema.fields || [];
-      const values = c.values || {};
-      const folder = c.mod_folder;
-      const fieldHtml = fields
-        .map((f) => {
-          const key = f.key;
-          const val = values[key] ?? f.default;
-          const help = f.description ? `<p class="cfg-help">${escapeHtml(f.description)}</p>` : "";
-          if (f.type === "bool" || f.type === "boolean") {
-            return `<label class="config-field">
-              <span class="cfg-label">${escapeHtml(f.label || key)}</span>
-              <input type="checkbox" data-mod="${escapeAttr(folder)}" data-key="${escapeAttr(key)}" ${val ? "checked" : ""} />
-              ${help}
-            </label>`;
-          }
-          const min = f.min != null ? `min="${f.min}"` : "";
-          const max = f.max != null ? `max="${f.max}"` : "";
-          const step = f.step != null ? `step="${f.step}"` : f.type === "int" ? `step="1"` : "";
-          return `<label class="config-field">
-            <span class="cfg-label">${escapeHtml(f.label || key)}</span>
-            <input type="number" data-mod="${escapeAttr(folder)}" data-key="${escapeAttr(key)}" value="${escapeAttr(val)}" ${min} ${max} ${step} />
-            ${help}
-          </label>`;
-        })
-        .join("");
-      return `<article class="config-card" data-config-mod="${escapeAttr(folder)}">
-        <h3>${escapeHtml(schema.display_name || folder)}</h3>
-        <p class="cfg-desc">${escapeHtml(schema.description || "")} · 路径 <code>${escapeHtml(c.install_path || "")}</code></p>
-        <div class="config-fields">${fieldHtml}</div>
-        <div class="config-actions">
-          <button class="btn btn-primary btn-sm btn-save-config" data-mod="${escapeAttr(folder)}" type="button">保存配置</button>
-          <button class="btn btn-secondary btn-sm btn-reset-config" data-mod="${escapeAttr(folder)}" type="button">恢复默认</button>
-        </div>
-      </article>`;
-    })
-    .join("");
-
-  host.querySelectorAll(".btn-save-config").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const mod = btn.dataset.mod;
-      const card = host.querySelector(`[data-config-mod="${CSS.escape(mod)}"]`);
-      if (!card) return;
-      const values = {};
-      card.querySelectorAll("input[data-key]").forEach((inp) => {
-        const k = inp.dataset.key;
-        if (inp.type === "checkbox") values[k] = inp.checked;
-        else if (inp.type === "number") values[k] = inp.value === "" ? null : Number(inp.value);
-        else values[k] = inp.value;
-      });
-      btn.disabled = true;
-      try {
-        const r = await api(`/api/mod-config/${encodeURIComponent(mod)}`, {
-          method: "POST",
-          body: { values },
-        });
-        toast(r.message || "配置已保存", "success");
-        await loadConfigs();
-      } catch (e) {
-        toast(e.message, "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  });
-
-  host.querySelectorAll(".btn-reset-config").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const mod = btn.dataset.mod;
-      const c = state.configs.find((x) => x.mod_folder === mod);
-      if (!c) return;
-      const defaults = {};
-      (c.schema.fields || []).forEach((f) => {
-        defaults[f.key] = f.default;
-      });
-      try {
-        await api(`/api/mod-config/${encodeURIComponent(mod)}`, {
-          method: "POST",
-          body: { values: defaults },
-        });
-        toast("已恢复默认", "success");
-        await loadConfigs();
-      } catch (e) {
-        toast(e.message, "error");
-      }
-    });
-  });
-}
-
-async function installBagExpand() {
-  try {
-    const r = await api("/api/mod-config/install-bundled", {
-      method: "POST",
-      body: { name: "ConfigurableBagExpand" },
-    });
-    toast(r.message || "背包扩容模组已安装", "success");
-    await loadMods();
-  } catch (e) {
-    toast(e.message, "error");
   }
 }
 
@@ -808,10 +678,6 @@ function bindUI() {
   });
 
   $("#btnRefreshMods").addEventListener("click", () => loadMods());
-  const btnBag = $("#btnInstallBagExpand");
-  if (btnBag) btnBag.addEventListener("click", installBagExpand);
-  const btnCfg = $("#btnRefreshConfigs");
-  if (btnCfg) btnCfg.addEventListener("click", loadConfigs);
   $("#btnOpenModsFolder").addEventListener("click", async () => {
     try {
       await api("/api/mods/open-folder");

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sys
+import threading
 import time
 import types
 import zipfile
@@ -168,6 +169,20 @@ def test_upload_temporary_file_is_cleaned_after_error(app, auth_client, monkeypa
     assert not upload_dir.exists() or not list(upload_dir.iterdir())
 
 
+def test_static_ui_has_no_removed_mod_config_entry_points(app, auth_client):
+    html = auth_client.get("/").get_data(as_text=True)
+    javascript = app.test_client().get("/app.js").get_data(as_text=True)
+    combined = html + javascript
+
+    assert "/api/mod-config" not in combined
+    assert "btnInstallBagExpand" not in combined
+    assert "btnRefreshConfigs" not in combined
+    assert "configList" not in combined
+    assert "loadConfigs" not in javascript
+    assert "renderConfigs" not in javascript
+    assert "installBagExpand" not in javascript
+
+
 def test_mod_config_routes_are_not_exposed(auth_client):
     assert auth_client.get("/api/mod-config").status_code == 404
     assert auth_client.get("/api/mod-config/example").status_code == 404
@@ -228,6 +243,44 @@ def test_pending_upload_count_limit_returns_429(app, auth_client):
 
     assert second.status_code == 429
     assert second.json["error_code"] == "pending_upload_limit"
+
+
+def test_pending_total_quota_is_checked_atomically(app, monkeypatch):
+    barrier = threading.Barrier(2)
+
+    def conflict(*args, **kwargs):
+        barrier.wait(timeout=5)
+        from backend.mod_service import ModConflictError
+        raise ModConflictError({"files": ["conflict"], "choices": ["cancel"]})
+
+    monkeypatch.setattr(app.extensions["mod_service"], "install", conflict)
+    app.config["PENDING_MAX_TOTAL_BYTES"] = 8
+    responses = []
+
+    def upload(name):
+        client = app.test_client()
+        client.get("/?token=test-token")
+        responses.append(client.post(
+            "/api/mods/import",
+            data={"file": (io.BytesIO(b"payload"), name)},
+            content_type="multipart/form-data",
+        ))
+
+    threads = [
+        threading.Thread(target=upload, args=("one.zip",)),
+        threading.Thread(target=upload, args=("two.zip",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(response.status_code for response in responses) == [409, 429]
+    limited = next(response for response in responses if response.status_code == 429)
+    assert limited.json["error_code"] == "pending_upload_quota"
+    assert len(app.extensions["pending_uploads"]) == 1
+    uploads = Path(app.config["DATA_DIR"]) / "uploads"
+    assert len(list(uploads.iterdir())) == 1
 
 
 def test_single_upload_size_limit_returns_413(app, auth_client):

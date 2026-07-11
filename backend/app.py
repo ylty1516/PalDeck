@@ -247,15 +247,6 @@ def create_app(
             if file_size > int(app.config["MAX_CONTENT_LENGTH"]):
                 dest.unlink(missing_ok=True)
                 raise ApiError("上传文件过大", 413, "upload_too_large")
-            with pending_lock:
-                pending_bytes = sum(
-                    Path(item["path"]).stat().st_size
-                    for item in pending.values()
-                    if Path(item["path"]).is_file()
-                )
-            if pending_bytes + file_size > int(app.config["PENDING_MAX_TOTAL_BYTES"]):
-                dest.unlink(missing_ok=True)
-                raise ApiError("上传暂存空间已满", 413, "pending_upload_too_large")
             nexus = request.form.get("nexus_id")
             if nexus and not nexus.isdigit():
                 dest.unlink(missing_ok=True)
@@ -285,6 +276,13 @@ def create_app(
                 with pending_lock:
                     if len(pending) >= int(app.config["PENDING_MAX_ITEMS"]):
                         raise ApiError("待处理上传过多", 429, "pending_upload_limit") from exc
+                    pending_bytes = sum(
+                        Path(item["path"]).stat().st_size
+                        for item in pending.values()
+                        if Path(item["path"]).is_file()
+                    )
+                    if pending_bytes + dest.stat().st_size > int(app.config["PENDING_MAX_TOTAL_BYTES"]):
+                        raise ApiError("待处理上传总量超限", 429, "pending_upload_quota") from exc
                     pending[new_token] = {
                         "path": str(dest), "options": options,
                         "expires": time.time() + UPLOAD_TTL_SECONDS,
