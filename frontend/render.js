@@ -27,11 +27,22 @@ export function renderMessage(container, message, className = "empty-state") {
   container.replaceChildren(el("div", className, message));
 }
 
+const MOD_STATUS = Object.freeze({
+  enabled: { label: "已启用", integrity: "完整性正常" },
+  disabled: { label: "已禁用", integrity: "完整性正常" },
+  modified: { label: "文件已修改", integrity: "完整性异常" },
+  missing: { label: "文件缺失", integrity: "完整性异常" },
+  conflict: { label: "文件冲突", integrity: "完整性异常" },
+});
+
 export function renderMods(container, mods) {
   if (!mods.length) return renderMessage(container, "暂无模组，请从“导入安装”添加。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
-    const card = el("article", `mod-card glass-panel${mod.enabled ? "" : " disabled-mod"}`);
+    const status = MOD_STATUS[mod.status || mod.audit?.status] ? (mod.status || mod.audit.status) : (mod.enabled ? "enabled" : "disabled");
+    const statusInfo = MOD_STATUS[status];
+    const toggleAllowed = status === "enabled" || status === "disabled";
+    const card = el("article", `mod-card glass-panel status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
     card.dataset.id = String(mod.id);
     const main = el("div", "mod-main");
     const title = el("h3", "mod-title", mod.name || "未命名模组");
@@ -39,18 +50,28 @@ export function renderMods(container, mods) {
     title.append(" ", badge);
     main.append(title);
     const meta = el("p", "mod-meta");
-    meta.append(text(mod.enabled ? "已启用" : "已禁用"), text(` · ${formatBytes(mod.size_bytes)}`));
+    meta.append(text(statusInfo.label), text(` · ${formatBytes(mod.size_bytes)}`));
     if (mod.nexus_id != null) meta.append(text(` · N#${mod.nexus_id}`));
-    main.append(meta, el("p", "mod-path", mod.install_path || ""));
+    const fileCount = Array.isArray(mod.manifest_files) ? mod.manifest_files.length : (Array.isArray(mod.files) ? mod.files.length : 0);
+    const integrity = el("p", `mod-integrity ${toggleAllowed ? "ok" : "warning"}`, `${statusInfo.integrity} · ${fileCount} 个受管文件`);
+    main.append(meta, integrity, el("p", "mod-path", mod.install_path || ""));
+    if (!toggleAllowed) main.append(el("p", "repair-hint", "请修复文件或重扫；异常状态不可启停。"));
     const actions = el("div", "button-row");
-    const toggle = actionButton(mod.enabled ? "禁用" : "启用", "toggleMod", "btn");
+    const toggle = actionButton(status === "enabled" ? "禁用" : "启用", "toggleMod", "btn");
     toggle.dataset.id = String(mod.id);
-    toggle.dataset.enabled = String(!mod.enabled);
+    toggle.dataset.enabled = String(status !== "enabled");
+    toggle.disabled = !toggleAllowed;
     const open = actionButton("文件夹", "openModFolder", "btn");
     open.dataset.id = String(mod.id);
     const remove = actionButton("删除", "deleteMod", "btn danger");
     remove.dataset.id = String(mod.id);
-    actions.append(toggle, open, remove);
+    actions.append(toggle, open);
+    if (!toggleAllowed) {
+      const rescan = actionButton("重扫", "rescanMods", "btn");
+      rescan.dataset.id = String(mod.id);
+      actions.append(rescan);
+    }
+    actions.append(remove);
     card.append(main, actions);
     fragment.append(card);
   }

@@ -20,7 +20,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "useGamePath", "openNexus", "copyNexusId"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -236,6 +236,58 @@ def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
     for call in ("await loadMods()", "await loadNexus(\"popular\")", "await loadSettings()"):
         assert call in app
     assert "showMods: async () => switchView" in app
+
+
+def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract():
+    render = RENDER.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    for status in ("enabled", "disabled", "modified", "missing", "conflict"):
+        assert f'{status}:' in render
+    for label in ("已启用", "已禁用", "文件已修改", "文件缺失", "文件冲突", "完整性正常", "请修复文件或重扫"):
+        assert label in render
+    assert 'const toggleAllowed = status === "enabled" || status === "disabled"' in render
+    assert "toggle.disabled = !toggleAllowed" in render
+    assert "mod.manifest_files" in render
+    assert "mod.install_path" in render
+    assert "mod.mod_type" in render
+    assert "mod.nexus_id" in render
+    assert "mod.size_bytes" in render
+    assert "const previousMods = state.mods" in app
+    assert "const updated = await request" in app
+    assert "state.mods = state.mods.map" in app
+    assert "state.mods = previousMods" in app
+    assert "target.disabled = true" in app
+    assert "target.disabled = false" in app
+
+
+def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
+    app = APP.read_text(encoding="utf-8")
+    html = HTML.read_text(encoding="utf-8")
+    assert "filtered.length" in app
+    assert "异常" in app
+    assert "input" in app and "filterMods" in app
+    assert 'accept=".zip,.pak,application/zip,application/octet-stream"' in html
+    for stage in ("已选择", "正在上传", "正在识别并安装", "安装成功"):
+        assert stage in app
+    assert '正在识别并安装：正在上传 ${state.selectedModFile.name}' in app
+    assert 'error.status === 410 && error.code === "upload_expired"' in app
+    assert "请重新选择文件" in app
+    assert 'error.status === 423 && error.code === "game_running"' in app
+    assert "请先退出游戏" in app
+    assert 'error.status === 403 && error.code === "permission_denied"' in app
+    assert "管理员身份重启" in app
+    assert 'renderConflict($("#deleteDetails"), error.details)' in app
+    assert 'id="deleteDetails"' in html
+    assert "isSupportedModFile" in app
+
+
+def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
+    app = APP.read_text(encoding="utf-8")
+    assert 'case "rescanMods":' in app
+    assert '"rescanMods"' in RENDER.read_text(encoding="utf-8")
+    assert "if (target.disabled) return" in app
+    assert "inFlightDynamicActions" in app
+    assert "innerHTML" not in app
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

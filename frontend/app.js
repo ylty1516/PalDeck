@@ -10,6 +10,7 @@ const state = {
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
+const inFlightDynamicActions = new Set();
 const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
@@ -34,6 +35,12 @@ function setBusy(active, message = "处理中…") {
   document.documentElement.classList.toggle("is-busy", active);
 }
 
+function actionableErrorMessage(error) {
+  if (error instanceof ApiError && error.status === 423 && error.code === "game_running") return "请先退出游戏，再重试此操作";
+  if (error instanceof ApiError && error.status === 403 && error.code === "permission_denied") return "权限不足，请点击“以管理员身份重启”后重试";
+  return error.message || "操作失败";
+}
+
 async function run(trigger, operation, { disable = true, global = false, busyText = "处理中…" } = {}) {
   const canDisable = disable && trigger && (trigger.tagName === "BUTTON" || trigger.type === "submit");
   if (canDisable && trigger.disabled) return undefined;
@@ -41,7 +48,7 @@ async function run(trigger, operation, { disable = true, global = false, busyTex
   if (global) setBusy(true, busyText);
   try { return await operation(); }
   catch (error) {
-    toast(error.message || "操作失败", "error");
+    toast(actionableErrorMessage(error), "error");
     throw error;
   } finally {
     if (canDisable) { trigger.disabled = false; trigger.classList.remove("loading"); trigger.removeAttribute("aria-busy"); }
@@ -102,9 +109,22 @@ async function loadMods() {
 
 function filterMods() {
   const query = $("#modFilter").value.trim().toLocaleLowerCase();
-  const filtered = state.mods.filter((mod) => !query || [mod.name, mod.mod_type, mod.nexus_id].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)));
-  $("#modStats").textContent = `共 ${state.mods.length} 个 · 已启用 ${state.mods.filter((mod) => mod.enabled).length} 个`;
+  const filtered = state.mods.filter((mod) => !query || [mod.name, mod.mod_type, mod.nexus_id, mod.status].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)));
+  const enabled = state.mods.filter((mod) => (mod.status || mod.audit?.status) === "enabled").length;
+  const abnormal = state.mods.filter((mod) => !["enabled", "disabled"].includes(mod.status || mod.audit?.status)).length;
+  $("#modStats").textContent = `共 ${state.mods.length} 个 · 显示 ${filtered.length} 个 · 已启用 ${enabled} 个 · 异常 ${abnormal} 个`;
   renderMods($("#modList"), filtered);
+}
+
+function isSupportedModFile(file) {
+  return Boolean(file && /\.(zip|pak)$/i.test(file.name || ""));
+}
+
+function selectModFile(file) {
+  if (file && !isSupportedModFile(file)) throw new ApiError("仅支持 ZIP 或 PAK 文件");
+  state.selectedModFile = file || null;
+  $("#selectedModFile").textContent = file ? `已选择：${file.name}` : "尚未选择文件";
+  $("#importResult").textContent = file ? `识别结果：${/\.pak$/i.test(file.name) ? "PAK 模组" : "ZIP 压缩包（安装时自动识别）"}` : "";
 }
 
 async function importSelected(decision = "cancel") {
@@ -121,19 +141,28 @@ async function importSelected(decision = "cancel") {
     options = { method: "POST", body: form, timeout: 120000 };
   }
   try {
+    $("#importResult").textContent = state.pendingUploadToken ? "正在识别并安装：应用冲突处理…" : `正在识别并安装：正在上传 ${state.selectedModFile.name}`;
     const result = await request("/api/mods/import", options);
     state.pendingUploadToken = null;
     state.selectedModFile = null;
     $("#selectedModFile").textContent = "尚未选择文件";
-    $("#importResult").textContent = `安装成功：${result.name || result.mod?.name || "模组"}`;
+    $("#importResult").textContent = `安装成功：${result.name || result.mod?.name || "模组"} · 类型 ${result.mod_type || result.kind || "已识别"}`;
     toast("模组安装成功", "success");
     await loadMods();
   } catch (error) {
     if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
       state.pendingUploadToken = error.details?.upload_token || null;
+      $("#importResult").textContent = "识别完成：发现冲突，请选择处理方式";
       renderConflict($("#conflictDetails"), error.details);
       openModal($("#conflictModal"));
       return null;
+    }
+    if (error instanceof ApiError && error.status === 410 && error.code === "upload_expired") {
+      state.pendingUploadToken = null;
+      state.selectedModFile = null;
+      $("#selectedModFile").textContent = "尚未选择文件";
+      $("#importResult").textContent = "暂存文件已过期，请重新选择文件";
+      if ($("#conflictModal").open) $("#conflictModal").close();
     }
     throw error;
   }
@@ -171,6 +200,7 @@ async function deletePendingMod() {
     if (error instanceof ApiError && error.status === 409 && error.code === "modified_files" && !state.pendingDeleteForce) {
       state.pendingDeleteForce = true;
       $("#deleteMessage").textContent = "检测到已修改文件。再次确认将强制删除这些文件，此操作不可撤销。";
+      renderConflict($("#deleteDetails"), error.details);
       openModal($("#deleteModal"));
       return;
     }
@@ -253,7 +283,7 @@ export const ACTION_HANDLERS = Object.freeze({
   openModsFolder: async () => request("/api/mods/open-folder"),
   filterMods: () => filterMods(),
   chooseModFile: () => $("#modFileInput").click(),
-  selectModFile: (event) => { state.selectedModFile = event.currentTarget.files?.[0] || null; $("#selectedModFile").textContent = state.selectedModFile?.name || "尚未选择文件"; },
+  selectModFile: (event) => selectModFile(event.currentTarget.files?.[0] || null),
   changeImportType: noop,
   editImportName: noop,
   editImportNexusId: noop,
@@ -294,7 +324,7 @@ export const ACTION_HANDLERS = Object.freeze({
   cancelConflict: async () => cancelImportConflict(),
   replaceConflict: async () => { $("#conflictModal").close(); await importSelected("replace"); },
   keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },
-  cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteModal").close(); },
+  cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteModal").close(); },
   approveDelete: async () => deletePendingMod(),
 });
 
@@ -319,12 +349,16 @@ async function dispatchStatic(event) {
 }
 
 async function toggleMod(target, id) {
+  const previousMods = state.mods;
   try {
-    await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
+    const updated = await request(`/api/mods/${encodeURIComponent(id)}/toggle`, {
       method: "POST", body: { enabled: target.dataset.enabled === "true" },
     });
-    await loadMods();
+    state.mods = state.mods.map((mod) => String(mod.id) === String(updated.id) ? updated : mod);
+    filterMods();
   } catch (error) {
+    state.mods = previousMods;
+    filterMods();
     if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
       await loadMods();
       renderConflict($("#modConflictNotice"), error.details);
@@ -339,23 +373,40 @@ async function toggleMod(target, id) {
 async function handleDynamicAction(event) {
   const target = event.target.closest("[data-dynamic-action]");
   if (!target) return;
+  if (target.disabled) return;
   const id = target.dataset.id;
+  const actionKey = `${target.dataset.dynamicAction}:${id || "global"}`;
+  if (inFlightDynamicActions.has(actionKey)) return;
+  inFlightDynamicActions.add(actionKey);
+  target.disabled = true;
   try {
     switch (target.dataset.dynamicAction) {
-      case "toggleMod": await run(target, () => toggleMod(target, id)); break;
-      case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`)); break;
-      case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
+      case "toggleMod": await run(target, () => toggleMod(target, id), { disable: false }); break;
+      case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
+      case "rescanMods": state.mods = await request("/api/mods/resync", { method: "POST", body: {} }); filterMods(); toast("重扫完成", "success"); break;
+      case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
-      case "openNexus": await run(target, () => openValidatedNexus(target)); break;
-      case "copyNexusId": await run(target, () => copyNexusId(target)); break;
+      case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
+      case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;
       default: return;
     }
-  } catch { /* run has already displayed the error */ }
+  } catch (error) { if (!["toggleMod", "openModFolder", "openNexus", "copyNexusId"].includes(target.dataset.dynamicAction)) toast(actionableErrorMessage(error), "error"); }
+  finally {
+    inFlightDynamicActions.delete(actionKey);
+    target.disabled = false;
+  }
 }
 
 function setupDropzone() {
   const zone = $("#dropzone");
-  for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, (event) => { event.preventDefault(); zone.classList.toggle("dragging", name === "dragenter" || name === "dragover"); if (name === "drop") { state.selectedModFile = event.dataTransfer?.files?.[0] || null; $("#selectedModFile").textContent = state.selectedModFile?.name || "尚未选择文件"; } });
+  for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, (event) => {
+    event.preventDefault();
+    zone.classList.toggle("dragging", name === "dragenter" || name === "dragover");
+    if (name === "drop") {
+      try { selectModFile(event.dataTransfer?.files?.[0] || null); }
+      catch (error) { toast(error.message, "error"); }
+    }
+  });
 }
 
 async function init() {

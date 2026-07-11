@@ -213,6 +213,29 @@ def test_game_running_maps_to_423(app, auth_client):
     assert response.json["error_code"] == "game_running"
 
 
+def test_toggle_returns_authoritative_mod_and_permission_maps_to_403(app, auth_client, monkeypatch):
+    installed = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(), "Toggle.zip")},
+        content_type="multipart/form-data",
+    ).json["data"]
+
+    toggled = auth_client.post(f"/api/mods/{installed['id']}/toggle", json={"enabled": False})
+
+    assert toggled.status_code == 200
+    assert toggled.json["data"]["id"] == installed["id"]
+    assert toggled.json["data"]["enabled"] is False
+    assert toggled.json["data"]["status"] == "disabled"
+
+    monkeypatch.setattr(
+        app.extensions["mod_service"], "set_enabled",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    denied = auth_client.post(f"/api/mods/{installed['id']}/toggle", json={"enabled": True})
+    assert denied.status_code == 403
+    assert denied.json["error_code"] == "permission_denied"
+
+
 def test_upload_temporary_file_is_cleaned_after_error(app, auth_client, monkeypatch):
     service = app.extensions["mod_service"]
 

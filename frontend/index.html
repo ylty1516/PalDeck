@@ -48,7 +48,7 @@
           <div id="dropzone" class="dropzone glass-panel">
             <span class="drop-symbol">⇩</span><h2>拖放 ZIP / PAK</h2><p>自动识别结构并安装，无需手动解压。</p>
             <button type="button" class="btn primary" data-action="chooseModFile">选择文件</button>
-            <input id="modFileInput" type="file" data-action="selectModFile" accept=".zip,.pak,application/zip">
+            <input id="modFileInput" type="file" data-action="selectModFile" accept=".zip,.pak,application/zip,application/octet-stream">
           </div>
           <div class="glass-panel panel">
             <label>安装类型<select id="importType" data-action="changeImportType"><option value="auto">自动识别</option><option value="pak">PAK</option><option value="logicpak">LogicMods</option><option value="ue4ss">UE4SS 脚本</option><option value="ue4ss_framework">UE4SS 框架</option><option value="workshop">Workshop</option></select></label>
@@ -106,7 +106,7 @@
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
   <div id="busyOverlay" class="busy-overlay" hidden><div class="spinner"></div><span id="busyText">处理中…</span></div>
   <dialog id="conflictModal" aria-labelledby="conflictTitle"><form method="dialog" class="modal-card"><h2 id="conflictTitle">发现文件冲突</h2><div id="conflictDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelConflict" autofocus>取消</button><button type="button" class="btn" data-action="keepBothConflict">保留两者</button><button type="button" class="btn primary" data-action="replaceConflict">替换原文件</button></div></form></dialog>
-  <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">删除模组</h2><p id="deleteMessage">此操作不可撤销。</p><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">确认删除</button></div></form></dialog>
+  <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">删除模组</h2><p id="deleteMessage">此操作不可撤销。</p><div id="deleteDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">确认删除</button></div></form></dialog>
   <script type="module" src="app.js"></script>
 </body>
 </html>
