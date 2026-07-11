@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from backend import archive_utils
 from backend.archive_utils import inspect_and_extract
 from backend.domain import ArchivePolicy, ModKind
 
@@ -214,14 +215,129 @@ def test_successful_extraction_stays_under_resolved_destination(tmp_path: Path) 
     assert all(path.is_relative_to(resolved_dest) for group in result.groups for path in group)
 
 
-def test_failure_after_writing_removes_whole_destination(tmp_path: Path) -> None:
-    archive = make_zip(tmp_path / "broken.zip", {"first.pak": b"first", "second.txt": b"second"})
-    data = bytearray(archive.read_bytes())
-    data[data.index(b"first") : data.index(b"first") + 1] = b"X"
-    archive.write_bytes(data)
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mod:stream.pak",
+        "bad<name.pak",
+        'bad\"name.pak',
+        "bad|name.pak",
+        "bad?name.pak",
+        "bad*name.pak",
+        "Folder./mod.pak",
+        "Folder /mod.pak",
+        "CON.pak",
+        "prn/readme.pak",
+        "AUX.txt.pak",
+        "nul/mod.pak",
+        "COM1.pak",
+        "com9.txt/mod.pak",
+        "LPT1/mod.pak",
+        "lpt9.bin.pak",
+    ],
+)
+def test_rejects_win32_unsafe_path_components(tmp_path: Path, name: str) -> None:
+    archive = make_zip(tmp_path / "unsafe.zip", {name: b"pak"})
+
+    assert_rejected(archive, tmp_path / "out", "Windows|非法|路径")
+
+
+def test_rejects_case_insensitive_normalized_path_collision(tmp_path: Path) -> None:
+    archive = make_zip(tmp_path / "collision.zip", {"Mods/Cool.pak": b"a", "mods/cool.PAK": b"b"})
+
+    assert_rejected(archive, tmp_path / "out", "碰撞|冲突")
+
+
+def test_success_atomically_publishes_and_removes_private_staging(tmp_path: Path) -> None:
+    archive = make_zip(tmp_path / "ok.zip", {"Safe.pak": b"pak"})
     dest = tmp_path / "out"
 
-    with pytest.raises(ValueError, match="损坏"):
+    result = inspect_and_extract(archive, dest)
+
+    assert (dest / "Safe.pak").read_bytes() == b"pak"
+    assert result.groups[0][0] == dest / "Safe.pak"
+    assert not list(tmp_path.glob(".out.*.tmp"))
+
+
+def test_detected_reparse_component_cleans_staging_without_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = make_zip(tmp_path / "ok.zip", {"Wrapper/Safe.pak": b"pak"})
+    dest = tmp_path / "out"
+    original = archive_utils._is_reparse_path
+
+    def injected_reparse(path: Path) -> bool:
+        if path.name == "Wrapper":
+            return True
+        return original(path)
+
+    monkeypatch.setattr(archive_utils, "_is_reparse_path", injected_reparse)
+
+    with pytest.raises(ValueError, match="重解析|链接|目标"):
         inspect_and_extract(archive, dest)
 
     assert not dest.exists()
+    assert not list(tmp_path.glob(".out.*.tmp"))
+
+
+def test_target_permission_error_is_not_reported_as_damaged_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = make_zip(tmp_path / "ok.zip", {"Safe.pak": b"pak"})
+    original_open = Path.open
+
+    def denied_open(self: Path, mode: str = "r", *args, **kwargs):
+        if mode == "xb" and self.name == "Safe.pak":
+            raise PermissionError("denied by test")
+        return original_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_open)
+
+    with pytest.raises(ValueError, match="目标") as captured:
+        inspect_and_extract(archive, tmp_path / "out")
+
+    assert "损坏" not in str(captured.value)
+    assert isinstance(captured.value.__cause__, PermissionError)
+    assert not list(tmp_path.glob(".out.*.tmp"))
+
+
+def test_failure_after_first_real_write_removes_staging_and_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = make_zip(tmp_path / "broken.zip", {"first.pak": b"first", "second.txt": b"second"})
+    original_open = zipfile.ZipFile.open
+    observed_first_write = False
+
+    class FailingStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            raise RuntimeError("stream failed")
+
+    def fail_second(self, name, mode="r", pwd=None, *, force_zip64=False):
+        nonlocal observed_first_write
+        filename = getattr(name, "filename", name)
+        if mode == "r" and filename == "second.txt":
+            staging = next(tmp_path.glob(".out.*.tmp"))
+            observed_first_write = (staging / "first.pak").read_bytes() == b"first"
+            return FailingStream(b"second")
+        return original_open(self, name, mode, pwd, force_zip64=force_zip64)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", fail_second)
+    dest = tmp_path / "out"
+
+    with pytest.raises(RuntimeError, match="stream failed"):
+        inspect_and_extract(archive, dest)
+
+    assert observed_first_write
+    assert not dest.exists()
+    assert not list(tmp_path.glob(".out.*.tmp"))
+
+
+def test_existing_destination_collision_is_reported_as_target_error(tmp_path: Path) -> None:
+    archive = make_zip(tmp_path / "ok.zip", {"Safe.pak": b"pak"})
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    with pytest.raises(ValueError, match="目标目录已存在") as captured:
+        inspect_and_extract(archive, dest)
+
+    assert "损坏" not in str(captured.value)

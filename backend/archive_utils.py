@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import zipfile
+import zlib
 from pathlib import Path, PureWindowsPath
 
 from backend.domain import ArchivePolicy, InspectedMod, ModKind
@@ -22,6 +24,22 @@ _RESERVED_WINDOWS_NAMES = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_ARCHIVE_ERRORS = (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, UnicodeError, zlib.error)
+
+
+class _TargetError(ValueError):
+    """A destination or staging path was unsafe or unusable."""
+
+
+def _validate_windows_component(component: str, archive_name: str) -> None:
+    if _INVALID_WINDOWS_NAME.search(component):
+        raise ValueError(f"ZIP 路径包含 Windows 非法字符：{archive_name!r}")
+    if component.endswith((".", " ")):
+        raise ValueError(f"ZIP 路径组件以点或空格结尾，Windows 无法安全创建：{archive_name!r}")
+    device_name = component.split(".", 1)[0].upper()
+    if device_name in _RESERVED_WINDOWS_NAMES:
+        raise ValueError(f"ZIP 路径使用了 Windows 保留设备名：{archive_name!r}")
 
 
 def _safe_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
@@ -40,6 +58,8 @@ def _safe_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
         parts.pop()
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError(f"ZIP 中存在空路径、异常路径或路径穿越：{name!r}")
+    for component in parts:
+        _validate_windows_component(component, name)
     return tuple(parts)
 
 
@@ -53,22 +73,28 @@ def _reject_special_file(info: zipfile.ZipInfo) -> None:
 
 
 def _validate_entries(
-    infos: list[zipfile.ZipInfo], dest: Path, policy: ArchivePolicy
+    infos: list[zipfile.ZipInfo], root: Path, policy: ArchivePolicy
 ) -> list[tuple[zipfile.ZipInfo, tuple[str, ...], Path]]:
     if policy.max_files < 0 or policy.max_single_bytes < 0 or policy.max_total_bytes < 0:
         raise ValueError("解包限制不能为负数")
 
     files = 0
     total = 0
+    canonical_paths: set[tuple[str, ...]] = set()
     validated: list[tuple[zipfile.ZipInfo, tuple[str, ...], Path]] = []
     for info in infos:
         parts = _safe_parts(info)
+        canonical = tuple(part.rstrip(". ").casefold() for part in parts)
+        if canonical in canonical_paths:
+            raise ValueError(f"ZIP 包含 Windows 规范化后发生碰撞的路径：{info.filename!r}")
+        canonical_paths.add(canonical)
+
         _reject_special_file(info)
         if info.flag_bits & 0x1:
             raise ValueError(f"ZIP 包含加密条目，暂不支持解包：{info.filename!r}")
 
-        target = dest.joinpath(*parts).resolve()
-        if not target.is_relative_to(dest):
+        target = root.joinpath(*parts)
+        if not target.is_relative_to(root):
             raise ValueError(f"ZIP 条目路径逃逸目标目录：{info.filename!r}")
 
         if not info.is_dir():
@@ -181,27 +207,107 @@ def _classify(
     return InspectedMod(kind, _clean_display_name(display), content_root, groups)
 
 
+def _is_reparse_path(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & _REPARSE_POINT)
+
+
+def _assert_safe_chain(root: Path, target: Path) -> None:
+    if not target.is_relative_to(root):
+        raise _TargetError(f"目标路径逃逸私有暂存目录：{target}")
+    current = root
+    for component in (Path(), *target.relative_to(root).parents[::-1], target.relative_to(root)):
+        candidate = root if component == Path() else root / component
+        if _is_reparse_path(candidate):
+            raise _TargetError(f"目标路径包含符号链接、junction 或重解析点：{candidate}")
+
+
+def _assert_ancestor_chain_safe(path: Path) -> None:
+    chain = list(reversed((path, *path.parents)))
+    for candidate in chain:
+        if _is_reparse_path(candidate):
+            raise _TargetError(f"目标路径包含符号链接、junction 或重解析点：{candidate}")
+
+
+def _mkdir_checked(root: Path, path: Path) -> None:
+    _assert_safe_chain(root, path)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise _TargetError(f"无法创建目标目录：{path}") from error
+    _assert_safe_chain(root, path)
+
+
 def _extract(
     archive: zipfile.ZipFile,
     validated: list[tuple[zipfile.ZipInfo, tuple[str, ...], Path]],
     policy: ArchivePolicy,
+    staging: Path,
 ) -> None:
     actual_total = 0
     for info, _, target in validated:
         if info.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
+            _mkdir_checked(staging, target)
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir_checked(staging, target.parent)
+        _assert_safe_chain(staging, target)
         actual_file = 0
-        with archive.open(info, "r") as source, target.open("xb") as output:
-            while chunk := source.read(_CHUNK_SIZE):
-                actual_file += len(chunk)
-                actual_total += len(chunk)
-                if actual_file > policy.max_single_bytes:
-                    raise ValueError("解压后的单个文件实际大小超过安全限制")
-                if actual_total > policy.max_total_bytes:
-                    raise ValueError("解压后的实际总大小超过安全限制")
-                output.write(chunk)
+        try:
+            output = target.open("xb")
+        except OSError as error:
+            raise _TargetError(f"无法打开目标文件进行写入：{target}") from error
+        try:
+            _assert_safe_chain(staging, target)
+            with archive.open(info, "r") as source, output:
+                while chunk := source.read(_CHUNK_SIZE):
+                    actual_file += len(chunk)
+                    actual_total += len(chunk)
+                    if actual_file > policy.max_single_bytes:
+                        raise ValueError("解压后的单个文件实际大小超过安全限制")
+                    if actual_total > policy.max_total_bytes:
+                        raise ValueError("解压后的实际总大小超过安全限制")
+                    try:
+                        output.write(chunk)
+                    except OSError as error:
+                        raise _TargetError(f"写入目标文件失败：{target}") from error
+                    _assert_safe_chain(staging, target)
+        finally:
+            if not output.closed:
+                output.close()
+        _assert_safe_chain(staging, target)
+
+
+def _assert_tree_safe(root: Path) -> None:
+    _assert_safe_chain(root, root)
+    try:
+        with os.scandir(root) as entries:
+            children = [Path(entry.path) for entry in entries]
+    except OSError as error:
+        raise _TargetError(f"无法检查目标暂存目录：{root}") from error
+    for child in children:
+        if _is_reparse_path(child):
+            raise _TargetError(f"目标暂存目录包含链接或重解析点：{child}")
+        if child.is_dir():
+            _assert_tree_safe(child)
+
+
+def _cleanup_staging(staging: Path | None) -> None:
+    if staging is None:
+        return
+    try:
+        if _is_reparse_path(staging):
+            try:
+                staging.unlink()
+            except OSError:
+                staging.rmdir()
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def inspect_and_extract(
@@ -209,29 +315,55 @@ def inspect_and_extract(
     dest: Path | str,
     policy: ArchivePolicy | None = None,
 ) -> InspectedMod:
-    """Validate, identify and stream-extract one ZIP into a new destination."""
+    """Validate, identify and stream-extract one ZIP, then atomically publish it."""
     archive_path = Path(archive)
-    destination = Path(dest).resolve()
+    destination = Path(os.path.abspath(dest))
     selected_policy = policy or ArchivePolicy()
-    if destination.exists():
-        raise ValueError(f"目标目录已存在，请选择空的新目录：{destination}")
+    staging: Path | None = None
 
-    created = False
     try:
-        with zipfile.ZipFile(archive_path, "r") as zip_file:
-            validated = _validate_entries(zip_file.infolist(), destination, selected_policy)
-            inspected = _classify(validated, destination)
-            destination.mkdir(parents=True)
-            created = True
-            _extract(zip_file, validated, selected_policy)
-            return inspected
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, OSError) as error:
-        if created:
-            shutil.rmtree(destination, ignore_errors=True)
-        raise ValueError(
-            "ZIP 文件已损坏或无法读取，请重新下载并确认压缩包完整"
-        ) from error
-    except Exception:
-        if created:
-            shutil.rmtree(destination, ignore_errors=True)
-        raise
+        _assert_ancestor_chain_safe(destination.parent)
+        if os.path.lexists(destination):
+            raise _TargetError(f"目标目录已存在，请选择空的新目录：{destination}")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise _TargetError(f"无法创建目标目录的父目录：{destination.parent}") from error
+        _assert_ancestor_chain_safe(destination.parent)
+        try:
+            staging = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+                )
+            )
+        except OSError as error:
+            raise _TargetError("无法创建私有目标暂存目录") from error
+        _assert_safe_chain(staging, staging)
+
+        try:
+            zip_file = zipfile.ZipFile(archive_path, "r")
+        except _ARCHIVE_ERRORS as error:
+            raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
+        except OSError as error:
+            raise ValueError(f"无法读取 ZIP 文件：{archive_path}") from error
+
+        with zip_file:
+            try:
+                validated = _validate_entries(zip_file.infolist(), staging, selected_policy)
+                inspected = _classify(validated, destination)
+                _extract(zip_file, validated, selected_policy, staging)
+            except _ARCHIVE_ERRORS as error:
+                raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
+
+        _assert_tree_safe(staging)
+        _assert_ancestor_chain_safe(destination.parent)
+        if os.path.lexists(destination):
+            raise _TargetError(f"目标目录发布前已被占用：{destination}")
+        try:
+            os.replace(staging, destination)
+        except OSError as error:
+            raise _TargetError(f"无法原子发布到目标目录：{destination}") from error
+        staging = None
+        return inspected
+    finally:
+        _cleanup_staging(staging)
