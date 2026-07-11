@@ -157,6 +157,11 @@ def test_modals_and_aria_are_real_accessible_actions():
     assert 'setAttribute("aria-pressed"' in app
     assert 'addEventListener("cancel"' in app
     assert "force_modified=true" in app
+    assert 'error.code === "modified_files"' in app
+    assert 'error.code === "mod_conflict"' in app
+    cancel = re.search(r"async function cancelImportConflict\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert cancel
+    assert cancel.group(1).index('await request("/api/mods/import"') < cancel.group(1).index('$("#conflictModal").close()')
     assert 'importSelected("replace")' in app
     assert 'importSelected("keep_both")' in app
     assert not re.search(r'case "[^"]+":\s*break;', app)

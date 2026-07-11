@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.domain import AuditStatus, ModKind
-from backend.mod_service import GameRunningError, ModConflictError, ModService
+from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.process_utils import (
     ProcessCheckError,
     is_directory_writable,
@@ -345,8 +345,9 @@ def test_modified_delete_requires_force_and_disabled_is_supported(fake_game_root
     service = _service(fake_game_root, tmp_path)
     item = service.install(source)
     (_live(fake_game_root) / "Changed.pak").write_bytes(b"changed")
-    with pytest.raises(RuntimeError, match="修改"):
+    with pytest.raises(ModifiedFilesError) as error:
         service.delete(item["id"])
+    assert error.value.details == {"files": [str(_live(fake_game_root) / "Changed.pak")]}
     service.set_enabled(item["id"], False)
     disabled = tmp_path / "data" / "disabled" / item["id"] / "Changed.pak"
     disabled.write_bytes(b"changed again")

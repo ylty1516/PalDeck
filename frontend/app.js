@@ -117,7 +117,7 @@ async function importSelected(decision = "cancel") {
     toast("模组安装成功", "success");
     await loadMods();
   } catch (error) {
-    if (error instanceof ApiError && error.status === 409) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict") {
       state.pendingUploadToken = error.details?.upload_token || null;
       renderConflict($("#conflictDetails"), error.details);
       openModal($("#conflictModal"));
@@ -133,14 +133,14 @@ function openModal(dialog) {
 
 async function cancelImportConflict() {
   const token = state.pendingUploadToken;
-  state.pendingUploadToken = null;
-  $("#conflictModal").close();
   if (!token) return;
   try {
     await request("/api/mods/import", { method: "POST", body: { upload_token: token, decision: "cancel" } });
   } catch (error) {
-    if (!(error instanceof ApiError && error.status === 409)) throw error;
+    if (!(error instanceof ApiError && error.status === 410 && error.code === "upload_expired")) throw error;
   }
+  state.pendingUploadToken = null;
+  $("#conflictModal").close();
 }
 
 async function deletePendingMod() {
@@ -155,7 +155,7 @@ async function deletePendingMod() {
     await loadMods();
     toast("模组已删除", "success");
   } catch (error) {
-    if (error instanceof ApiError && error.status === 409 && !state.pendingDeleteForce) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "modified_files" && !state.pendingDeleteForce) {
       state.pendingDeleteForce = true;
       $("#deleteMessage").textContent = "检测到已修改文件。再次确认将强制删除这些文件，此操作不可撤销。";
       openModal($("#deleteModal"));

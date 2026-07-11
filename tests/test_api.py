@@ -137,8 +137,69 @@ def test_import_conflict_returns_retry_token(auth_client):
         "/api/mods/import",
         json={"upload_token": details["upload_token"], "decision": "keep_both"},
     )
-    assert reused.status_code == 400
+    assert reused.status_code == 410
     assert reused.json["error_code"] == "upload_expired"
+
+
+def test_conflict_cancel_removes_pending_file_without_retrying_service(app, auth_client, monkeypatch):
+    assert auth_client.post(
+        "/api/mods/import", data={"file": (_pak_zip(), "Example.zip")},
+        content_type="multipart/form-data",
+    ).status_code == 200
+    conflict = auth_client.post(
+        "/api/mods/import", data={"file": (_pak_zip(content=b"changed"), "Example.zip")},
+        content_type="multipart/form-data",
+    )
+    token = conflict.json["details"]["upload_token"]
+    pending_path = Path(app.extensions["pending_uploads"][token]["path"])
+    assert pending_path.is_file()
+
+    monkeypatch.setattr(
+        app.extensions["mod_service"], "install",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cancel must not call install")),
+    )
+    cancelled = auth_client.post(
+        "/api/mods/import", json={"upload_token": token, "decision": "cancel"},
+    )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json == {"ok": True, "data": {"cancelled": True}}
+    assert app.extensions["pending_uploads"] == {}
+    assert not pending_path.exists()
+    reused = auth_client.post(
+        "/api/mods/import", json={"upload_token": token, "decision": "replace"},
+    )
+    assert reused.status_code == 410
+    assert reused.json["error_code"] == "upload_expired"
+
+
+def test_unknown_retry_token_is_410(auth_client):
+    response = auth_client.post(
+        "/api/mods/import", json={"upload_token": "not-a-token", "decision": "replace"},
+    )
+    assert response.status_code == 410
+    assert response.json["error_code"] == "upload_expired"
+
+
+def test_modified_delete_returns_409_then_force_succeeds(app, auth_client):
+    installed = auth_client.post(
+        "/api/mods/import", data={"file": (_pak_zip(), "Modified.zip")},
+        content_type="multipart/form-data",
+    ).json["data"]
+    live_file = Path(installed["install_path"])
+    live_file.write_bytes(b"locally modified")
+
+    blocked = auth_client.delete(f"/api/mods/{installed['id']}")
+
+    assert blocked.status_code == 409
+    assert blocked.json["error_code"] == "modified_files"
+    assert blocked.json["details"] == {"files": [str(live_file)]}
+    assert any(mod["id"] == installed["id"] for mod in auth_client.get("/api/mods").json["data"])
+
+    forced = auth_client.delete(f"/api/mods/{installed['id']}?force_modified=true")
+    assert forced.status_code == 200
+    assert not live_file.exists()
+    assert all(mod["id"] != installed["id"] for mod in auth_client.get("/api/mods").json["data"])
 
 
 def test_game_running_maps_to_423(app, auth_client):

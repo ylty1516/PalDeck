@@ -6,7 +6,7 @@ import pytest
 
 from backend.domain import ArchivePolicy, ModKind
 from backend.game_detector import resolve_ue4ss_mods_dir
-from backend.mod_service import ModService
+from backend.mod_service import ModifiedFilesError, ModService
 from backend import mod_manager, ue4ss_installer
 
 
@@ -216,8 +216,9 @@ def test_payload_modified_outranks_missing_ue4ss_metadata_and_blocks_delete(
     [listed] = service.list_mods()
 
     assert listed["status"] == "modified"
-    with pytest.raises(RuntimeError, match="force_modified=True"):
+    with pytest.raises(ModifiedFilesError) as error:
         service.delete(item["id"])
+    assert error.value.details["files"] == [str(mods / "Priority" / "Scripts" / "main.lua")]
     assert (mods / "Priority" / "Scripts" / "main.lua").read_bytes() == b"changed"
 
 

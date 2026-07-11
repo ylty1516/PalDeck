@@ -20,7 +20,7 @@ from werkzeug.utils import secure_filename
 
 from backend import game_detector, nexus_api, process_utils, self_updater, ue4ss_installer
 from backend.appearance import AppearanceService
-from backend.mod_service import GameRunningError, ModConflictError, ModService
+from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.storage import JsonStore
 from backend.version import APP_VERSION
 
@@ -172,6 +172,10 @@ def create_app(
     def handle_conflict(exc: ModConflictError):
         return failure("模组文件冲突", 409, "mod_conflict", exc.details)
 
+    @app.errorhandler(ModifiedFilesError)
+    def handle_modified_files(exc: ModifiedFilesError):
+        return failure("模组文件已修改，确认后可强制删除", 409, "modified_files", exc.details)
+
     @app.errorhandler(GameRunningError)
     def handle_game_running(_exc: GameRunningError):
         return failure("幻兽帕鲁正在运行，无法修改模组", 423, "game_running")
@@ -281,13 +285,16 @@ def create_app(
         retained = False
         dest: Path | None = None
         if retry_token:
+            decision = body.get("decision", "cancel")
             with pending_lock:
                 item = pending.pop(str(retry_token), None)
-            if not item:
-                raise ApiError("上传暂存已过期", 400, "upload_expired")
+                if not item:
+                    raise ApiError("上传暂存已过期", 410, "upload_expired")
+                if decision == "cancel":
+                    Path(item["path"]).unlink(missing_ok=True)
+                    return success({"cancelled": True})
             dest = Path(item["path"])
             options = item["options"]
-            decision = body.get("decision", "cancel")
         elif "file" in request.files:
             uploaded = request.files["file"]
             if not uploaded or not uploaded.filename:

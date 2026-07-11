@@ -50,6 +50,12 @@ class ModConflictError(RuntimeError):
         super().__init__("模组文件冲突")
 
 
+class ModifiedFilesError(RuntimeError):
+    def __init__(self, files: Iterable[Path | str]):
+        self.details = {"files": [str(path) for path in files]}
+        super().__init__("模组文件已修改")
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -765,6 +771,33 @@ class ModService:
                 break
             current = current.parent
 
+    def _modified_paths(self, manifest: ModManifest, status: AuditStatus) -> list[Path]:
+        disabled_root = self.data_dir / "disabled" / manifest.id
+        changed: list[Path] = []
+        existing: list[Path] = []
+        for expected in manifest.files:
+            candidates = (
+                manifest.install_root / expected.relative_path,
+                disabled_root / expected.relative_path,
+            )
+            present = [path for path in candidates if path.is_file() and not _is_reparse(path)]
+            existing.extend(present)
+            if status is AuditStatus.CONFLICT and len(present) > 1:
+                changed.extend(present)
+                continue
+            for path in present:
+                if path.stat().st_size != expected.size or _sha256(path) != expected.sha256:
+                    changed.append(path)
+        if manifest.ue4ss_enabled_txt is not None:
+            expected = manifest.ue4ss_enabled_txt
+            metadata = disabled_root / expected.relative_path
+            if metadata.is_file() and not _is_reparse(metadata):
+                existing.append(metadata)
+                if metadata.stat().st_size != expected.size or _sha256(metadata) != expected.sha256:
+                    changed.append(metadata)
+        selected = changed or existing
+        return sorted(set(selected), key=lambda path: str(path).casefold())
+
     @_locked_write
     def delete(self, manifest_id: str, force_modified: bool = False) -> dict[str, object]:
         self._assert_stopped()
@@ -772,7 +805,7 @@ class ModService:
         manifest = self.store.get(manifest_id)
         audit = self._audit(manifest)
         if audit.status in (AuditStatus.MODIFIED, AuditStatus.CONFLICT) and not force_modified:
-            raise RuntimeError("模组文件已修改，需 force_modified=True 才能删除")
+            raise ModifiedFilesError(self._modified_paths(manifest, audit.status))
         transaction = self.data_dir / "staging" / uuid.uuid4().hex
         transaction.mkdir(parents=True)
         moved: list[tuple[Path, Path]] = []
