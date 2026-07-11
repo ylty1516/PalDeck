@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+import backend.appearance as appearance_module
 from backend.appearance import AppearanceService
 from scripts.prepare_default_background import prepare
 
@@ -98,6 +101,25 @@ def test_rejects_symlink_or_reparse_source(tmp_path):
         _service(tmp_path).set_background(link)
 
 
+def test_source_validation_and_copy_use_same_no_follow_handle(tmp_path, monkeypatch):
+    source = _image(tmp_path / "user.png")
+    replacement = _image(tmp_path / "replacement.png")
+    service = _service(tmp_path)
+    original_open = appearance_module._open_read_nofollow
+
+    def replace_after_open(path):
+        handle = original_open(path)
+        source.rename(tmp_path / "detached.png")
+        os.replace(replacement, source)
+        return handle
+
+    monkeypatch.setattr(appearance_module, "_open_read_nofollow", replace_after_open)
+    saved = service.set_background(source)
+
+    with Image.open(saved) as result:
+        assert result.getpixel((0, 0)) == (65, 105, 225)
+
+
 def test_copies_background_with_uuid_and_never_deletes_source(tmp_path):
     source = _image(tmp_path / "user.png")
     service = _service(tmp_path)
@@ -152,10 +174,10 @@ def test_replacement_rolls_back_new_file_and_keeps_old_on_config_failure(tmp_pat
     old = service.set_background(_image(tmp_path / "old.png"))
     before = service.get_settings()
 
-    def fail(_config):
+    def fail(_mutator, default=None):
         raise OSError("disk full")
 
-    monkeypatch.setattr(service, "_write_config", fail)
+    monkeypatch.setattr(service.store, "update", fail)
     with pytest.raises(OSError):
         service.set_background(_image(tmp_path / "new.png"))
 
@@ -174,6 +196,43 @@ def test_successful_replacement_deletes_only_old_managed_copy(tmp_path):
 
     assert not old.exists()
     assert new.exists() and first_source.exists() and second_source.exists()
+
+
+def test_cleanup_orphans_retries_failed_deletion(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    orphan = service.background_dir / ("a" * 32 + ".png")
+    orphan.write_bytes(b"orphan")
+    unrelated = service.background_dir / "keep.txt"
+    unrelated.write_bytes(b"keep")
+    original_unlink = Path.unlink
+    attempts = 0
+
+    def flaky_unlink(path, *args, **kwargs):
+        nonlocal attempts
+        if path == orphan and attempts == 0:
+            attempts += 1
+            raise PermissionError("busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    service.cleanup_orphans()
+    assert orphan.exists()
+    service.cleanup_orphans()
+    assert not orphan.exists()
+    assert unrelated.exists()
+
+
+def test_service_startup_removes_unreferenced_managed_uuid_files(tmp_path):
+    data = tmp_path / "data"
+    backgrounds = data / "backgrounds"
+    backgrounds.mkdir(parents=True)
+    orphan = backgrounds / ("b" * 32 + ".webp")
+    orphan.write_bytes(b"orphan")
+    default = _image(tmp_path / "default.webp", format="WEBP")
+
+    AppearanceService(data, default)
+
+    assert not orphan.exists()
 
 
 def test_reset_restores_default_and_removes_managed_copy(tmp_path):
@@ -224,6 +283,47 @@ def test_appearance_api_updates_uploads_serves_and_resets(app, auth_client):
     assert reset.json["data"]["background"] == "default"
 
 
+@pytest.mark.parametrize(
+    ("image_format", "filename", "mime"),
+    [("JPEG", "photo.jpg", "image/jpeg"), ("WEBP", "photo.webp", "image/webp")],
+)
+def test_current_background_sets_mime_for_supported_formats(app, auth_client, image_format, filename, mime):
+    payload = io.BytesIO()
+    Image.new("RGB", (20, 20), "navy").save(payload, image_format)
+    payload.seek(0)
+    uploaded = auth_client.post(
+        "/api/appearance/background",
+        data={"file": (payload, filename)},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    assert auth_client.get("/api/appearance/background/current").mimetype == mime
+
+
+def test_default_background_response_is_webp(app, auth_client):
+    response = auth_client.get("/api/appearance/background/current")
+    assert response.status_code == 200, (response.json, app.extensions["appearance_service"].default_background)
+    assert response.mimetype == "image/webp"
+
+
+def test_current_api_streams_the_once_opened_handle_during_path_replacement(app, auth_client, tmp_path, monkeypatch):
+    service = app.extensions["appearance_service"]
+    current_path = service.set_background(_image(tmp_path / "current.png"))
+    original_open = service.open_current_background
+
+    def replace_after_open():
+        handle, filename = original_open()
+        current_path.rename(current_path.with_name("detached.png"))
+        Image.new("RGB", (64, 48), "red").save(current_path, "PNG")
+        return handle, filename
+
+    monkeypatch.setattr(service, "open_current_background", replace_after_open)
+    response = auth_client.get("/api/appearance/background/current")
+
+    with Image.open(io.BytesIO(response.data)) as streamed:
+        assert streamed.getpixel((0, 0)) == (65, 105, 225)
+
+
 def test_game_path_update_preserves_appearance_config(app, auth_client, fake_game_root):
     assert auth_client.post("/api/appearance", json={"theme": "ivory-sakura"}).status_code == 200
 
@@ -231,6 +331,34 @@ def test_game_path_update_preserves_appearance_config(app, auth_client, fake_gam
 
     assert response.status_code == 200
     assert auth_client.get("/api/appearance").json["data"]["theme"] == "ivory-sakura"
+
+
+def test_concurrent_theme_and_game_path_updates_preserve_both(app, fake_game_root):
+    barrier = threading.Barrier(2)
+    responses = []
+
+    def update_theme():
+        client = app.test_client()
+        client.get("/?token=test-token")
+        barrier.wait(timeout=5)
+        responses.append(client.post("/api/appearance", json={"theme": "starlit-night"}))
+
+    def update_game():
+        client = app.test_client()
+        client.get("/?token=test-token")
+        barrier.wait(timeout=5)
+        responses.append(client.post("/api/game/set", json={"path": str(fake_game_root)}))
+
+    threads = [threading.Thread(target=update_theme), threading.Thread(target=update_game)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    config = json.loads((Path(app.config["DATA_DIR"]) / "config.json").read_text(encoding="utf-8"))
+    assert config["appearance"]["theme"] == "starlit-night"
+    assert config["game_path"] == str(fake_game_root)
 
 
 def test_failed_api_upload_preserves_current_background(app, auth_client):

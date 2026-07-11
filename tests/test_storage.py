@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -99,6 +100,29 @@ def test_read_errors_return_deep_copy_of_default(tmp_path, monkeypatch, error):
     result["items"].append("changed")
 
     assert default == {"items": []}
+
+
+def test_update_is_atomic_across_store_instances_for_same_path(tmp_path):
+    path = tmp_path / "config.json"
+    first = JsonStore(path)
+    second = JsonStore(path)
+    barrier = threading.Barrier(2)
+
+    def update(store, key, value):
+        barrier.wait(timeout=5)
+        store.update(lambda config: {**config, key: value})
+
+    threads = [
+        threading.Thread(target=update, args=(first, "theme", "starlit-night")),
+        threading.Thread(target=update, args=(second, "game_path", "F:/Palworld")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert first.read({}) == {"theme": "starlit-night", "game_path": "F:/Palworld"}
 
 
 def test_missing_file_returns_deep_copy_of_default(tmp_path):

@@ -255,7 +255,15 @@ def create_app(
 
     @app.get("/api/appearance/background/current")
     def current_background():
-        response = send_file(appearance.current_background(), conditional=False, max_age=0)
+        handle, filename = appearance.open_current_background()
+        try:
+            response = send_file(
+                handle, download_name=filename, conditional=False, max_age=0,
+            )
+        except Exception:
+            handle.close()
+            raise
+        response.call_on_close(handle.close)
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         return response
@@ -387,11 +395,14 @@ def create_app(
         info = game_detector.validate_game_path(path)
         game_detector.ensure_mod_folders(path)
         config_store = JsonStore(writable / "config.json")
-        config = config_store.read({})
-        if not isinstance(config, dict):
-            config = {}
-        config["game_path"] = path
-        config_store.write(config)
+
+        def save_game_path(config):
+            if not isinstance(config, dict):
+                config = {}
+            config["game_path"] = path
+            return config
+
+        config_store.update(save_game_path)
         app.extensions["mod_service"] = ModService(path, writable)
         return success(info)
 

@@ -332,6 +332,7 @@ def test_installer_rolls_back_partial_publish_and_does_not_fake_logicmods_enable
     mods = win64 / "Mods"
     mods.mkdir()
     (mods / "mods.txt").write_text("BPModLoaderMod : 0\n", encoding="utf-8")
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
     original_replace = ue4ss_installer.os.replace
     count = 0
     def fail_replace(source, destination):

@@ -328,6 +328,8 @@ def test_launcher_passes_runtime_paths_to_factory_main(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "backend.app", fake_app)
     monkeypatch.setattr(launcher, "_resource_root", lambda: tmp_path / "root")
     monkeypatch.setattr(launcher, "_writable_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setenv("PALMOD_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("PALMOD_DATA_DIR", str(tmp_path / "data"))
 
     launcher.main()
 

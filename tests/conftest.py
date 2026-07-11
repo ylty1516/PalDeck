@@ -23,12 +23,14 @@ def fake_game_root(tmp_path):
 @pytest.fixture
 def app(tmp_path, fake_game_root, monkeypatch):
     monkeypatch.setenv("PALMOD_GAME_PATH", str(fake_game_root))
-    return create_app(
+    application = create_app(
         root=tmp_path,
         data_dir=tmp_path / "data",
         session_token="test-token",
         testing=True,
     )
+    application.extensions["mod_service"].game_running = lambda: False
+    return application
 
 
 @pytest.fixture
