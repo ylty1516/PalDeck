@@ -323,7 +323,7 @@ class ManifestStore:
     def audit(self, manifest_id: str) -> ManifestAudit:
         manifest = self.get(manifest_id)
         live_root = manifest.install_root
-        alternate_root = self.root.parent / "disabled" / manifest.id
+        alternate_root = self.root / "disabled" / manifest.id
         live_count = disabled_count = 0
         changed = False
         for expected in manifest.files:

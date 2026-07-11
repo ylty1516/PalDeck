@@ -114,9 +114,9 @@ def test_invalid_persisted_manifest_is_rejected_by_get_and_skipped_by_list(tmp_p
 
 def test_audit_detects_modified_missing_disabled_and_conflict(tmp_path):
     root = tmp_path / "live"
-    disabled = tmp_path / "disabled"
+    disabled = tmp_path / "data" / "disabled"
     root.mkdir()
-    disabled.mkdir()
+    disabled.mkdir(parents=True)
     payload = root / "a.pak"
     payload.write_bytes(b"original")
     store = ManifestStore(tmp_path / "data")
@@ -141,7 +141,7 @@ def test_audit_does_not_accept_a_caller_supplied_disabled_root(tmp_path):
         store.audit("0" * 32, tmp_path / "other-disabled")
 
 
-def test_audit_uses_store_root_to_derive_default_disabled_root(tmp_path):
+def test_audit_uses_data_dir_as_default_disabled_root(tmp_path):
     live = tmp_path / "game" / "live"
     live.mkdir(parents=True)
     payload = live / "a.pak"
@@ -149,7 +149,7 @@ def test_audit_uses_store_root_to_derive_default_disabled_root(tmp_path):
     store = ManifestStore(tmp_path / "state" / "data")
     manifest = _create(store, live, [payload])
     payload.unlink()
-    disabled_payload = tmp_path / "state" / "disabled" / manifest.id / "a.pak"
+    disabled_payload = tmp_path / "state" / "data" / "disabled" / manifest.id / "a.pak"
     disabled_payload.parent.mkdir(parents=True)
     disabled_payload.write_bytes(b"original")
 
