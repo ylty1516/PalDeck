@@ -199,6 +199,28 @@ def test_ue4ss_enabled_metadata_participates_in_audit(
     assert listed["status"] == damage
 
 
+def test_payload_modified_outranks_missing_ue4ss_metadata_and_blocks_delete(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, False)
+    source = _zip(tmp_path / "priority.zip", {
+        "Priority/Scripts/main.lua": b"original",
+        "Priority/enabled.txt": b"marker",
+    })
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    (mods / "Priority" / "Scripts" / "main.lua").write_bytes(b"changed")
+    metadata = tmp_path / "data" / "disabled" / item["id"] / "metadata" / "enabled.txt"
+    metadata.unlink()
+
+    [listed] = service.list_mods()
+
+    assert listed["status"] == "modified"
+    with pytest.raises(RuntimeError, match="force_modified=True"):
+        service.delete(item["id"])
+    assert (mods / "Priority" / "Scripts" / "main.lua").read_bytes() == b"changed"
+
+
 def test_ue4ss_enabled_metadata_record_is_strictly_deserialized(
     fake_game_root, tmp_path
 ):

@@ -411,13 +411,24 @@ class ManifestStore:
             metadata = self._audit_path(
                 alternate_root, manifest.ue4ss_enabled_txt.relative_path
             )
+            metadata_status: AuditStatus | None = None
             if not metadata.is_file():
-                status = AuditStatus.MISSING
+                metadata_status = AuditStatus.MISSING
             elif (
                 metadata.stat().st_size != manifest.ue4ss_enabled_txt.size
                 or _sha256(metadata) != manifest.ue4ss_enabled_txt.sha256
             ):
-                status = AuditStatus.MODIFIED
+                metadata_status = AuditStatus.MODIFIED
+            if metadata_status is not None:
+                priority = {
+                    AuditStatus.ENABLED: 0,
+                    AuditStatus.DISABLED: 0,
+                    AuditStatus.MISSING: 1,
+                    AuditStatus.MODIFIED: 2,
+                    AuditStatus.CONFLICT: 3,
+                }
+                if priority[metadata_status] > priority[status]:
+                    status = metadata_status
         return ManifestAudit(manifest.id, status)
 
     def migrate_legacy_registry(
