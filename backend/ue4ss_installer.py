@@ -13,6 +13,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from .archive_utils import extract_archive_safely
+from .domain import ArchivePolicy
 from .game_detector import get_mod_directories, has_ue4ss
 from .manifest_store import validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
@@ -94,25 +96,6 @@ def _names_look_like_ue4ss(names: list[str]) -> bool:
     return False
 
 
-def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
-    dest = dest.resolve()
-    for info in zf.infolist():
-        name = info.filename.replace("\\", "/")
-        if not name or name.endswith("/"):
-            continue
-        parts = [p for p in Path(name).parts if p not in ("", ".", "..")]
-        if not parts or parts[0].endswith(":"):
-            continue
-        target = dest.joinpath(*parts)
-        try:
-            target.resolve().relative_to(dest)
-        except ValueError:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with zf.open(info) as src, open(target, "wb") as out:
-            shutil.copyfileobj(src, out)
-
-
 def _find_package_root(extract_dir: Path) -> Path:
     """If zip has a single top folder, use it; else extract_dir."""
     # Prefer directory that contains UE4SS.dll or dwmapi.dll
@@ -157,7 +140,11 @@ def _patch_settings(win64: Path) -> list[str]:
     return actions
 
 
-def install_from_zip(game_root: Path | str, zip_path: Path | str) -> dict[str, Any]:
+def install_from_zip(
+    game_root: Path | str,
+    zip_path: Path | str,
+    policy: ArchivePolicy | None = None,
+) -> dict[str, Any]:
     """Transactionally install a validated UE4SS framework package into Win64."""
     root = Path(game_root)
     zip_path = Path(zip_path)
@@ -183,12 +170,7 @@ def install_from_zip(game_root: Path | str, zip_path: Path | str) -> dict[str, A
     removed_legacy = False
     try:
         extract = temp / "extract"
-        extract.mkdir()
-        try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                _safe_extract(zf, extract)
-        except zipfile.BadZipFile as exc:
-            raise ValueError("UE4SS 压缩包已损坏") from exc
+        extract_archive_safely(zip_path, extract, policy=policy)
         pkg = _find_package_root(extract)
         if not looks_like_ue4ss_framework(pkg) and not looks_like_ue4ss_framework(extract):
             raise ValueError(

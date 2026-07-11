@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.domain import ModKind
+from backend.domain import ArchivePolicy, ModKind
 from backend.game_detector import resolve_ue4ss_mods_dir
 from backend.mod_service import ModService
 from backend import mod_manager, ue4ss_installer
@@ -240,6 +240,48 @@ def test_ue4ss_enabled_metadata_record_is_strictly_deserialized(
         service.store.get(item["id"])
 
 
+def test_mods_txt_bom_is_preserved_and_target_is_not_duplicated(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, False)
+    mods_txt = mods / "mods.txt"
+    mods_txt.write_bytes(b"\xef\xbb\xbfBomMod : 0\r\nOther : 1\r\n")
+    source = _zip(tmp_path / "bom.zip", {"BomMod/Scripts/main.lua": b"lua"})
+
+    _service(fake_game_root, tmp_path).install(source)
+
+    result = mods_txt.read_bytes()
+    assert result == b"\xef\xbb\xbfBomMod : 1\r\nOther : 1\r\n"
+    assert result.lower().count(b"bommod :") == 1
+
+
+def test_mods_txt_append_preserves_cr_line_endings(fake_game_root, tmp_path):
+    mods = _layout(fake_game_root, False)
+    mods_txt = mods / "mods.txt"
+    mods_txt.write_bytes(b"Other : 1\r")
+    source = _zip(tmp_path / "cr.zip", {"CrMod/Scripts/main.lua": b"lua"})
+
+    _service(fake_game_root, tmp_path).install(source)
+
+    assert mods_txt.read_bytes() == b"Other : 1\rCrMod : 1\r"
+
+
+def test_invalid_utf8_mods_txt_is_rejected_without_changes(fake_game_root, tmp_path):
+    mods = _layout(fake_game_root, False)
+    mods_txt = mods / "mods.txt"
+    original = b"Other : 1\n\xffinvalid\n"
+    mods_txt.write_bytes(original)
+    source = _zip(tmp_path / "invalid.zip", {"Invalid/Scripts/main.lua": b"lua"})
+    service = _service(fake_game_root, tmp_path)
+
+    with pytest.raises(UnicodeDecodeError):
+        service.install(source)
+
+    assert mods_txt.read_bytes() == original
+    assert not (mods / "Invalid").exists()
+    assert service.list_mods() == []
+
+
 def test_mod_manager_facade_accepts_ue4ss_preferred_type(monkeypatch):
     calls = []
     class FakeService:
@@ -307,6 +349,46 @@ def test_installer_rolls_back_partial_publish_and_does_not_fake_logicmods_enable
     assert (win64 / "UE4SS.dll").read_bytes() == b"old"
     assert not (win64 / "dwmapi.dll").exists()
     assert (mods / "mods.txt").read_text(encoding="utf-8") == "BPModLoaderMod : 0\n"
+
+
+def test_installer_uses_archive_policy_and_rejects_zip_bomb_before_publish(
+    fake_game_root, tmp_path, monkeypatch
+):
+    package = tmp_path / "UE4SS_bomb.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("UE4SS.dll", b"dll")
+        archive.writestr("dwmapi.dll", b"proxy")
+        archive.writestr("UE4SS-settings.ini", b"x" * 128)
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+
+    with pytest.raises(ValueError, match="总大小"):
+        ue4ss_installer.install_from_zip(
+            fake_game_root,
+            package,
+            policy=ArchivePolicy(max_files=10, max_single_bytes=256, max_total_bytes=32),
+        )
+
+    assert not (win64 / "UE4SS.dll").exists()
+    assert not (win64 / "dwmapi.dll").exists()
+
+
+def test_installer_rejects_traversal_in_otherwise_valid_package(
+    fake_game_root, tmp_path, monkeypatch
+):
+    package = _zip(tmp_path / "UE4SS_traversal.zip", {
+        "UE4SS.dll": b"dll",
+        "dwmapi.dll": b"proxy",
+        "UE4SS-settings.ini": b"settings",
+        "../escape.txt": b"escape",
+    })
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+
+    with pytest.raises(ValueError, match="路径穿越"):
+        ue4ss_installer.install_from_zip(fake_game_root, package)
+
+    assert not (tmp_path / "escape.txt").exists()
+    assert not (fake_game_root / "Pal" / "Binaries" / "Win64" / "UE4SS.dll").exists()
 
 
 def test_download_rejects_non_official_asset_url(tmp_path, monkeypatch):

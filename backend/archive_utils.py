@@ -309,6 +309,65 @@ def _cleanup_staging(staging: Path | None) -> None:
         pass
 
 
+def extract_archive_safely(
+    archive: Path | str,
+    dest: Path | str,
+    policy: ArchivePolicy | None = None,
+) -> Path:
+    """Validate and stream-extract an archive without applying Mod classification."""
+    archive_path = Path(archive)
+    destination = Path(os.path.abspath(dest))
+    selected_policy = policy or ArchivePolicy()
+    staging: Path | None = None
+
+    try:
+        _assert_ancestor_chain_safe(destination.parent)
+        if os.path.lexists(destination):
+            raise _TargetError(f"目标目录已存在，请选择空的新目录：{destination}")
+        try:
+            zip_file = zipfile.ZipFile(archive_path, "r")
+        except _ARCHIVE_ERRORS as error:
+            raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
+        except OSError as error:
+            raise ValueError(f"无法读取 ZIP 文件：{archive_path}") from error
+
+        with zip_file:
+            try:
+                validated = _validate_entries(
+                    zip_file.infolist(), destination, selected_policy
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _assert_ancestor_chain_safe(destination.parent)
+                staging = Path(
+                    tempfile.mkdtemp(
+                        prefix=f".{destination.name}.",
+                        suffix=".tmp",
+                        dir=destination.parent,
+                    )
+                )
+                _assert_safe_chain(staging, staging)
+                staged_entries = [
+                    (info, parts, staging.joinpath(*parts))
+                    for info, parts, _ in validated
+                ]
+                _extract(zip_file, staged_entries, selected_policy, staging)
+            except _ARCHIVE_ERRORS as error:
+                raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
+
+        _assert_tree_safe(staging)
+        _assert_ancestor_chain_safe(destination.parent)
+        if os.path.lexists(destination):
+            raise _TargetError(f"目标目录发布前已被占用：{destination}")
+        try:
+            os.replace(staging, destination)
+        except OSError as error:
+            raise _TargetError(f"无法原子发布到目标目录：{destination}") from error
+        staging = None
+        return destination
+    finally:
+        _cleanup_staging(staging)
+
+
 def inspect_and_extract(
     archive: Path | str,
     dest: Path | str,

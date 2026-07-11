@@ -281,40 +281,55 @@ class ModService:
 
     @staticmethod
     def _mods_entry(line: str) -> tuple[str, str] | None:
-        match = re.match(r"^(?P<prefix>\s*)(?P<name>[^:#;]+?)(?P<separator>\s*:\s*)(?P<value>[01])(?P<tail>\s*(?:[#;].*)?)$", line)
+        candidate = line[1:] if line.startswith("\ufeff") else line
+        match = re.match(r"^(?P<prefix>\s*)(?P<name>[^:#;]+?)(?P<separator>\s*:\s*)(?P<value>[01])(?P<tail>\s*(?:[#;].*)?)$", candidate)
         if not match:
             return None
         return match.group("name").strip(), match.group("value")
 
     @classmethod
-    def _updated_mods_text(cls, text: str, name: str, enabled: bool | None) -> str:
-        newline = "\r\n" if "\r\n" in text else "\n"
-        lines = text.splitlines()
+    def _updated_mods_bytes(cls, data: bytes, name: str, enabled: bool | None) -> bytes:
+        text = data.decode("utf-8")
+        lines = text.splitlines(keepends=True)
+        newline = next(
+            (
+                "\r\n" if line.endswith("\r\n") else line[-1]
+                for line in lines
+                if line.endswith(("\r\n", "\n", "\r"))
+            ),
+            "\n",
+        )
         wanted = name.casefold()
         found = False
-        appended = False
         output: list[str] = []
         for line in lines:
-            entry = cls._mods_entry(line)
+            if line.endswith("\r\n"):
+                content, ending = line[:-2], "\r\n"
+            elif line.endswith(("\n", "\r")):
+                content, ending = line[:-1], line[-1]
+            else:
+                content, ending = line, ""
+            entry = cls._mods_entry(content)
             if entry is None or entry[0].casefold() != wanted:
                 output.append(line)
                 continue
             if found or enabled is None:
                 continue
-            output.append(re.sub(r"(\s*:\s*)[01]", rf"\g<1>{int(enabled)}", line, count=1))
+            output.append(
+                re.sub(r"(\s*:\s*)[01]", rf"\g<1>{int(enabled)}", content, count=1)
+                + ending
+            )
             found = True
         if enabled is not None and not found:
-            output.append(f"{name} : {int(enabled)}")
-            appended = True
-        result = newline.join(output)
-        if output and (text.endswith(("\n", "\r")) or appended):
-            result += newline
-        return result
+            if output and not output[-1].endswith(("\r\n", "\n", "\r")):
+                output[-1] += newline
+            output.append(f"{name} : {int(enabled)}{newline}")
+        return "".join(output).encode("utf-8")
 
-    def _write_mods_txt(self, path: Path, text: str) -> None:
+    def _write_mods_txt(self, path: Path, data: bytes) -> None:
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temporary.write_bytes(text.encode("utf-8"))
+            temporary.write_bytes(data)
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -323,7 +338,7 @@ class ModService:
     def _mods_enabled(cls, path: Path, name: str) -> bool | None:
         if not path.is_file():
             return None
-        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for line in path.read_bytes().decode("utf-8").splitlines():
             entry = cls._mods_entry(line)
             if entry is not None and entry[0].casefold() == name.casefold():
                 return entry[1] == "1"
@@ -395,8 +410,8 @@ class ModService:
                     ue4ss_enabled_txt=ManifestFile("metadata/enabled.txt", metadata.stat().st_size, _sha256(metadata)),
                 )
                 self.store.save(created)
-            current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
-            self._write_mods_txt(mods_txt, self._updated_mods_text(current, folder_name, True))
+            current = old_config if old_config is not None else b""
+            self._write_mods_txt(mods_txt, self._updated_mods_bytes(current, folder_name, True))
             return self._listed(created)
         except BaseException:
             if created is not None:
@@ -649,10 +664,10 @@ class ModService:
             manifest_bytes = manifest_path.read_bytes()
             changed = replace(manifest, enabled=enabled)
             try:
-                current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                current = old_config if old_config is not None else b""
                 self._write_mods_txt(
                     mods_txt,
-                    self._updated_mods_text(current, manifest.install_root.name, enabled),
+                    self._updated_mods_bytes(current, manifest.install_root.name, enabled),
                 )
                 self.store.save(changed)
                 return self._listed(changed)
@@ -786,10 +801,10 @@ class ModService:
                     backup.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(metadata, backup)
                     moved.append((backup, metadata))
-                current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                current = old_config if old_config is not None else b""
                 self._write_mods_txt(
                     mods_txt,
-                    self._updated_mods_text(current, manifest.install_root.name, None),
+                    self._updated_mods_bytes(current, manifest.install_root.name, None),
                 )
             self.store.delete(manifest.id)
         except BaseException:
@@ -871,10 +886,10 @@ class ModService:
                 metadata: Path | None = None
                 try:
                     if enabled is None:
-                        current = old_config.decode("utf-8", errors="ignore") if old_config is not None else ""
+                        current = old_config if old_config is not None else b""
                         self._write_mods_txt(
                             mods_txt,
-                            self._updated_mods_text(current, candidate.name, False),
+                            self._updated_mods_bytes(current, candidate.name, False),
                         )
                         enabled = False
                     manifest = self.store.create(
