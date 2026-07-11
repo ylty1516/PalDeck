@@ -18,7 +18,7 @@ from flask import Flask, jsonify, redirect, request, send_file, send_from_direct
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from backend import game_detector, nexus_api, process_utils, self_updater, ue4ss_installer
+from backend import game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
 from backend.appearance import AppearanceService
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.storage import JsonStore
@@ -572,8 +572,24 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
 
     server = threading.Thread(target=run, daemon=True)
     server.start()
-    if not _wait_server(base_url):
+    server_ready = _wait_server(base_url)
+    if not server_ready:
         print("服务启动超时，请检查防火墙。")
+
+    report_path = smoke_check.smoke_report_path(os.environ.get("PALDECK_SMOKE_REPORT"))
+    if report_path is not None:
+        def run_smoke_report() -> None:
+            try:
+                if not server_ready:
+                    raise RuntimeError("loopback server did not become ready")
+                smoke_check.run_http_smoke(
+                    base_url, token, report_path, frozen=self_updater.is_frozen(),
+                )
+            except Exception:
+                traceback.print_exc()
+                os._exit(2)
+
+        threading.Thread(target=run_smoke_report, name="paldeck-smoke-report", daemon=True).start()
 
     force_browser = os.environ.get("PALMOD_BROWSER", "").strip().casefold() in {"1", "true", "yes"}
     try:

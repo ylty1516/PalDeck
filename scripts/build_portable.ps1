@@ -39,11 +39,9 @@ if (-not (Test-Path $venvPython -PathType Leaf)) {
     Invoke-Checked "创建隔离构建环境" "py" @("-3", "-m", "venv", $venvDir)
 }
 
-Invoke-Checked "安装运行、测试与打包依赖" $venvPython @(
-    "-m", "pip", "install", "--disable-pip-version-check",
-    "-r", (Join-Path $repoRoot "requirements.txt"),
-    "-r", (Join-Path $repoRoot "requirements-dev.txt"),
-    "pyinstaller"
+Invoke-Checked "安装锁定的运行、测试与打包依赖" $venvPython @(
+    "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes",
+    "-r", (Join-Path $repoRoot "requirements-lock.txt")
 )
 Invoke-Checked "运行完整 pytest" $venvPython @("-m", "pytest", "-q")
 
@@ -127,7 +125,7 @@ Set-Content -Path (Join-Path $portableDir "README.txt") -Value $portableReadme -
 Compress-Archive -Path $portableDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashLine = "$hash  $([System.IO.Path]::GetFileName($zipPath))"
-Set-Content -Path $shaPath -Value $hashLine -Encoding ASCII
+[System.IO.File]::WriteAllText($shaPath, $hashLine + "`n", [System.Text.Encoding]::ASCII)
 
 $exeInfo = Get-Item (Join-Path $portableDir "PalDeck.exe")
 $zipInfo = Get-Item $zipPath
