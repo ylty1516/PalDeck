@@ -20,7 +20,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "confirmDelete", "resolveConflict", "useGamePath"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -66,11 +66,19 @@ def test_every_static_control_has_one_unique_registered_action():
     assert not parser.interactive_without_action
     assert len(parser.actions) == len(set(parser.actions))
     app = APP.read_text(encoding="utf-8")
-    match = re.search(r"const ACTION_HANDLERS\s*=\s*Object\.freeze\(\{(.*?)^\}\);", app, re.S | re.M)
-    assert match, "ACTION_HANDLERS must be a frozen object literal"
+    match = re.search(r"export const ACTION_HANDLERS\s*=\s*Object\.freeze\(\{(.*?)^\}\);", app, re.S | re.M)
+    assert match, "ACTION_HANDLERS must be an exported frozen object literal"
     registered = set(re.findall(r"^\s{2}([A-Za-z][A-Za-z0-9]*):", match.group(1), re.M))
     assert registered == set(parser.actions)
     assert REQUIRED_ACTIONS <= registered
+    for line in match.group(1).splitlines():
+        entry = re.match(r"\s{2}([A-Za-z][A-Za-z0-9]*):\s*(.+),$", line)
+        if not entry:
+            continue
+        handler = entry.group(2).strip()
+        assert handler not in {"", "undefined", "null", "() => {}", "async () => {}"}
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", handler):
+            assert re.search(rf"(?:function|const)\s+{handler}\b", app), handler
 
 
 def test_dynamic_cards_use_delegation_and_cover_all_cases():
@@ -78,10 +86,18 @@ def test_dynamic_cards_use_delegation_and_cover_all_cases():
     render = RENDER.read_text(encoding="utf-8")
     assert 'addEventListener("click", handleDynamicAction)' in app
     assert 'addEventListener("change", handleDynamicAction)' in app
+    assert '$("#nexusGrid").addEventListener("click", handleDynamicAction)' in app
     for action in DYNAMIC_ACTIONS:
         assert f'case "{action}":' in app
         assert f'"{action}"' in render
+        assert not re.search(rf'case "{action}":\s*break;', app)
     assert ".querySelectorAll(" not in render
+    assert ".hidden = true" not in render
+    assert 'actionButton("打开 N 网", "openNexus"' in render
+    assert 'actionButton("复制尾号", "copyNexusId"' in render
+    assert 'window.open(url, "_blank", "noopener")' in app
+    assert "navigator.clipboard.writeText" in app
+    assert "getSelection" in app
 
 
 def test_modules_are_safe_and_have_required_contracts():
@@ -95,6 +111,10 @@ def test_modules_are_safe_and_have_required_contracts():
     effects = EFFECTS.read_text(encoding="utf-8")
     for token in ("requestAnimationFrame", "visibilitychange", "prefers-reduced-motion", "devicePixelRatio", "80", "pointerdown", "destroy", "update"):
         assert token in effects
+    for exported in ("installRipple", "createPetalEffect", "updatePetalEffect"):
+        assert re.search(rf"export function {exported}\b", effects)
+    assert "const ripple = installRipple(root)" in effects
+    assert "const petals = createPetalEffect(canvas)" in effects
 
 
 def test_css_has_three_themes_accessibility_effects_and_responsive_rules():
@@ -102,7 +122,7 @@ def test_css_has_three_themes_accessibility_effects_and_responsive_rules():
     for token in (
         '[data-theme="aurora-glass"]', '[data-theme="ivory-sakura"]',
         '[data-theme="starlit-night"]', "--background-mask", "--background-blur",
-        "--background-position", ":focus-visible", "prefers-contrast: more",
+        "--background-position", "--background-url", ":focus-visible", "prefers-contrast: more",
         "prefers-reduced-motion", "@media (max-width: 960px)", ".ripple",
         "pointer-events: none",
     ):
@@ -121,7 +141,33 @@ def test_background_upload_and_appearance_persistence_contract():
     assert 'request("/api/appearance"' in app
     assert 'request("/api/appearance/background", { method: "DELETE" })' in app
     assert 'background/current?v=${Date.now()}' in app
+    assert 'setProperty("--background-url"' in app
     assert "applyAppearance(saved)" in app
+
+
+def test_modals_and_aria_are_real_accessible_actions():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    for action in ("cancelConflict", "replaceConflict", "keepBothConflict", "cancelDelete", "approveDelete"):
+        assert f'data-action="{action}"' in html
+    assert "autofocus" in html
+    assert html.count('aria-label="左上"') == 1
+    for label in ("顶部居中", "右上", "左侧居中", "居中", "右侧居中", "左下", "底部居中", "右下"):
+        assert f'aria-label="{label}"' in html
+    assert 'setAttribute("aria-pressed"' in app
+    assert 'addEventListener("cancel"' in app
+    assert "force_modified=true" in app
+    assert 'importSelected("replace")' in app
+    assert 'importSelected("keep_both")' in app
+    assert not re.search(r'case "[^"]+":\s*break;', app)
+
+
+def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
+    app = APP.read_text(encoding="utf-8")
+    assert "async function switchView" in app
+    for call in ("await loadMods()", "await loadNexus(\"popular\")", "await loadSettings()"):
+        assert call in app
+    assert "showMods: async () => switchView" in app
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

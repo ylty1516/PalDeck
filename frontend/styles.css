@@ -2,6 +2,7 @@
   --background-mask: .35;
   --background-blur: 0px;
   --background-position: center;
+  --background-url: none;
   --sidebar-width: 238px;
   --radius: 18px;
   --bg: #eaf5ff;
@@ -31,7 +32,7 @@ button:hover:not(:disabled), .btn:hover:not(:disabled) { transform: translateY(-
 button:active:not(:disabled), .btn:active:not(:disabled) { transform: translateY(1px) scale(.98); }
 :focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 72%, white); outline-offset: 3px; }
 
-.background-layer { position: fixed; inset: calc(-1 * var(--background-blur)); z-index: -3; background: var(--bg) center / cover no-repeat; background-position: var(--background-position); filter: blur(var(--background-blur)); transform: scale(1.03); }
+.background-layer { position: fixed; inset: calc(-1 * var(--background-blur)); z-index: -3; background-color: var(--bg); background-image: var(--background-url); background-size: cover; background-repeat: no-repeat; background-position: var(--background-position); filter: blur(var(--background-blur)); transform: scale(1.03); }
 .background-layer::after { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) calc(var(--background-mask) * 100%), transparent); backdrop-filter: saturate(.9); }
 #petalCanvas { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
 

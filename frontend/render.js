@@ -62,6 +62,15 @@ export function renderNexus(container, mods) {
     body.append(el("h3", "mod-title", mod.name || "未命名"), el("p", "nexus-summary", mod.summary || "暂无简介"));
     const meta = el("p", "mod-meta", `下载 ${Number(mod.downloads || 0).toLocaleString("zh-CN")} · 作者 ${mod.author || "?"}`);
     body.append(meta);
+    const actions = el("div", "button-row");
+    const id = String(mod.mod_id ?? mod.nexus_id ?? "");
+    const open = actionButton("打开 N 网", "openNexus", "btn");
+    open.dataset.url = typeof mod.url === "string" ? mod.url : `https://www.nexusmods.com/palworld/mods/${encodeURIComponent(id)}`;
+    const copy = actionButton("复制尾号", "copyNexusId", "btn");
+    copy.dataset.id = id;
+    copy.append(text(` #${id}`));
+    actions.append(open, copy);
+    body.append(actions);
     card.append(image, body);
     fragment.append(card);
   }
@@ -87,15 +96,7 @@ export function renderConflict(container, details) {
   const conflicts = Array.isArray(details?.conflicts) ? details.conflicts : [];
   for (const conflict of conflicts.slice(0, 20)) list.append(el("li", "mod-path", conflict.path || conflict));
   if (!conflicts.length) list.append(el("li", "muted", "目标位置已有文件。"));
-  const marker = actionButton("冲突处理", "resolveConflict");
-  marker.hidden = true;
-  container.replaceChildren(list, marker);
-}
-
-export function renderDeleteMarker(container) {
-  const marker = actionButton("确认删除", "confirmDelete");
-  marker.hidden = true;
-  container.append(marker);
+  container.replaceChildren(list);
 }
 
 export function formatBytes(value) {

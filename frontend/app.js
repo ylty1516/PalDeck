@@ -1,11 +1,11 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
-import { renderConflict, renderDeleteMarker, renderDetectedGames, renderMessage, renderMods, renderNexus } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
-  pendingDeleteId: null, updateInfo: null,
+  pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
 };
 const effects = createEffects();
@@ -13,12 +13,6 @@ const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
 });
-const POSITION_ACTIONS = Object.freeze({
-  positionTopLeft: "top-left", positionTopCenter: "top-center", positionTopRight: "top-right",
-  positionCenterLeft: "center-left", positionCenter: "center", positionCenterRight: "center-right",
-  positionBottomLeft: "bottom-left", positionBottomCenter: "bottom-center", positionBottomRight: "bottom-right",
-});
-
 function toast(message, kind = "info") {
   const item = document.createElement("div");
   item.className = `toast ${kind}`;
@@ -48,14 +42,15 @@ async function run(trigger, operation, { global = false, busyText = "处理中�
   }
 }
 
-function switchView(name) {
+async function switchView(name) {
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
   const copy = VIEW_COPY[name];
   $("#viewTitle").textContent = copy[0];
   $("#viewSubtitle").textContent = copy[1];
-  if (name === "nexus" && !state.nexus.length) loadNexus("popular");
-  if (name === "settings") loadSettings();
+  if (name === "mods") await loadMods();
+  if (name === "nexus" && !state.nexus.length) await loadNexus("popular");
+  if (name === "settings") await loadSettings();
 }
 
 function applyAppearance(settings) {
@@ -69,13 +64,22 @@ function applyAppearance(settings) {
   $("#maskValue").textContent = `${Math.round(state.appearance.mask * 100)}%`;
   $("#blurValue").textContent = `${state.appearance.blur}px`;
   $("#petalLevel").value = state.appearance.petals;
-  document.querySelectorAll("[data-theme-value]").forEach((button) => button.classList.toggle("selected", button.dataset.themeValue === state.appearance.theme));
-  document.querySelectorAll("[data-position]").forEach((button) => button.classList.toggle("selected", button.dataset.position === state.appearance.position));
+  document.querySelectorAll("[data-theme-value]").forEach((button) => {
+    const selected = button.dataset.themeValue === state.appearance.theme;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  document.querySelectorAll("[data-position]").forEach((button) => {
+    const selected = button.dataset.position === state.appearance.position;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
   effects.update(state.appearance.petals);
 }
 
 function refreshBackground() {
-  $("#backgroundLayer").style.backgroundImage = `url("/api/appearance/background/current?v=${Date.now()}")`;
+  const url = `/api/appearance/background/current?v=${Date.now()}`;
+  document.documentElement.style.setProperty("--background-url", `url("${url}")`);
 }
 
 async function loadMods() {
@@ -116,9 +120,70 @@ async function importSelected(decision = "cancel") {
     if (error instanceof ApiError && error.status === 409) {
       state.pendingUploadToken = error.details?.upload_token || null;
       renderConflict($("#conflictDetails"), error.details);
-      $("#conflictModal").showModal();
+      openModal($("#conflictModal"));
     }
     throw error;
+  }
+}
+
+function openModal(dialog) {
+  dialog.showModal();
+  dialog.querySelector("[autofocus]")?.focus();
+}
+
+async function cancelImportConflict() {
+  const token = state.pendingUploadToken;
+  state.pendingUploadToken = null;
+  $("#conflictModal").close();
+  if (!token) return;
+  try {
+    await request("/api/mods/import", { method: "POST", body: { upload_token: token, decision: "cancel" } });
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 409)) throw error;
+  }
+}
+
+async function deletePendingMod() {
+  const id = state.pendingDeleteId;
+  if (!id) return;
+  $("#deleteModal").close();
+  const suffix = state.pendingDeleteForce ? "?force_modified=true" : "";
+  try {
+    await request(`/api/mods/${encodeURIComponent(id)}${suffix}`, { method: "DELETE" });
+    state.pendingDeleteId = null;
+    state.pendingDeleteForce = false;
+    await loadMods();
+    toast("模组已删除", "success");
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && !state.pendingDeleteForce) {
+      state.pendingDeleteForce = true;
+      $("#deleteMessage").textContent = "检测到已修改文件。再次确认将强制删除这些文件，此操作不可撤销。";
+      openModal($("#deleteModal"));
+      return;
+    }
+    throw error;
+  }
+}
+
+function openValidatedNexus(target) {
+  let url;
+  try { url = new URL(target.dataset.url); } catch { throw new ApiError("N 网地址无效"); }
+  if (url.protocol !== "https:") throw new ApiError("仅允许打开安全的 HTTPS 地址");
+  window.open(url, "_blank", "noopener");
+}
+
+async function copyNexusId(target) {
+  const id = target.dataset.id || "";
+  try {
+    await navigator.clipboard.writeText(id);
+    toast(`已复制尾号 #${id}`, "success");
+  } catch {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    toast("无法访问剪贴板，已选中尾号，请按 Ctrl+C", "info");
   }
 }
 
@@ -162,11 +227,11 @@ function chooseTheme(event) { applyAppearance({ theme: event.currentTarget.datas
 function choosePosition(event) { applyAppearance({ position: event.currentTarget.dataset.position }); }
 function noop() { /* Text and select controls keep their native editable behavior. */ }
 
-const ACTION_HANDLERS = Object.freeze({
-  showMods: () => switchView("mods"),
-  showImport: () => switchView("import"),
-  showNexus: () => switchView("nexus"),
-  showSettings: () => switchView("settings"),
+export const ACTION_HANDLERS = Object.freeze({
+  showMods: async () => switchView("mods"),
+  showImport: async () => switchView("import"),
+  showNexus: async () => switchView("nexus"),
+  showSettings: async () => switchView("settings"),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
   refreshMods: async () => loadMods(),
   openModsFolder: async () => request("/api/mods/open-folder"),
@@ -210,10 +275,11 @@ const ACTION_HANDLERS = Object.freeze({
   positionBottomRight: choosePosition,
   changePetals: (event) => applyAppearance({ petals: event.currentTarget.value }),
   saveAppearance: async () => { const { theme, mask, blur, position, petals } = state.appearance; const saved = await request("/api/appearance", { method: "POST", body: { theme, mask, blur, position, petals } }); applyAppearance(saved); toast("外观已保存", "success"); },
-  cancelConflict: () => { state.pendingUploadToken = null; $("#conflictModal").close(); },
-  confirmConflict: async () => { $("#conflictModal").close(); await importSelected("replace"); },
-  cancelDelete: () => { state.pendingDeleteId = null; $("#deleteModal").close(); },
-  approveDelete: async () => { const id = state.pendingDeleteId; $("#deleteModal").close(); await request(`/api/mods/${encodeURIComponent(id)}`, { method: "DELETE" }); state.pendingDeleteId = null; await loadMods(); toast("模组已删除", "success"); },
+  cancelConflict: async () => cancelImportConflict(),
+  replaceConflict: async () => { $("#conflictModal").close(); await importSelected("replace"); },
+  keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },
+  cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteModal").close(); },
+  approveDelete: async () => deletePendingMod(),
 });
 
 async function dispatchStatic(event) {
@@ -235,11 +301,11 @@ async function handleDynamicAction(event) {
     switch (target.dataset.dynamicAction) {
       case "toggleMod": await run(target, async () => { await request(`/api/mods/${encodeURIComponent(id)}/toggle`, { method: "POST", body: { enabled: target.dataset.enabled === "true" } }); await loadMods(); }); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`)); break;
-      case "deleteMod": state.pendingDeleteId = id; $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; renderDeleteMarker($("#deleteMessage")); $("#deleteModal").showModal(); break;
-      case "confirmDelete": break;
-      case "resolveConflict": break;
-      case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; break;
-      default: break;
+      case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
+      case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
+      case "openNexus": await run(target, () => openValidatedNexus(target)); break;
+      case "copyNexusId": await run(target, () => copyNexusId(target)); break;
+      default: return;
     }
   } catch { /* run has already displayed the error */ }
 }
@@ -256,6 +322,17 @@ async function init() {
   $("#modList").addEventListener("click", handleDynamicAction);
   $("#modList").addEventListener("change", handleDynamicAction);
   $("#detectList").addEventListener("click", handleDynamicAction);
+  $("#nexusGrid").addEventListener("click", handleDynamicAction);
+  $("#conflictModal").addEventListener("cancel", async (event) => {
+    event.preventDefault();
+    try { await run(null, cancelImportConflict); } catch { /* run displayed the error */ }
+  });
+  $("#deleteModal").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    state.pendingDeleteId = null;
+    state.pendingDeleteForce = false;
+    $("#deleteModal").close();
+  });
   setupDropzone();
   try {
     const [health, appearance, game] = await Promise.all([request("/api/health"), request("/api/appearance"), request("/api/game/status")]);
