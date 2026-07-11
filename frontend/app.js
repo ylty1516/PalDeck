@@ -122,14 +122,18 @@ function selectModFile(file) {
   $("#importResult").textContent = file ? `识别结果：${/\.pak$/i.test(file.name) ? "PAK 模组" : "ZIP 压缩包（安装时自动识别）"}` : "";
 }
 
-async function executeModFileSelection(file) {
+async function executeFileOperation(operation) {
   try {
-    selectModFile(file);
+    await operation();
     return true;
   } catch (error) {
     toast(actionableErrorMessage(error), "error");
     return false;
   }
+}
+
+async function executeModFileSelection(file) {
+  return executeFileOperation(() => selectModFile(file));
 }
 
 async function importSelected(decision = "cancel") {
@@ -304,7 +308,7 @@ export const ACTION_HANDLERS = Object.freeze({
   installUe4ss: async () => { const result = await request("/api/ue4ss/install-latest", { method: "POST", body: {}, timeout: 120000 }); $("#ue4ssResult").textContent = result.message || "安装完成"; await loadUe4ssStatus(); },
   refreshUe4ss: async () => loadUe4ssStatus(),
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
-  selectUe4ssZip: async (event) => installZip(event.currentTarget.files?.[0]),
+  selectUe4ssZip: async (event) => executeFileOperation(() => installZip(event.currentTarget.files?.[0])),
   checkUpdate: async () => { state.updateInfo = await request("/api/update/check", { timeout: 30000 }); $("#updateStatus").textContent = state.updateInfo.update_available ? `发现新版本 ${state.updateInfo.remote_version}` : `已是最新版 ${state.updateInfo.local_version}`; },
   applyUpdate: async () => { const result = await request("/api/update/apply", { method: "POST", body: { url: state.updateInfo?.asset?.browser_download_url }, timeout: 120000 }); toast(result.message || "更新已准备，将自动重启", "success"); },
   themeAurora: chooseTheme,
@@ -312,7 +316,7 @@ export const ACTION_HANDLERS = Object.freeze({
   themeStarlit: chooseTheme,
   chooseBackground: () => $("#backgroundInput").click(),
   resetBackground: async () => { const saved = await request("/api/appearance/background", { method: "DELETE" }); applyAppearance(saved); refreshBackground(); toast("已恢复默认背景", "success"); },
-  selectBackground: async (event) => { const file = event.currentTarget.files?.[0]; if (!file) return; const form = new FormData(); form.append("file", file); const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 }); applyAppearance(saved); refreshBackground(); toast("背景已更新", "success"); },
+  selectBackground: async (event) => executeFileOperation(async () => { const file = event.currentTarget.files?.[0]; if (!file) return; const form = new FormData(); form.append("file", file); const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 }); applyAppearance(saved); refreshBackground(); toast("背景已更新", "success"); }),
   changeMask: (event) => applyAppearance({ mask: Number(event.currentTarget.value) / 100 }),
   changeBlur: (event) => applyAppearance({ blur: Number(event.currentTarget.value) }),
   positionTopLeft: choosePosition,
@@ -346,7 +350,7 @@ async function dispatchStatic(event) {
   }
   if (target.tagName === "INPUT" || target.tagName === "SELECT") {
     try { await ACTION_HANDLERS[target.dataset.action](actionEvent); }
-    catch (error) { toast(error.message || "操作失败", "error"); }
+    catch (error) { toast(actionableErrorMessage(error), "error"); }
     return;
   }
   try { await run(target, () => ACTION_HANDLERS[target.dataset.action](actionEvent), { global: target.dataset.action === "importMod" || target.dataset.action === "installUe4ss" || target.dataset.action === "applyUpdate", busyText: "请稍候，正在处理…" }); }
@@ -433,7 +437,7 @@ async function init() {
     applyAppearance(appearance); refreshBackground();
     if (game.configured) showPathInfo(game);
     await loadMods();
-  } catch (error) { $("#healthStatus").textContent = "服务连接失败"; toast(error.message, "error"); }
+  } catch (error) { $("#healthStatus").textContent = "服务连接失败"; toast(actionableErrorMessage(error), "error"); }
 }
 
 init();

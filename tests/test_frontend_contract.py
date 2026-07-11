@@ -293,6 +293,23 @@ def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
     assert "innerHTML" not in app
 
 
+def test_all_async_file_branches_use_shared_actionable_error_mapping():
+    app = APP.read_text(encoding="utf-8")
+    assert "toast(error.message" not in app
+    executor = re.search(r"async function executeFileOperation\(operation\) \{(.*?)^\}", app, re.S | re.M)
+    assert executor
+    assert "actionableErrorMessage(error)" in executor.group(1)
+    handlers = re.search(r"export const ACTION_HANDLERS.*?Object\.freeze\(\{(.*?)^\}\);", app, re.S | re.M)
+    assert handlers
+    for action in ("selectModFile", "selectUe4ssZip", "selectBackground"):
+        entry = re.search(rf"^  {action}: (.*),$", handlers.group(1), re.M)
+        assert entry, action
+        assert "executeFileOperation" in entry.group(1) or "executeModFileSelection" in entry.group(1)
+    dropzone = re.search(r"function setupDropzone\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert dropzone
+    assert "executeModFileSelection" in dropzone.group(1)
+
+
 def test_interaction_policy_executable_contract():
     script = """
       import { actionableErrorMessage, dynamicActionKey } from './frontend/interaction-policy.js';
