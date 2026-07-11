@@ -149,6 +149,29 @@ def test_adult_content_is_preserved(tmp_path):
     assert result["items"][0]["adultContent"] is True
 
 
+def test_http_error_never_exposes_response_body(monkeypatch):
+    secret = b'{"error":"secret upstream body","token":"do-not-leak"}'
+
+    class Body:
+        def read(self):
+            return secret
+
+        def close(self):
+            pass
+
+    def fail(*_args, **_kwargs):
+        import urllib.error
+        raise urllib.error.HTTPError(
+            nexus_api.GRAPHQL_URL, 429, "Too Many Requests", {}, Body(),
+        )
+
+    monkeypatch.setattr(nexus_api.urllib.request, "urlopen", fail)
+    with pytest.raises(NexusError) as captured:
+        nexus_api._default_transport("query Safe { viewer { id } }", {})
+    assert str(captured.value) == "Nexus 请求失败（HTTP 429）"
+    assert "secret" not in str(captured.value) and "token" not in str(captured.value)
+
+
 def test_invalid_json_and_schema_errors_are_readable(tmp_path):
     with pytest.raises(NexusError, match="JSON"):
         NexusCatalog(tmp_path / "a", transport=Transport(["not-json"])).popular()

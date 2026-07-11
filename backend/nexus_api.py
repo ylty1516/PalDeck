@@ -94,8 +94,7 @@ def _default_transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise NexusError(f"Nexus HTTP {exc.code}: {detail or exc.reason}") from exc
+        raise NexusError(f"Nexus 请求失败（HTTP {exc.code}）") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         reason = getattr(exc, "reason", exc)
         raise NexusError(f"无法连接 Nexus: {reason}") from exc

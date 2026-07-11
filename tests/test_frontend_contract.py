@@ -209,6 +209,11 @@ def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_adult_reveal
     assert "force=1" in app
     assert "adultContent" in render and '"revealAdult"' in render
     assert 'case "revealAdult":' in app
+    assert 'setAttribute("aria-expanded", "false")' in render
+    assert 'setAttribute("aria-expanded", "true")' in render
+    assert 'revealAdultCard(' in app
+    assert 'adult ? "成人内容"' in render
+    assert 'adult ? "敏感信息已隐藏"' in render
     assert 'addEventListener("error"' in render
     assert "/^https:\\/\\//i" in render
     assert "下载" in render and "推荐" in render and "版本" in render and "作者" in render
@@ -220,14 +225,17 @@ def test_nexus_url_validator_executable_contract():
     script = """
       import { validatedNexusUrl } from './frontend/render.js';
       const valid = [
-        'https://www.nexusmods.com/palworld/mods/123',
-        'https://nexusmods.com/palworld/mods/9/'
+        'https://www.nexusmods.com/palworld/mods/123'
       ];
       const invalid = [
         'http://www.nexusmods.com/palworld/mods/123',
+        'https://nexusmods.com/palworld/mods/9',
+        'https://cdn.nexusmods.com/palworld/mods/123',
         'https://evil.example/palworld/mods/123',
-        'https://nexusmods.com/skyrim/mods/123',
-        'https://nexusmods.com/palworld/mods/not-a-number',
+        'https://www.nexusmods.com/skyrim/mods/123',
+        'https://www.nexusmods.com/palworld/mods/not-a-number',
+        'https://www.nexusmods.com/palworld/mods/123/',
+        'https://www.nexusmods.com/palworld/mods/123?tracking=1',
         'https://nexusmods.com.evil.example/palworld/mods/123'
       ];
       if (!valid.every(value => validatedNexusUrl(value))) process.exit(1);
