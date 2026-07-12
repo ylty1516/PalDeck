@@ -222,6 +222,8 @@ class SteamWorkshopService:
             UnicodeError,
             json.JSONDecodeError,
             ValueError,
+            RecursionError,
+            MemoryError,
         ):
             return invalid("invalid_info: Workshop metadata is invalid")
 

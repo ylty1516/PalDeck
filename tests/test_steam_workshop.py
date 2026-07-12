@@ -323,6 +323,21 @@ def test_oversized_info_is_invalid_with_sanitized_error(tmp_path):
     assert str(info) not in mod.error
 
 
+def test_overly_deep_info_json_is_invalid_without_crashing_scan(tmp_path):
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9009"])
+    info = write_item(steam, "9009") / "Info.json"
+    payload = "[" * 5000 + "0" + "]" * 5000
+    assert len(payload.encode("utf-8")) < 1024 * 1024
+    info.write_text(payload, encoding="utf-8")
+
+    mod = SteamWorkshopService(steam).scan(force=True)[0]
+
+    assert mod.valid is False
+    assert mod.error == "invalid_info: Workshop metadata is invalid"
+
+
 def test_manifest_with_more_than_4096_items_fails_closed(tmp_path):
     steam = tmp_path / "Steam"
     write_library_config(steam, [])
