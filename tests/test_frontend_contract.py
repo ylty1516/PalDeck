@@ -283,6 +283,9 @@ def test_three_petal_styles_share_engine_lifecycle_and_old_ellipse_is_gone():
     assert "watercolorSpriteKind" in effects
     assert 'spriteIndex === 0 ? "bloom" : "petal"' in effects
     assert "Math.abs(index) % sprites.length" not in effects
+    assert "createPetalUpdateCache" in effects
+    assert "minimalSafeX" not in effects
+    assert "lane" in engine
     assert "querySelector" not in engine
     assert "effects.update({ level:" in app
     assert "petal_style" in app
@@ -296,13 +299,16 @@ def test_three_petal_styles_share_engine_lifecycle_and_old_ellipse_is_gone():
 def test_petal_style_preview_persists_only_on_save_and_recovers_after_failure():
     app = APP.read_text(encoding="utf-8")
     assert "function choosePetalStyle" in app
-    assert "applyAppearance({ petal_style:" in app
+    assert "previewAppearance({ petal_style:" in app
     save = re.search(r"saveAppearance: async \(\) => \{(.*?)\},$", app, re.S | re.M)
     assert save
     assert "petal_style" in save.group(1)
     assert 'request("/api/appearance", { method: "POST"' in save.group(1)
     assert 'request("/api/appearance")' in save.group(1)
     assert "applyAppearance(recovered)" in save.group(1)
+    assert "appearanceRevisions.capture()" in save.group(1)
+    assert "appearanceRevisions.apply" in save.group(1)
+    assert "previewAppearance" in app
 
 
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():

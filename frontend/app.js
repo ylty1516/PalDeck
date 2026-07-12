@@ -1,7 +1,7 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
 import {
-  actionableErrorMessage, dynamicActionKey, nextModsGeneration,
+  actionableErrorMessage, createRevisionGuard, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl } from "./render.js";
@@ -16,6 +16,7 @@ const state = {
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", petal_style: "natural", background: "default" },
 };
 const effects = createEffects();
+const appearanceRevisions = createRevisionGuard();
 const inFlightDynamicActions = new Set();
 let workshopWriteQueue = Promise.resolve();
 const VIEW_COPY = Object.freeze({
@@ -98,6 +99,11 @@ function applyAppearance(settings) {
     button.setAttribute("aria-pressed", String(selected));
   });
   effects.update({ level: state.appearance.petals, style: state.appearance.petal_style });
+}
+
+function previewAppearance(settings) {
+  appearanceRevisions.bump();
+  applyAppearance(settings);
 }
 
 function refreshBackground() {
@@ -440,9 +446,9 @@ async function checkUe4ssUpstream() {
     : "GitHub 版本与内置版本相同";
 }
 
-function chooseTheme(event) { applyAppearance({ theme: event.currentTarget.dataset.themeValue }); }
-function choosePosition(event) { applyAppearance({ position: event.currentTarget.dataset.position }); }
-function choosePetalStyle(event) { applyAppearance({ petal_style: event.currentTarget.dataset.petalStyle }); }
+function chooseTheme(event) { previewAppearance({ theme: event.currentTarget.dataset.themeValue }); }
+function choosePosition(event) { previewAppearance({ position: event.currentTarget.dataset.position }); }
+function choosePetalStyle(event) { previewAppearance({ petal_style: event.currentTarget.dataset.petalStyle }); }
 function noop() { /* Text and select controls keep their native editable behavior. */ }
 
 export const ACTION_HANDLERS = Object.freeze({
@@ -483,8 +489,8 @@ export const ACTION_HANDLERS = Object.freeze({
   chooseBackground: () => $("#backgroundInput").click(),
   resetBackground: async () => { const saved = await request("/api/appearance/background", { method: "DELETE" }); applyAppearance(saved); refreshBackground(); toast("已恢复默认背景", "success"); },
   selectBackground: async (event) => executeFileOperation(async () => { const file = event.currentTarget.files?.[0]; if (!file) return; const form = new FormData(); form.append("file", file); const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 }); applyAppearance(saved); refreshBackground(); toast("背景已更新", "success"); }),
-  changeMask: (event) => applyAppearance({ mask: Number(event.currentTarget.value) / 100 }),
-  changeBlur: (event) => applyAppearance({ blur: Number(event.currentTarget.value) }),
+  changeMask: (event) => previewAppearance({ mask: Number(event.currentTarget.value) / 100 }),
+  changeBlur: (event) => previewAppearance({ blur: Number(event.currentTarget.value) }),
   positionTopLeft: choosePosition,
   positionTopCenter: choosePosition,
   positionTopRight: choosePosition,
@@ -494,23 +500,22 @@ export const ACTION_HANDLERS = Object.freeze({
   positionBottomLeft: choosePosition,
   positionBottomCenter: choosePosition,
   positionBottomRight: choosePosition,
-  changePetals: (event) => applyAppearance({ petals: event.currentTarget.value }),
+  changePetals: (event) => previewAppearance({ petals: event.currentTarget.value }),
   petalStyleNatural: choosePetalStyle,
   petalStyleWatercolor: choosePetalStyle,
   petalStyleMinimal: choosePetalStyle,
   saveAppearance: async () => {
+    const revision = appearanceRevisions.capture();
     const { theme, mask, blur, position, petals, petal_style } = state.appearance;
     try {
       const saved = await request("/api/appearance", { method: "POST", body: { theme, mask, blur, position, petals, petal_style } });
-      applyAppearance(saved);
-      toast("外观已保存", "success");
+      if (appearanceRevisions.apply(revision, () => applyAppearance(saved))) toast("外观已保存", "success");
     } catch (error) {
-      try {
+      if (appearanceRevisions.capture() === revision) {
         const recovered = await request("/api/appearance");
-        applyAppearance(recovered);
-      } finally {
-        throw error;
+        appearanceRevisions.apply(revision, () => applyAppearance(recovered));
       }
+      throw error;
     }
   },
   cancelConflict: async () => cancelImportConflict(),

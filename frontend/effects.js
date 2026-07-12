@@ -3,6 +3,24 @@ import { createParticles, desiredCount, stepParticles } from "./petal-engine.js"
 const PETAL_STYLES = new Set(["natural", "watercolor", "minimal"]);
 const PETAL_LEVELS = new Set(["off", "low", "medium", "high"]);
 
+export function createPetalUpdateCache(onChange, initial = { level: "off", style: "natural" }) {
+  if (typeof onChange !== "function") throw new TypeError("onChange must be a function");
+  let current = { level: initial.level, style: initial.style };
+  return Object.freeze({
+    update(settings = {}) {
+      const next = {
+        level: PETAL_LEVELS.has(settings.level) ? settings.level : "off",
+        style: PETAL_STYLES.has(settings.style) ? settings.style : "natural",
+      };
+      if (next.level === current.level && next.style === current.style) return false;
+      current = next;
+      onChange(Object.freeze({ ...next }));
+      return true;
+    },
+    current() { return Object.freeze({ ...current }); },
+  });
+}
+
 export function installRipple(root = document) {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   function add(target, clientX, clientY) {
@@ -77,18 +95,40 @@ const NATURAL_PALETTES = Object.freeze(
   Array.from({ length: 12 }, (_, index) => createNaturalPalette(index / 11)),
 );
 
+function naturalPaletteIndex(particle) {
+  return Math.min(NATURAL_PALETTES.length - 1, Math.floor(stableParticleSeed(particle) * NATURAL_PALETTES.length));
+}
+
 export function naturalPalette(particle) {
-  const index = Math.min(NATURAL_PALETTES.length - 1, Math.floor(stableParticleSeed(particle) * NATURAL_PALETTES.length));
-  return NATURAL_PALETTES[index];
+  return NATURAL_PALETTES[naturalPaletteIndex(particle)];
+}
+
+const NATURAL_GRADIENT_CACHE = new WeakMap();
+
+function naturalGradient(context, particle) {
+  let gradients = NATURAL_GRADIENT_CACHE.get(context);
+  if (!gradients) {
+    gradients = new Map();
+    NATURAL_GRADIENT_CACHE.set(context, gradients);
+  }
+  const depth = Number.isInteger(particle.depth) ? particle.depth : 1;
+  const paletteIndex = naturalPaletteIndex(particle);
+  const key = `${paletteIndex}:${depth}`;
+  if (gradients.has(key)) return gradients.get(key);
+  const extent = [7, 11, 15][depth] ?? 11;
+  const palette = NATURAL_PALETTES[paletteIndex];
+  const gradient = context.createLinearGradient(-extent, -extent, extent, extent);
+  gradient.addColorStop(0, palette.highlight);
+  gradient.addColorStop(0.58, palette.middle);
+  gradient.addColorStop(1, palette.edge);
+  gradients.set(key, gradient);
+  return gradient;
 }
 
 export function renderNaturalPetal(context, particle) {
   beginPetal(context, particle);
   const palette = naturalPalette(particle);
-  const gradient = context.createLinearGradient(-particle.size, -particle.size, particle.size, particle.size);
-  gradient.addColorStop(0, palette.highlight);
-  gradient.addColorStop(0.58, palette.middle);
-  gradient.addColorStop(1, palette.edge);
+  const gradient = naturalGradient(context, particle);
   context.fillStyle = gradient;
   context.shadowColor = "rgba(112, 45, 77, .24)";
   context.shadowBlur = 2 + particle.blur * 2;
@@ -182,16 +222,6 @@ export function renderWatercolorPetal(context, particle, sprites) {
   context.restore();
 }
 
-export function minimalSafeX(x, width) {
-  if (!Number.isFinite(width) || width <= 0) throw new RangeError("width must be finite and positive");
-  const wrapped = ((Number.isFinite(x) ? x : 0) % width + width) % width;
-  const half = width / 2;
-  const edge = width * 0.2;
-  return wrapped < half
-    ? wrapped / half * edge
-    : width - edge + (wrapped - half) / half * edge;
-}
-
 export function renderMinimalPetal(context, particle) {
   beginPetal(context, particle);
   context.fillStyle = `rgba(190, 178, 184, ${Math.min(0.62, particle.opacity)})`;
@@ -251,7 +281,7 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
     particles.forEach((particle) => {
       if (style === "natural") renderNaturalPetal(context, particle);
       else if (style === "watercolor") renderWatercolorPetal(context, particle, watercolorSprites);
-      else renderMinimalPetal(context, { ...particle, x: minimalSafeX(particle.x, width) });
+      else renderMinimalPetal(context, particle);
     });
   }
 
@@ -278,13 +308,16 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
     frame = 0;
   }
 
-  function update(settings = {}) {
-    const nextLevel = typeof settings === "string" ? settings : settings.level;
-    const nextStyle = typeof settings === "object" ? settings.style : style;
-    level = PETAL_LEVELS.has(nextLevel) ? nextLevel : "off";
-    style = PETAL_STYLES.has(nextStyle) ? nextStyle : "natural";
+  const updateCache = createPetalUpdateCache((next) => {
+    level = next.level;
+    style = next.style;
     syncParticles(true);
     start();
+  });
+
+  function update(settings = {}) {
+    const normalized = typeof settings === "string" ? { level: settings, style } : settings;
+    return updateCache.update(normalized);
   }
 
   function visibilitychange() {

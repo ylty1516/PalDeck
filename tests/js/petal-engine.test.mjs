@@ -8,14 +8,15 @@ import {
   stepParticles,
 } from "../../frontend/petal-engine.js";
 import {
+  createPetalUpdateCache,
   createWatercolorSpriteSet,
-  minimalSafeX,
   naturalPalette,
   renderMinimalPetal,
   renderNaturalPetal,
   renderWatercolorPetal,
   watercolorSpriteKind,
 } from "../../frontend/effects.js";
+import { createRevisionGuard } from "../../frontend/interaction-policy.js";
 
 const viewport = { width: 1200, height: 800 };
 
@@ -120,7 +121,7 @@ test("every non-finite particle field triggers safe deterministic respawn", () =
   const numericFields = [
     "x", "y", "depth", "size", "opacity", "blur", "vx", "vy", "drift",
     "driftPhase", "driftRate", "rotation", "rotationSpeed", "flipPhase",
-    "flipSpeed", "flip", "gustFactor", "age", "lifetime",
+    "flipSpeed", "flip", "gustFactor", "age", "lifetime", "lane",
   ];
 
   for (const [index, field] of numericFields.entries()) {
@@ -164,14 +165,56 @@ test("particle outside viewport recycles before its lifetime expires", () => {
   assertFiniteParticle(recycled);
 });
 
-test("minimal projection keeps generation and drift in fixed edge bands", () => {
+test("minimal particles choose and retain a safety lane without center projection", () => {
+  const particles = createParticles({
+    style: "minimal", level: "high", ...viewport, random: sequenceRandom(),
+  });
   const edge = viewport.width * 0.2;
-  for (const x of [-50, 0, 120, 300, 599, 600, 880, 1199, 1350]) {
-    const projected = minimalSafeX(x, viewport.width);
-    assert.ok(projected >= 0 && projected <= viewport.width);
-    assert.ok(projected <= edge || projected >= viewport.width - edge);
-  }
-  assert.throws(() => minimalSafeX(20, 0), /width/i);
+  assert.ok(particles.every(({ lane, x }) =>
+    (lane === -1 && x >= 0 && x <= edge) || (lane === 1 && x >= viewport.width - edge && x <= viewport.width),
+  ));
+
+  const left = { ...particles.find(({ lane }) => lane === -1), x: edge - 0.01, vx: 1000 };
+  const [next] = stepParticles([left], {
+    style: "minimal", delta: 0.04, windTime: 20, ...viewport, random: () => 0.5,
+  });
+  assert.equal(next.lane, -1);
+  assert.ok(next.x >= left.x && next.x <= edge);
+  assert.ok(Math.abs(next.x - left.x) < 1, "crossing the lane edge must clamp, not jump across the center");
+});
+
+test("petal update cache only rebuilds particles when level or style changes", () => {
+  let particles = Object.freeze([{ identity: "original" }]);
+  let calls = 0;
+  const cache = createPetalUpdateCache(({ level, style }) => {
+    calls += 1;
+    particles = Object.freeze([{ identity: `${level}:${style}` }]);
+  });
+  const original = particles;
+  assert.equal(cache.update({ level: "off", style: "natural" }), false);
+  assert.equal(calls, 0);
+  assert.equal(particles, original);
+  assert.equal(cache.update({ level: "medium", style: "natural" }), true);
+  const medium = particles;
+  assert.equal(cache.update({ level: "medium", style: "natural", mask: 0.7, blur: 8, position: "top" }), false);
+  assert.equal(calls, 1);
+  assert.equal(particles, medium);
+  assert.equal(cache.update({ level: "medium", style: "watercolor" }), true);
+  assert.equal(calls, 2);
+});
+
+test("revision guard rejects late save responses after a newer preview", async () => {
+  const revisions = createRevisionGuard();
+  const saveRevision = revisions.capture();
+  const lateResponse = Promise.resolve("server-old-style");
+  revisions.bump();
+  let applied = "new-preview";
+  const response = await lateResponse;
+  assert.equal(revisions.apply(saveRevision, () => { applied = response; }), false);
+  assert.equal(applied, "new-preview");
+  const currentRevision = revisions.capture();
+  assert.equal(revisions.apply(currentRevision, () => { applied = "server-current"; }), true);
+  assert.equal(applied, "server-current");
 });
 
 function recordingContext() {
@@ -207,6 +250,8 @@ test("natural renderer uses asymmetric bezier geometry, gradient, vein and depth
   assert.ok(names.includes("stroke"));
   assert.ok(context.calls.some((call) => call[0] === "set" && call[1] === "shadowBlur"));
   assert.ok(context.calls.some((call) => call[0] === "scale" && call[2] === renderedParticle.flip));
+  renderNaturalPetal(context, { ...renderedParticle, rotation: 1.2, flip: 0.4 });
+  assert.equal(context.calls.filter(([name]) => name === "createLinearGradient").length, 1);
 
   const rotated = recordingContext();
   renderNaturalPetal(rotated, { ...renderedParticle, rotation: 1.4 });

@@ -23,3 +23,16 @@ export function resetModFileSelectionState(state) {
 export function nextModsGeneration(current) {
   return Number(current) + 1;
 }
+
+export function createRevisionGuard(initial = 0) {
+  let revision = Number.isSafeInteger(initial) && initial >= 0 ? initial : 0;
+  return Object.freeze({
+    capture() { return revision; },
+    bump() { revision += 1; return revision; },
+    apply(expected, operation) {
+      if (expected !== revision) return false;
+      operation();
+      return true;
+    },
+  });
+}

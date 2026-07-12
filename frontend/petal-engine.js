@@ -45,21 +45,29 @@ function sample(random) {
 const PARTICLE_NUMERIC_FIELDS = Object.freeze([
   "x", "y", "depth", "size", "opacity", "blur", "vx", "vy", "drift",
   "driftPhase", "driftRate", "rotation", "rotationSpeed", "flipPhase",
-  "flipSpeed", "flip", "gustFactor", "age", "lifetime",
+  "flipSpeed", "flip", "gustFactor", "age", "lifetime", "lane",
 ]);
 
 function isParticleFinite(particle) {
   return particle !== null && typeof particle === "object" &&
     PARTICLE_NUMERIC_FIELDS.every((field) => Number.isFinite(particle[field])) &&
     Number.isInteger(particle.depth) && particle.depth >= 0 && particle.depth < DEPTH_LAYERS.length &&
+    Number.isInteger(particle.lane) && particle.lane >= -1 && particle.lane <= 1 &&
     Object.values(particle).every((value) => typeof value !== "number" || Number.isFinite(value));
 }
 
-function makeParticle({ profile, depth, width, height, random, entering = false }) {
+function makeParticle({ style, profile, depth, width, height, random, entering = false }) {
   const layer = DEPTH_LAYERS[depth];
   const size = profile.size * layer.size * (0.8 + sample(random) * 0.4);
+  const lane = style === "minimal" ? (sample(random) < 0.5 ? -1 : 1) : 0;
+  const edgeWidth = width * 0.2;
+  const x = lane === -1
+    ? sample(random) * edgeWidth
+    : lane === 1
+      ? width - sample(random) * edgeWidth
+      : sample(random) * width;
   return {
-    x: sample(random) * width,
+    x,
     y: entering ? -size * (1 + sample(random) * 3) : sample(random) * height,
     depth,
     size,
@@ -81,6 +89,7 @@ function makeParticle({ profile, depth, width, height, random, entering = false 
     gustFactor: sample(random),
     age: 0,
     lifetime: 9 + sample(random) * 13,
+    lane,
   };
 }
 
@@ -91,6 +100,7 @@ export function createParticles({ style = "natural", level = "medium", width, he
   if (typeof random !== "function") throw new TypeError("random must be a function");
   const count = desiredCount(style, level);
   return Array.from({ length: count }, (_, index) => makeParticle({
+    style,
     profile,
     depth: index % DEPTH_LAYERS.length,
     width: viewportWidth,
@@ -118,6 +128,7 @@ export function stepParticles(particles, {
 
   return particles.map((particle, index) => {
     const respawn = () => makeParticle({
+      style,
       profile,
       depth: Number.isInteger(particle?.depth) && particle.depth >= 0 && particle.depth < DEPTH_LAYERS.length
         ? particle.depth : index % DEPTH_LAYERS.length,
@@ -126,7 +137,7 @@ export function stepParticles(particles, {
       random,
       entering: true,
     });
-    if (!isParticleFinite(particle)) return respawn();
+    if (!isParticleFinite(particle) || (style === "minimal" && Math.abs(particle.lane) !== 1)) return respawn();
 
     const margin = Math.max(40, particle.size * 4);
     if (
@@ -138,9 +149,16 @@ export function stepParticles(particles, {
     const gustWave = Math.max(0, Math.sin(time * 1.7 + particle.gustFactor * Math.PI * 2));
     const gust = particle.gustFactor < 0.35 ? gustWave * profile.gust * profile.wind : 0;
     const flipPhase = particle.flipPhase + particle.flipSpeed * dt;
+    let x = particle.x + (particle.vx + lowFrequencyWind + gust + Math.sin(driftPhase) * particle.drift) * dt;
+    if (style === "minimal") {
+      const edgeWidth = viewportWidth * 0.2;
+      x = particle.lane === -1
+        ? Math.min(edgeWidth, Math.max(0, x))
+        : Math.min(viewportWidth, Math.max(viewportWidth - edgeWidth, x));
+    }
     const next = {
       ...particle,
-      x: particle.x + (particle.vx + lowFrequencyWind + gust + Math.sin(driftPhase) * particle.drift) * dt,
+      x,
       y: particle.y + particle.vy * dt,
       driftPhase,
       rotation: particle.rotation + particle.rotationSpeed * dt,
