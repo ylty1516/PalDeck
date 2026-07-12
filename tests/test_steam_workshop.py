@@ -612,6 +612,32 @@ def test_list_mods_treats_missing_settings_as_disabled(tmp_path):
     assert service.list_mods(force=True)[0]["enabled"] is False
 
 
+def test_atomic_create_failure_does_not_delete_file_replaced_after_link(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    target = tmp_path / "PalModSettings.ini"
+    replacement = tmp_path / "replacement.ini"
+    replacement.write_bytes(b"replacement")
+    real_unlink = Path.unlink
+    swapped = False
+
+    def swap_then_fail(path, *args, **kwargs):
+        nonlocal swapped
+        candidate = Path(path)
+        if not swapped and candidate.name.startswith(".PalModSettings.ini.") and candidate.suffix == ".tmp":
+            swapped = True
+            os.replace(replacement, target)
+            raise OSError("unlink failed after replacement")
+        return real_unlink(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", swap_then_fail)
+
+    with pytest.raises(UnsafeSteamFileError, match="settings file changed"):
+        steam_workshop._atomic_create(target, b"created")
+
+    assert target.read_bytes() == b"replacement"
+
+
 def test_first_enable_atomically_creates_missing_settings_and_disable_missing_is_idempotent(tmp_path):
     service, settings = workshop_service(
         tmp_path,

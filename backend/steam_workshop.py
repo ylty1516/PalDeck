@@ -290,7 +290,7 @@ class SteamWorkshopService:
                     remove_package=target.package_name,
                 )
 
-            backup = None
+            backup: tuple[Path, tuple[int, int]] | None = None
             created_identity = None
             if updated != original:
                 if settings_existed:
@@ -318,14 +318,13 @@ class SteamWorkshopService:
                     raise RuntimeError("PalModSettings.ini 全局开关写入确认失败")
             except BaseException:
                 if backup is not None:
-                    _restore_backup(document.path, backup)
+                    _restore_backup(document.path, backup[0], backup[1])
                 elif created_identity is not None:
-                    _safe_file_identity(document.path, created_identity)
-                    document.path.unlink()
+                    _unlink_if_identity(document.path, created_identity)
                 raise
             else:
                 if backup is not None:
-                    backup.unlink()
+                    _unlink_if_identity(backup[0], backup[1])
 
             result = target.to_dict()
             result.update({"enabled": authoritative_enabled, "needs_restart": True})
@@ -737,17 +736,34 @@ def _safe_file_identity(
     return identity
 
 
+def _unlink_if_identity(path: Path, expected: tuple[int, int] | None) -> bool:
+    """Best-effort cleanup that never removes a replaced or reparse file."""
+    if expected is None:
+        return False
+    try:
+        if any(_is_reparse(candidate) for candidate in (path, *path.parents)):
+            return False
+        metadata = path.lstat()
+        identity = (metadata.st_dev, metadata.st_ino)
+        if not stat.S_ISREG(metadata.st_mode) or identity != expected:
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def _write_exclusive(path: Path, content: bytes) -> tuple[int, int]:
     descriptor: int | None = None
-    created = False
+    created_identity: tuple[int, int] | None = None
     try:
         if any(_is_reparse(candidate) for candidate in path.parents):
             raise UnsafeSteamFileError("unsafe settings directory")
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags, 0o600)
-        created = True
         opened = os.fstat(descriptor)
+        created_identity = (opened.st_dev, opened.st_ino)
         offset = 0
         while offset < len(content):
             written = os.write(descriptor, content[offset:])
@@ -755,15 +771,14 @@ def _write_exclusive(path: Path, content: bytes) -> tuple[int, int]:
                 raise OSError("failed to write PalModSettings.ini transaction file")
             offset += written
         os.fsync(descriptor)
-        identity = _safe_file_identity(path, (opened.st_dev, opened.st_ino))
+        identity = _safe_file_identity(path, created_identity)
         os.close(descriptor)
         descriptor = None
         return identity
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
-        if created:
-            path.unlink(missing_ok=True)
+        _unlink_if_identity(path, created_identity)
         raise
 
 
@@ -793,14 +808,15 @@ def _atomic_create(path: Path, content: bytes) -> tuple[int, int]:
         os.link(temporary, path)
         linked = True
         published = _safe_file_identity(path, identity)
-        temporary.unlink()
+        _unlink_if_identity(temporary, identity)
         temporary_created = False
+        _safe_file_identity(path, published)
         return published
     except BaseException:
         if linked:
-            path.unlink(missing_ok=True)
+            _unlink_if_identity(path, identity)
         if temporary_created:
-            temporary.unlink(missing_ok=True)
+            _unlink_if_identity(temporary, identity)
         raise
 
 
@@ -809,11 +825,13 @@ def _atomic_write(
     content: bytes,
     original: bytes,
     original_identity: tuple[int, int],
-) -> Path:
+) -> tuple[Path, tuple[int, int]]:
     backup = path.with_name(f".{path.name}.{uuid.uuid4().hex}.backup")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     backup_created = False
     temporary_created = False
+    backup_identity: tuple[int, int] | None = None
+    temporary_identity: tuple[int, int] | None = None
     try:
         backup_identity = _write_exclusive(backup, original)
         backup_created = True
@@ -826,20 +844,22 @@ def _atomic_write(
             destination_identity=original_identity,
         )
         temporary_created = False
-        return backup
+        return backup, backup_identity
     except BaseException:
         if temporary_created:
-            temporary.unlink(missing_ok=True)
+            _unlink_if_identity(temporary, temporary_identity)
         if backup_created:
-            backup.unlink(missing_ok=True)
+            _unlink_if_identity(backup, backup_identity)
         raise
 
 
-def _restore_backup(path: Path, backup: Path) -> None:
+def _restore_backup(
+    path: Path, backup: Path, backup_identity: tuple[int, int]
+) -> None:
     _safe_replace(
         backup,
         path,
-        source_identity=_safe_file_identity(backup),
+        source_identity=_safe_file_identity(backup, backup_identity),
         destination_identity=_safe_file_identity(path),
     )
 
