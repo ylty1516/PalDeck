@@ -37,7 +37,12 @@ def test_vendored_asset_matches_manifest_and_required_contents():
     assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == manifest["sha256"]
     with zipfile.ZipFile(archive_path) as archive:
         assert EXPECTED_FILES <= set(archive.namelist())
-        assert (VENDOR_DIR / "LICENSE").read_bytes() == archive.read("ue4ss/LICENSE")
+        archived_license = archive.read("ue4ss/LICENSE")
+        assert len(archived_license) == 1085
+        assert b"\r\n" in archived_license
+        assert (VENDOR_DIR / "LICENSE").read_bytes() == archived_license
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "third_party/ue4ss-palworld/LICENSE -text -diff" in attributes.splitlines()
 
 
 def test_notice_credits_sources_and_contains_fixed_links():
@@ -67,18 +72,24 @@ class ChunkedResponse:
         return False
 
 
-def test_download_streams_and_atomically_replaces(tmp_path):
+def test_download_streams_with_timeout_and_atomically_replaces(tmp_path):
     payload = b"streamed payload"
     destination = tmp_path / "asset.zip"
     destination.write_bytes(b"old")
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append((request, timeout))
+        return ChunkedResponse(payload)
 
     vendor.download_asset(
         destination,
         expected_size=len(payload),
         expected_sha256=hashlib.sha256(payload).hexdigest(),
-        opener=lambda _: ChunkedResponse(payload),
+        opener=opener,
     )
 
+    assert calls[0][1] == 60
     assert destination.read_bytes() == payload
     assert not destination.with_suffix(".zip.tmp").exists()
 
@@ -94,8 +105,46 @@ def test_download_rejects_invalid_content_and_removes_temporary_file(
             destination,
             expected_size=expected_size,
             expected_sha256="0" * 64,
-            opener=lambda _: ChunkedResponse(payload),
+            opener=lambda _, **__: ChunkedResponse(payload),
         )
 
     assert not destination.exists()
+    assert not destination.with_suffix(".zip.tmp").exists()
+
+
+def test_download_rejects_short_response_and_preserves_existing_target(tmp_path):
+    destination = tmp_path / "asset.zip"
+    destination.write_bytes(b"existing")
+
+    with pytest.raises(ValueError, match="size mismatch"):
+        vendor.download_asset(
+            destination,
+            expected_size=10,
+            expected_sha256="0" * 64,
+            opener=lambda _, **__: ChunkedResponse(b"short"),
+        )
+
+    assert destination.read_bytes() == b"existing"
+    assert not destination.with_suffix(".zip.tmp").exists()
+
+
+def test_download_read_error_preserves_existing_target_and_removes_temp(tmp_path):
+    class FailingResponse(ChunkedResponse):
+        def read(self, size=-1):
+            if self.stream.tell() >= 3:
+                raise OSError("connection lost")
+            return super().read(size)
+
+    destination = tmp_path / "asset.zip"
+    destination.write_bytes(b"existing")
+
+    with pytest.raises(OSError, match="connection lost"):
+        vendor.download_asset(
+            destination,
+            expected_size=10,
+            expected_sha256="0" * 64,
+            opener=lambda _, **__: FailingResponse(b"partial"),
+        )
+
+    assert destination.read_bytes() == b"existing"
     assert not destination.with_suffix(".zip.tmp").exists()

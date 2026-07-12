@@ -43,7 +43,7 @@ def download_asset(
     total = 0
     try:
         request = urllib.request.Request(URL, headers={"User-Agent": "PalDeck-vendor-script"})
-        with opener(request) as response, temporary.open("wb") as output:
+        with opener(request, timeout=60) as response, temporary.open("wb") as output:
             while chunk := response.read(64 * 1024):
                 total += len(chunk)
                 if total > expected_size:
