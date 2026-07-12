@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
+
+import pytest
 
 from backend.version import APP_VERSION
 
@@ -37,6 +41,59 @@ def test_build_binds_artifact_to_clean_packaged_source_commit():
     assert 'Test-Path "Env:PALMOD_VERSION"' in script
     assert 'SOURCE_COMMIT: $sourceCommit' in script
     assert 'Source commit: $sourceCommit' in script
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected_returncode", "expected_failure"),
+    [(0, 0, False), (1, 1, True)],
+)
+def test_invoke_checked_preserves_native_stderr_and_uses_exit_code(
+    tmp_path, exit_code, expected_returncode, expected_failure
+):
+    script = read_script("build_portable.ps1")
+    function_match = re.search(
+        r"function Invoke-Checked \{.*?^\}", script, flags=re.MULTILINE | re.DOTALL
+    )
+    assert function_match is not None
+
+    fake_command = tmp_path / "fake-native.cmd"
+    fake_command.write_text(
+        f"@echo off\r\necho native-stderr-marker 1>&2\r\nexit /b {exit_code}\r\n",
+        encoding="ascii",
+    )
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + function_match.group(0)
+        + "\ntry {\n"
+        + f"  & {{ Invoke-Checked -Label 'fake native' -FilePath '{fake_command}' }} 2>&1 | Out-String | Write-Output\n"
+        + "} catch {\n"
+        + "  Write-Output $_.Exception.Message\n"
+        + "  exit 1\n"
+        + "}\n",
+        encoding="utf-8-sig",
+    )
+
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == expected_returncode, output
+    assert "native-stderr-marker" in output
+    assert ("exit 1" in output) is expected_failure
 
 
 def test_release_version_assets_and_node_tests_are_derived_and_packaged():

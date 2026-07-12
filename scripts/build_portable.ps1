@@ -62,9 +62,26 @@ function Invoke-Checked {
         [Parameter(Mandatory = $false)][string[]]$Arguments = @()
     )
     Write-Host "`n==> $Label"
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label 失败（exit $LASTEXITCODE）"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns redirected native stderr into error records.
+        # Keep stderr visible, but decide success strictly from the native exit code.
+        $ErrorActionPreference = "Continue"
+        & $FilePath @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                [Console]::Error.WriteLine($_.Exception.Message)
+            }
+            else {
+                Write-Host $_
+            }
+        }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label 失败（exit $exitCode）"
     }
 }
 
