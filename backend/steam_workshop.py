@@ -101,8 +101,10 @@ class SteamWorkshopService:
         *,
         steam_roots: list[str | Path] | None = None,
         game_running=is_palworld_running,
+        lock_root: str | Path | None = None,
     ) -> None:
         self.game_root = Path(game_root) if game_root is not None else None
+        self.lock_root = Path(lock_root) if lock_root is not None else self.game_root
         self.game_running = game_running
         if steam_roots is not None and steam_root is not None:
             raise ValueError("provide steam_root or steam_roots, not both")
@@ -182,17 +184,23 @@ class SteamWorkshopService:
         if self.game_root is None:
             raise ValueError("game_root is required for Workshop state changes")
 
-        with game_write_lock(self.game_root):
+        if self.lock_root is None:
+            raise ValueError("lock_root is required for Workshop state changes")
+        with game_write_lock(self.lock_root):
             if self.game_running():
                 raise GameRunningError("Palworld 正在运行，无法修改 Workshop 模组")
             document = _read_settings(self.settings_path)
+            original = document.bom + document.text.encode(document.encoding)
             active = _active_packages(document.text)
             affected: list[str] = []
 
             if enabled:
                 additions = _dependency_order(target, mods)
-                desired = _deduplicate(active + [mod.package_name for mod in additions])
-                global_enabled = True
+                updated = _updated_settings(
+                    document,
+                    enable_packages=[mod.package_name for mod in additions],
+                    enable_global=True,
+                )
             else:
                 affected = _enabled_dependents(target, mods, active)
                 if affected and not confirm_dependents:
@@ -202,31 +210,35 @@ class SteamWorkshopService:
                             "dependents": affected,
                         }
                     )
-                desired = [
-                    package
-                    for package in _deduplicate(active)
-                    if package.casefold() != target.package_name.casefold()
-                ]
-                global_enabled = None
+                updated = _updated_settings(
+                    document,
+                    remove_package=target.package_name,
+                )
 
-            updated = _updated_settings(document, desired, global_enabled)
-            if updated != document.bom + document.text.encode(document.encoding):
-                _atomic_write(document.path, updated)
-
-            confirmed = _read_settings(document.path)
-            confirmed_active = _active_packages(confirmed.text)
-            authoritative_enabled = any(
-                package.casefold() == target.package_name.casefold()
-                for package in confirmed_active
-            )
-            if [value.casefold() for value in _deduplicate(confirmed_active)] != [
-                value.casefold() for value in desired
-            ]:
-                raise RuntimeError("PalModSettings.ini 写入确认失败")
-            if authoritative_enabled is not enabled:
-                raise RuntimeError("PalModSettings.ini 写入确认失败")
-            if enabled and not _global_enabled(confirmed.text):
-                raise RuntimeError("PalModSettings.ini 全局开关写入确认失败")
+            backup = None
+            if updated != original:
+                backup = _atomic_write(document.path, updated, original)
+            try:
+                confirmed = _read_settings(document.path)
+                confirmed_raw = confirmed.bom + confirmed.text.encode(confirmed.encoding)
+                if confirmed_raw != updated:
+                    raise RuntimeError("PalModSettings.ini 写入确认失败")
+                confirmed_active = _active_packages(confirmed.text)
+                authoritative_enabled = any(
+                    package.casefold() == target.package_name.casefold()
+                    for package in confirmed_active
+                )
+                if authoritative_enabled is not enabled:
+                    raise RuntimeError("PalModSettings.ini 写入确认失败")
+                if enabled and not _global_enabled(confirmed.text):
+                    raise RuntimeError("PalModSettings.ini 全局开关写入确认失败")
+            except BaseException:
+                if backup is not None:
+                    _restore_backup(document.path, backup)
+                raise
+            else:
+                if backup is not None:
+                    backup.unlink()
 
             result = target.to_dict()
             result.update({"enabled": authoritative_enabled, "needs_restart": True})
@@ -417,59 +429,86 @@ def _global_enabled(text: str) -> bool:
 
 def _updated_settings(
     document: _SettingsDocument,
-    active: list[str],
-    global_enabled: bool | None,
+    *,
+    enable_packages: list[str] | None = None,
+    remove_package: str | None = None,
+    enable_global: bool = False,
 ) -> bytes:
     lines = document.text.splitlines(keepends=True)
     section = _settings_range(lines)
     if section is None:
+        if not enable_packages:
+            return document.bom + document.text.encode(document.encoding)
         if lines and not lines[-1].endswith(("\n", "\r")):
             lines[-1] += document.newline
-        start = len(lines)
-        lines.extend([f"[PalModSettings]{document.newline}"])
-        end = len(lines)
-    else:
-        start, end = section
+        lines.append(f"[PalModSettings]{document.newline}")
+        section = (len(lines) - 1, len(lines))
 
-    target_indices: list[int] = []
-    preserved_global: str | None = None
-    for index in range(start + 1, end):
-        parsed = _key_value(lines[index])
-        if parsed is None:
-            continue
-        if parsed[0] == "bglobalenablemod":
-            target_indices.append(index)
-            if preserved_global is None:
-                preserved_global = lines[index]
-        elif parsed[0] == "activemodlist":
-            target_indices.append(index)
+    start, end = section
+    before, body, after = lines[: start + 1], lines[start + 1 : end], lines[end:]
+    if remove_package is not None:
+        remove_key = remove_package.casefold()
+        body = [
+            line
+            for line in body
+            if not (
+                (parsed := _key_value(line)) is not None
+                and parsed[0] == "activemodlist"
+                and parsed[1].casefold() == remove_key
+            )
+        ]
+    elif enable_packages is not None:
+        package_by_key = {package.casefold(): package for package in enable_packages}
+        seen: set[str] = set()
+        rewritten: list[str] = []
+        has_global = False
+        for line in body:
+            parsed = _key_value(line)
+            if parsed is not None and parsed[0] == "bglobalenablemod":
+                has_global = True
+                rewritten.append(
+                    f"bGlobalEnableMod=True{document.newline}" if enable_global else line
+                )
+                continue
+            if parsed is not None and parsed[0] == "activemodlist":
+                key = parsed[1].casefold()
+                if key in package_by_key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+            rewritten.append(line)
+        if enable_global and not has_global:
+            first_active = next(
+                (
+                    index
+                    for index, line in enumerate(rewritten)
+                    if (parsed := _key_value(line)) is not None
+                    and parsed[0] == "activemodlist"
+                ),
+                0,
+            )
+            rewritten.insert(
+                first_active, f"bGlobalEnableMod=True{document.newline}"
+            )
+        missing = [
+            package
+            for package in enable_packages
+            if package.casefold() not in seen
+        ]
+        if missing:
+            active_indices = [
+                index
+                for index, line in enumerate(rewritten)
+                if (parsed := _key_value(line)) is not None
+                and parsed[0] == "activemodlist"
+            ]
+            insertion = active_indices[-1] + 1 if active_indices else len(rewritten)
+            rewritten[insertion:insertion] = [
+                f"ActiveModList={package}{document.newline}" for package in missing
+            ]
+        body = rewritten
 
-    insertion = min(target_indices, default=end)
-    target_set = set(target_indices)
-    if global_enabled is True:
-        replacement = [f"bGlobalEnableMod=True{document.newline}"]
-    elif preserved_global is not None:
-        replacement = [preserved_global]
-    else:
-        replacement = []
-    replacement.extend(
-        f"ActiveModList={package}{document.newline}" for package in _deduplicate(active)
-    )
-    rewritten = [line for index, line in enumerate(lines) if index not in target_set]
-    removed_before = sum(1 for index in target_indices if index < insertion)
-    rewritten[insertion - removed_before : insertion - removed_before] = replacement
-    return document.bom + "".join(rewritten).encode(document.encoding)
-
-
-def _deduplicate(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        key = value.casefold()
-        if key not in seen:
-            seen.add(key)
-            result.append(value)
-    return result
+    return document.bom + "".join(before + body + after).encode(document.encoding)
 
 
 def _mod_indexes(
@@ -578,27 +617,53 @@ def _enabled_dependents(
     return sorted(dependents, key=int)
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+def _write_exclusive(path: Path, content: bytes) -> None:
     descriptor: int | None = None
+    created = False
     try:
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(temporary, flags, 0o600)
+        descriptor = os.open(path, flags, 0o600)
+        created = True
         offset = 0
         while offset < len(content):
             written = os.write(descriptor, content[offset:])
             if written <= 0:
-                raise OSError("failed to write PalModSettings.ini temporary file")
+                raise OSError("failed to write PalModSettings.ini transaction file")
             offset += written
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
-        os.replace(temporary, path)
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        if created:
+            path.unlink(missing_ok=True)
         raise
+
+
+def _atomic_write(path: Path, content: bytes, original: bytes) -> Path:
+    backup = path.with_name(f".{path.name}.{uuid.uuid4().hex}.backup")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    backup_created = False
+    temporary_created = False
+    try:
+        _write_exclusive(backup, original)
+        backup_created = True
+        _write_exclusive(temporary, content)
+        temporary_created = True
+        os.replace(temporary, path)
+        temporary_created = False
+        return backup
+    except BaseException:
+        if temporary_created:
+            temporary.unlink(missing_ok=True)
+        if backup_created:
+            backup.unlink(missing_ok=True)
+        raise
+
+
+def _restore_backup(path: Path, backup: Path) -> None:
+    os.replace(backup, path)
 
 
 def _validate_info(value: Any) -> dict[str, Any]:

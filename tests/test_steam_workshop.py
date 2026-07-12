@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.mod_service import GameRunningError
+from backend.mod_service import GameRunningError, ModService
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError
 
 
@@ -479,6 +479,7 @@ def workshop_service(
     specs: dict[str, dict[str, object]],
     *,
     game_running=lambda: False,
+    lock_root: Path | None = None,
 ) -> tuple[SteamWorkshopService, Path]:
     steam = tmp_path / "Steam"
     game = tmp_path / "Game"
@@ -488,7 +489,12 @@ def workshop_service(
         write_item(steam, workshop_id, valid_info(**overrides))
     settings = game / "Palworld" / "Mods" / "PalModSettings.ini"
     settings.parent.mkdir(parents=True)
-    service = SteamWorkshopService(steam, game, game_running=game_running)
+    service = SteamWorkshopService(
+        steam,
+        game,
+        game_running=game_running,
+        lock_root=lock_root or game,
+    )
     service.scan(force=True)
     return service, settings
 
@@ -553,7 +559,12 @@ def test_enable_preserves_encoding_newlines_comments_unknown_fields_and_order(
     assert "; note" in decoded and "; middle" in decoded and "[Other]" in decoded
     assert "Keep=值" in decoded
     assert "bGlobalEnableMod=True" in decoded
-    assert active_values(settings, decode) == ["Old", "Dependency", "Feature"]
+    assert active_values(settings, decode) == [
+        "Old",
+        "Old",
+        "Dependency",
+        "Feature",
+    ]
     assert result["enabled"] is True
     assert result["needs_restart"] is True
 
@@ -586,6 +597,35 @@ def test_enable_and_disable_are_deduplicated_idempotent_and_disable_only_target(
     assert service.set_enabled("1002", False)["enabled"] is False
     assert settings.read_bytes() == after_disable
     assert result["needs_restart"] is True
+
+
+def test_disable_removes_only_target_lines_and_preserves_unrelated_duplicates_and_format(
+    tmp_path,
+):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Target", "Dependencies": []},
+            "1002": {"PackageName": "Other", "Dependencies": []},
+        },
+    )
+    settings.write_bytes(
+        b"; header\r\n[PalModSettings]\r\n"
+        b"  ActiveModList = Other  \r\n"
+        b"; between\r\nActiveModList=Target\r\n"
+        b"ActiveModList=Other\r\nActiveModList=Target\r\n"
+        b"Unknown = untouched\r\n[Else]\r\nKeep=1\r\n"
+    )
+
+    service.set_enabled("1001", False)
+
+    assert settings.read_bytes() == (
+        b"; header\r\n[PalModSettings]\r\n"
+        b"  ActiveModList = Other  \r\n"
+        b"; between\r\n"
+        b"ActiveModList=Other\r\n"
+        b"Unknown = untouched\r\n[Else]\r\nKeep=1\r\n"
+    )
 
 
 def test_enable_adds_transitive_dependencies_in_topological_order_by_name_or_id(tmp_path):
@@ -751,6 +791,113 @@ def test_atomic_write_failure_preserves_original_and_removes_temp_files(
 
     assert settings.read_bytes() == original
     assert list(settings.parent.glob(".PalModSettings.ini.*.tmp")) == []
+
+
+@pytest.mark.parametrize("confirmation", ["read_error", "content_mismatch"])
+def test_confirmation_failure_restores_exclusive_backup(
+    tmp_path, monkeypatch, confirmation
+):
+    from dataclasses import replace
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    real_read = steam_workshop._read_settings
+    calls = 0
+
+    def failed_confirmation(path):
+        nonlocal calls
+        calls += 1
+        document = real_read(path)
+        if calls == 1:
+            return document
+        if confirmation == "read_error":
+            raise OSError("confirmation read failed")
+        return replace(document, text=document.text.replace("Feature", "Wrong"))
+
+    monkeypatch.setattr(steam_workshop, "_read_settings", failed_confirmation)
+
+    with pytest.raises((OSError, RuntimeError)):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+    assert list(settings.parent.glob(".PalModSettings.ini.*.backup")) == []
+
+
+def test_fsync_failure_preserves_original_and_cleans_transaction_files(
+    tmp_path, monkeypatch
+):
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    monkeypatch.setattr(
+        steam_workshop.os,
+        "fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError("fsync")),
+    )
+
+    with pytest.raises(OSError, match="fsync"):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+    assert list(settings.parent.glob(".PalModSettings.ini.*")) == []
+
+
+def test_exclusive_backup_name_collision_preserves_original(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    real_open = steam_workshop.os.open
+
+    def collide_backup(path, flags, *args):
+        if str(path).endswith(".backup") and flags & os.O_EXCL:
+            raise FileExistsError("exclusive backup collision")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(steam_workshop.os, "open", collide_backup)
+
+    with pytest.raises(FileExistsError, match="collision"):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+
+
+def test_set_enabled_shares_lock_with_real_mod_service_critical_section(tmp_path):
+    import threading
+
+    lock_root = tmp_path / "ApplicationData"
+    service, settings = workshop_service(
+        tmp_path,
+        {"1001": {"PackageName": "Feature", "Dependencies": []}},
+        lock_root=lock_root,
+    )
+    settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
+    mod_service = ModService(service.game_root, lock_root, game_running=lambda: False)
+    finished = threading.Event()
+
+    def enable_workshop():
+        service.set_enabled("1001", True)
+        finished.set()
+
+    with mod_service._transaction_lock():
+        worker = threading.Thread(target=enable_workshop)
+        worker.start()
+        assert not finished.wait(0.1)
+    worker.join(timeout=2)
+
+    assert finished.is_set()
+    assert active_values(settings) == ["Feature"]
 
 
 def test_set_enabled_uses_shared_game_lock_for_concurrent_services(tmp_path, monkeypatch):
