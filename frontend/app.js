@@ -65,7 +65,12 @@ async function run(trigger, operation, { disable = true, global = false, busyTex
 
 async function switchView(name) {
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    const current = item.dataset.view === name;
+    item.classList.toggle("active", current);
+    if (current) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
   const copy = VIEW_COPY[name];
   $("#viewTitle").textContent = copy[0];
   $("#viewSubtitle").textContent = copy[1];

@@ -62,6 +62,19 @@ def test_html_has_exactly_five_pages_and_required_layers():
     assert parser.scripts == [{"type": "module", "src": "app.js"}]
 
 
+def test_navigation_tracks_current_page_for_initial_and_switched_views():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    parser = parsed_html()
+    assert html.count('aria-current="page"') == 1
+    assert re.search(r'class="nav-item active"[^>]*data-view="mods"[^>]*aria-current="page"', html)
+    switch = re.search(r"async function switchView\(name\) \{(.*?)^\}", app, re.S | re.M)
+    assert switch
+    assert 'item.setAttribute("aria-current", "page")' in switch.group(1)
+    assert 'item.removeAttribute("aria-current")' in switch.group(1)
+    assert len(parser.views) == 5
+
+
 def test_credits_view_uses_fixed_ids_real_buttons_and_native_details():
     html = HTML.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")

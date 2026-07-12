@@ -17,6 +17,10 @@ REQUIRED_NAMES = {
     "Palworld Modding Docs",
 }
 REQUIRED_FIELDS = {"id", "name", "purpose", "author", "license", "version", "source_url", "core"}
+# Verified against Pillow 12.3.0 wheel METADATA (License-Expression) and the lock file.
+AUTHORITATIVE_DIRECT_METADATA = {
+    "Pillow": {"version": "12.3.0", "license": "MIT-CMU"},
+}
 
 
 def test_catalog_is_fixed_complete_offline_metadata():
@@ -33,6 +37,13 @@ def test_catalog_is_fixed_complete_offline_metadata():
     assert "Copyright (c) 2022 Narknon" in ue4ss["copyright"]
     okaetsu = next(item for item in CATALOG if item["name"] == "Okaetsu/RE-UE4SS")
     assert "Palworld 专用构建" in okaetsu["purpose"]
+
+
+def test_locked_pillow_metadata_matches_authoritative_wheel_metadata():
+    pillow = next(item for item in CATALOG if item["name"] == "Pillow")
+    assert {key: pillow[key] for key in ("version", "license")} == AUTHORITATIVE_DIRECT_METADATA["Pillow"]
+    assert "MIT-CMU" in pillow["license_text"]
+    assert "Historical Permission Notice and Disclaimer" not in pillow["license_text"]
 
 
 def test_catalog_and_trusted_links_reject_mutation():

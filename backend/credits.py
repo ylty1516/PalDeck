@@ -43,9 +43,9 @@ CATALOG = (
     ),
     _entry(
         id="pillow", name="Pillow", purpose="校验、转换和保存自定义背景图片。",
-        author="Pillow contributors", license="HPND", version="12.3.0",
+        author="Pillow contributors", license="MIT-CMU", version="12.3.0",
         source_url="https://github.com/python-pillow/Pillow", core=True, direct_dependency=True,
-        license_text="Historical Permission Notice and Disclaimer (HPND)。",
+        license_text="MIT-CMU（CMU License）；依据 Pillow 12.3.0 wheel METADATA 的 License-Expression。",
     ),
     _entry(
         id="pyinstaller", name="PyInstaller", purpose="将应用及其运行资源构建为 Windows 便携程序。",
