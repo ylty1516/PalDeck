@@ -10,6 +10,7 @@ venv/
 .build-cache/
 .venv-build/
 .pi-subagents/
+.worktrees/
 
 # build artifacts
 build/
