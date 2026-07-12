@@ -10,9 +10,11 @@ import {
 import {
   createWatercolorSpriteSet,
   minimalSafeX,
+  naturalPalette,
   renderMinimalPetal,
   renderNaturalPetal,
   renderWatercolorPetal,
+  watercolorSpriteKind,
 } from "../../frontend/effects.js";
 
 const viewport = { width: 1200, height: 800 };
@@ -190,6 +192,7 @@ function recordingContext() {
 
 const renderedParticle = Object.freeze({
   x: 20, y: 30, size: 10, rotation: 0.4, flip: -0.5, opacity: 0.7, blur: 1.2,
+  gustFactor: 0.32, drift: 20, lifetime: 14,
 });
 
 test("natural renderer uses asymmetric bezier geometry, gradient, vein and depth effects", () => {
@@ -197,6 +200,9 @@ test("natural renderer uses asymmetric bezier geometry, gradient, vein and depth
   renderNaturalPetal(context, renderedParticle);
   const names = context.calls.map(([name]) => name);
   assert.ok(names.includes("bezierCurveTo"));
+  assert.equal(names.filter((name) => name === "quadraticCurveTo").length, 2);
+  const notchCalls = context.calls.filter(([name]) => name === "quadraticCurveTo");
+  assert.ok(notchCalls[0][4] > -renderedParticle.size * 0.6, "notch must visibly indent below both tips");
   assert.ok(names.includes("createLinearGradient"));
   assert.ok(names.includes("stroke"));
   assert.ok(context.calls.some((call) => call[0] === "set" && call[1] === "shadowBlur"));
@@ -204,13 +210,29 @@ test("natural renderer uses asymmetric bezier geometry, gradient, vein and depth
 
   const rotated = recordingContext();
   renderNaturalPetal(rotated, { ...renderedParticle, rotation: 1.4 });
-  assert.notDeepEqual(
+  assert.deepEqual(
     context.calls.filter(([name]) => name === "bezierCurveTo")[0],
     rotated.calls.filter(([name]) => name === "bezierCurveTo")[0],
   );
+  const differentlySeeded = recordingContext();
+  renderNaturalPetal(differentlySeeded, { ...renderedParticle, gustFactor: 0.9 });
+  assert.notDeepEqual(
+    context.calls.filter(([name]) => name === "bezierCurveTo")[0],
+    differentlySeeded.calls.filter(([name]) => name === "bezierCurveTo")[0],
+  );
+
+  const firstPalette = naturalPalette(renderedParticle);
+  assert.deepEqual(naturalPalette({ ...renderedParticle, rotation: 2.8, flip: 0.2 }), firstPalette);
+  assert.notDeepEqual(naturalPalette({ ...renderedParticle, gustFactor: 0.9 }), firstPalette);
+  for (const color of [firstPalette.highlight, firstPalette.middle, firstPalette.edge]) {
+    const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number);
+    assert.ok(channels[0] >= 180 && channels[0] <= 255);
+    assert.ok(channels[1] >= 85 && channels[1] <= 248);
+    assert.ok(channels[2] >= 125 && channels[2] <= 248);
+  }
 });
 
-test("watercolor sprites are finite, pre-generated and support layered five-petal blooms", () => {
+test("watercolor sprites are finite, pre-generated and guarantee a reachable atlas", () => {
   const canvases = [];
   const sprites = createWatercolorSpriteSet({
     count: 6,
@@ -224,11 +246,22 @@ test("watercolor sprites are finite, pre-generated and support layered five-peta
   });
   assert.equal(sprites.length, 6);
   assert.equal(canvases.length, 6);
+  assert.equal(sprites.filter(({ kind }) => kind === "bloom").length, 1);
+  assert.ok(sprites.filter(({ kind }) => kind === "petal").length >= 2);
   assert.ok(canvases.some(({ context }) => context.calls.filter(([name]) => name === "rotate").length >= 5));
 
   const target = recordingContext();
-  renderWatercolorPetal(target, renderedParticle, sprites, 8);
-  assert.ok(target.calls.some(([name]) => name === "drawImage"));
+  renderWatercolorPetal(target, { ...renderedParticle, gustFactor: 0.02 }, sprites);
+  assert.equal(target.calls.find(([name]) => name === "drawImage")[1], sprites.find(({ kind }) => kind === "bloom").image);
+});
+
+test("watercolor bloom choice is stable per birth and stays within 5-8 percent", () => {
+  assert.equal(watercolorSpriteKind({ gustFactor: 0.0649 }), "bloom");
+  assert.equal(watercolorSpriteKind({ gustFactor: 0.065 }), "petal");
+  const samples = Array.from({ length: 10000 }, (_, index) => ({ gustFactor: index / 10000 }));
+  const bloomCount = samples.filter((particle) => watercolorSpriteKind(particle) === "bloom").length;
+  assert.ok(bloomCount >= 500 && bloomCount <= 800);
+  assert.equal(watercolorSpriteKind({ ...renderedParticle, rotation: 5, flip: 0.1 }), watercolorSpriteKind(renderedParticle));
 });
 
 test("minimal renderer uses a low-saturation solid silhouette", () => {

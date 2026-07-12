@@ -278,6 +278,11 @@ def test_three_petal_styles_share_engine_lifecycle_and_old_ellipse_is_gone():
     assert "previous = performance.now()" in effects
     assert "clearRect" in effects
     assert "createWatercolorSpriteSet" in effects
+    assert "naturalPalette" in effects
+    assert "quadraticCurveTo" in effects
+    assert "watercolorSpriteKind" in effects
+    assert 'spriteIndex === 0 ? "bloom" : "petal"' in effects
+    assert "Math.abs(index) % sprites.length" not in effects
     assert "querySelector" not in engine
     assert "effects.update({ level:" in app
     assert "petal_style" in app

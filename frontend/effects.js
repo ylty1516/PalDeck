@@ -39,28 +39,63 @@ function beginPetal(context, particle) {
   context.filter = particle.blur > 0 ? `blur(${particle.blur}px)` : "none";
 }
 
-function petalPath(context, size, asymmetric = false, variation = 0) {
+function petalPath(context, size, asymmetric = false, variation = 0, notched = false) {
   const shoulder = asymmetric ? size * (0.72 + variation) : size * 0.62;
   context.beginPath();
   context.moveTo(0, size * 0.58);
-  context.bezierCurveTo(-shoulder, size * (0.24 - variation * 0.3), -size * (0.7 - variation), -size * 0.56, -size * 0.08, -size * 0.72);
+  const leftTipX = -size * (0.16 + variation * 0.25);
+  context.bezierCurveTo(-shoulder, size * (0.24 - variation * 0.3), -size * (0.7 - variation), -size * 0.56, leftTipX, -size * 0.69);
+  if (notched) {
+    context.quadraticCurveTo(-size * 0.07, -size * 0.73, 0, -size * 0.53);
+    context.quadraticCurveTo(size * 0.07, -size * 0.73, size * (0.17 - variation * 0.2), -size * 0.68);
+  }
   context.bezierCurveTo(size * (asymmetric ? 0.18 + variation * 0.5 : 0.08), -size * 0.48, size * (0.78 + variation * 0.4), -size * 0.2, 0, size * 0.58);
   context.closePath();
 }
 
+function stableParticleSeed(particle) {
+  if (Number.isFinite(particle?.gustFactor)) return Math.min(0.999999, Math.max(0, particle.gustFactor));
+  const fallback = (Number(particle?.size) || 0) * 0.173 + (Number(particle?.lifetime) || 0) * 0.619;
+  return ((fallback % 1) + 1) % 1;
+}
+
+function rgbaBetween(from, to, amount, alpha) {
+  const channels = from.map((value, index) => Math.round(value + (to[index] - value) * amount));
+  return `rgba(${channels.join(", ")}, ${alpha})`;
+}
+
+function createNaturalPalette(seed) {
+  return Object.freeze({
+    highlight: rgbaBetween([255, 244, 247], [255, 232, 241], seed, ".96"),
+    middle: rgbaBetween([248, 190, 208], [231, 145, 178], seed, ".9"),
+    edge: rgbaBetween([216, 126, 158], [180, 88, 132], seed, ".82"),
+    vein: rgbaBetween([174, 98, 130], [142, 67, 105], seed, ".5"),
+  });
+}
+
+const NATURAL_PALETTES = Object.freeze(
+  Array.from({ length: 12 }, (_, index) => createNaturalPalette(index / 11)),
+);
+
+export function naturalPalette(particle) {
+  const index = Math.min(NATURAL_PALETTES.length - 1, Math.floor(stableParticleSeed(particle) * NATURAL_PALETTES.length));
+  return NATURAL_PALETTES[index];
+}
+
 export function renderNaturalPetal(context, particle) {
   beginPetal(context, particle);
+  const palette = naturalPalette(particle);
   const gradient = context.createLinearGradient(-particle.size, -particle.size, particle.size, particle.size);
-  gradient.addColorStop(0, "rgba(255, 238, 244, .96)");
-  gradient.addColorStop(0.58, "rgba(239, 154, 183, .9)");
-  gradient.addColorStop(1, "rgba(180, 86, 126, .82)");
+  gradient.addColorStop(0, palette.highlight);
+  gradient.addColorStop(0.58, palette.middle);
+  gradient.addColorStop(1, palette.edge);
   context.fillStyle = gradient;
   context.shadowColor = "rgba(112, 45, 77, .24)";
   context.shadowBlur = 2 + particle.blur * 2;
-  petalPath(context, particle.size, true, Math.sin(particle.rotation) * 0.08);
+  petalPath(context, particle.size, true, (stableParticleSeed(particle) - 0.5) * 0.16, true);
   context.fill();
   context.shadowBlur = 0;
-  context.strokeStyle = "rgba(151, 70, 105, .5)";
+  context.strokeStyle = palette.vein;
   context.lineWidth = Math.max(0.45, particle.size * 0.055);
   context.beginPath();
   context.moveTo(0, particle.size * 0.48);
@@ -92,17 +127,19 @@ export function createWatercolorSpriteSet({
     ? new OffscreenCanvas(56, 56)
     : document.createElement("canvas"),
 } = {}) {
-  const spriteCount = Math.max(1, Math.min(12, Math.floor(count)));
-  return Array.from({ length: spriteCount }, () => {
+  const requestedCount = Number.isFinite(count) ? Math.floor(count) : 8;
+  const spriteCount = Math.max(3, Math.min(12, requestedCount));
+  return Array.from({ length: spriteCount }, (_, spriteIndex) => {
     const canvas = createCanvas();
     canvas.width = 56;
     canvas.height = 56;
     const context = canvas.getContext("2d");
     context.translate(28, 28);
-    if (random() < 0.08) {
-      for (let index = 0; index < 5; index += 1) {
+    const kind = spriteIndex === 0 ? "bloom" : "petal";
+    if (kind === "bloom") {
+      for (let petalIndex = 0; petalIndex < 5; petalIndex += 1) {
         context.save();
-        context.rotate(index * Math.PI * 0.4);
+        context.rotate(petalIndex * Math.PI * 0.4);
         context.translate(0, -9);
         paintWatercolorShape(context, 8);
         context.restore();
@@ -111,16 +148,37 @@ export function createWatercolorSpriteSet({
       context.rotate((random() - 0.5) * 0.35);
       paintWatercolorShape(context, 14);
     }
-    return canvas;
+    return Object.freeze({ image: canvas, kind });
   });
 }
 
-export function renderWatercolorPetal(context, particle, sprites, index = 0) {
+export function watercolorSpriteKind(particle, bloomRate = 0.065) {
+  const boundedRate = Number.isFinite(bloomRate) ? Math.min(0.08, Math.max(0.05, bloomRate)) : 0.065;
+  return stableParticleSeed(particle) < boundedRate ? "bloom" : "petal";
+}
+
+function selectWatercolorSprite(sprites, kind, variantSeed) {
+  let candidateCount = 0;
+  for (const sprite of sprites) if (sprite.kind === kind) candidateCount += 1;
+  if (!candidateCount) return null;
+  let target = Math.min(candidateCount - 1, Math.floor(variantSeed * candidateCount));
+  for (const sprite of sprites) {
+    if (sprite.kind !== kind) continue;
+    if (target === 0) return sprite;
+    target -= 1;
+  }
+  return null;
+}
+
+export function renderWatercolorPetal(context, particle, sprites) {
   if (!sprites?.length) return;
+  const kind = watercolorSpriteKind(particle);
+  const variantSeed = ((particle.size * 0.173 + particle.lifetime * 0.619) % 1 + 1) % 1;
+  const sprite = selectWatercolorSprite(sprites, kind, variantSeed);
+  if (!sprite) return;
   beginPetal(context, particle);
-  const sprite = sprites[Math.abs(index) % sprites.length];
   const side = particle.size * 3.1;
-  context.drawImage(sprite, -side / 2, -side / 2, side, side);
+  context.drawImage(sprite.image, -side / 2, -side / 2, side, side);
   context.restore();
 }
 
@@ -190,9 +248,9 @@ export function createPetalEffect(canvas = document.querySelector("#petalCanvas"
 
   function render() {
     clear();
-    particles.forEach((particle, index) => {
+    particles.forEach((particle) => {
       if (style === "natural") renderNaturalPetal(context, particle);
-      else if (style === "watercolor") renderWatercolorPetal(context, particle, watercolorSprites, index);
+      else if (style === "watercolor") renderWatercolorPetal(context, particle, watercolorSprites);
       else renderMinimalPetal(context, { ...particle, x: minimalSafeX(particle.x, width) });
     });
   }
