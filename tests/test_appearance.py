@@ -145,10 +145,33 @@ def test_settings_are_strictly_validated_and_persisted(tmp_path):
 
     assert settings == {
         "theme": "ivory-sakura", "mask": 0.85, "blur": 24,
-        "position": "bottom-right", "petals": "high", "background": "default",
+        "position": "bottom-right", "petals": "high", "petal_style": "natural",
+        "background": "default",
     }
     assert AppearanceService(tmp_path / "data", tmp_path / "default.webp").get_settings() == settings
     assert json.loads((tmp_path / "data" / "config.json").read_text(encoding="utf-8"))["appearance"] == settings
+
+
+def test_legacy_petals_config_migrates_to_natural_and_preserves_density(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    legacy = {
+        "game_path": "D:/Palworld",
+        "appearance": {
+            "theme": "ivory-sakura", "mask": 0.4, "blur": 2,
+            "position": "bottom-center", "petals": "high", "background": "default",
+        },
+    }
+    (data / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+    default = _image(tmp_path / "default.webp", format="WEBP")
+
+    settings = AppearanceService(data, default).get_settings()
+
+    assert settings["petal_style"] == "natural"
+    assert settings["petals"] == "high"
+    persisted = json.loads((data / "config.json").read_text(encoding="utf-8"))
+    assert persisted["appearance"] == settings
+    assert persisted["game_path"] == "D:/Palworld"
 
 
 @pytest.mark.parametrize("theme", ["aurora-glass", "ivory-sakura", "starlit-night"])
@@ -156,10 +179,15 @@ def test_accepts_all_three_themes(tmp_path, theme):
     assert _service(tmp_path).update_settings({"theme": theme})["theme"] == theme
 
 
+@pytest.mark.parametrize("petal_style", ["natural", "watercolor", "minimal"])
+def test_accepts_all_three_petal_styles(tmp_path, petal_style):
+    assert _service(tmp_path).update_settings({"petal_style": petal_style})["petal_style"] == petal_style
+
+
 @pytest.mark.parametrize("patch", [
     {"theme": "other"}, {"mask": -0.01}, {"mask": 0.86}, {"mask": True},
     {"blur": 25}, {"blur": "2"}, {"position": "center-ish"}, {"petals": "many"},
-    {"unknown": 1},
+    {"petal_style": "realistic"}, {"petal_style": 1}, {"unknown": 1},
 ])
 def test_rejects_invalid_or_unknown_settings_without_partial_update(tmp_path, patch):
     service = _service(tmp_path)

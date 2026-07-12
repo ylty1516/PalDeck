@@ -24,12 +24,14 @@ POSITIONS = frozenset({
     "bottom-left", "bottom-center", "bottom-right",
 })
 PETAL_LEVELS = frozenset({"off", "low", "medium", "high"})
+PETAL_STYLES = frozenset({"natural", "watercolor", "minimal"})
 DEFAULT_SETTINGS: dict[str, Any] = {
     "theme": "aurora-glass",
     "mask": 0.35,
     "blur": 0,
     "position": "center",
     "petals": "medium",
+    "petal_style": "natural",
     "background": "default",
 }
 _FORMAT_SUFFIXES = {
@@ -146,7 +148,36 @@ class AppearanceService:
         return settings
 
     def get_settings(self) -> dict[str, Any]:
-        return self._settings_from_config(self.store.read({}))
+        config = self.store.read({})
+        stored = config.get("appearance") if isinstance(config, dict) else None
+        if isinstance(stored, dict) and "petal_style" not in stored:
+            try:
+                self._validate_settings(stored, allow_background=True)
+            except ValueError:
+                pass
+            else:
+                migrated: dict[str, Any] = {}
+
+                def migrate(current: Any) -> dict[str, Any]:
+                    nonlocal migrated
+                    if not isinstance(current, dict):
+                        current = {}
+                    current_stored = current.get("appearance")
+                    if isinstance(current_stored, dict) and "petal_style" not in current_stored:
+                        try:
+                            self._validate_settings(current_stored, allow_background=True)
+                        except ValueError:
+                            pass
+                        else:
+                            migrated = self._settings_from_config(current)
+                            current["appearance"] = migrated
+                            return current
+                    migrated = self._settings_from_config(current)
+                    return current
+
+                self.store.update(migrate)
+                return migrated
+        return self._settings_from_config(config)
 
     @staticmethod
     def _validate_settings(settings: dict[str, Any], *, allow_background: bool = False) -> None:
@@ -171,7 +202,11 @@ class AppearanceService:
             type(settings["petals"]) is not str or settings["petals"] not in PETAL_LEVELS
         ):
             raise ValueError("樱花密度无效")
-        if allow_background and (
+        if "petal_style" in settings and (
+            type(settings["petal_style"]) is not str or settings["petal_style"] not in PETAL_STYLES
+        ):
+            raise ValueError("樱花风格无效")
+        if allow_background and "background" in settings and (
             type(settings.get("background")) is not str or not settings["background"]
         ):
             raise ValueError("背景设置无效")
