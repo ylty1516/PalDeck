@@ -24,6 +24,18 @@ export function nextModsGeneration(current) {
   return Number(current) + 1;
 }
 
+export function createSerialQueue() {
+  let tail = Promise.resolve();
+  return Object.freeze({
+    enqueue(operation) {
+      if (typeof operation !== "function") return Promise.reject(new TypeError("operation must be a function"));
+      const result = tail.then(operation, operation);
+      tail = result.catch(() => undefined);
+      return result;
+    },
+  });
+}
+
 export function createRevisionGuard(initial = 0) {
   let revision = Number.isSafeInteger(initial) && initial >= 0 ? initial : 0;
   return Object.freeze({

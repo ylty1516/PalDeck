@@ -1,7 +1,7 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
 import {
-  actionableErrorMessage, createRevisionGuard, dynamicActionKey, nextModsGeneration,
+  actionableErrorMessage, createRevisionGuard, createSerialQueue, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl } from "./render.js";
@@ -17,6 +17,7 @@ const state = {
 };
 const effects = createEffects();
 const appearanceRevisions = createRevisionGuard();
+const backgroundWriteQueue = createSerialQueue();
 const inFlightDynamicActions = new Set();
 let workshopWriteQueue = Promise.resolve();
 const VIEW_COPY = Object.freeze({
@@ -109,6 +110,12 @@ function previewAppearance(settings) {
 function refreshBackground() {
   const url = `/api/appearance/background/current?v=${Date.now()}`;
   document.documentElement.style.setProperty("--background-url", `url("${url}")`);
+}
+
+function completeBackgroundWrite(revision, saved, message) {
+  appearanceRevisions.apply(revision, () => applyAppearance(saved));
+  refreshBackground();
+  toast(message, "success");
 }
 
 function invalidateModsRequests() {
@@ -489,11 +496,9 @@ export const ACTION_HANDLERS = Object.freeze({
   chooseBackground: () => $("#backgroundInput").click(),
   resetBackground: async () => {
     const revision = appearanceRevisions.bump();
-    const saved = await request("/api/appearance/background", { method: "DELETE" });
-    appearanceRevisions.apply(revision, () => {
-      applyAppearance(saved);
-      refreshBackground();
-      toast("已恢复默认背景", "success");
+    return backgroundWriteQueue.enqueue(async () => {
+      const saved = await request("/api/appearance/background", { method: "DELETE" });
+      completeBackgroundWrite(revision, saved, "已恢复默认背景");
     });
   },
   selectBackground: async (event) => executeFileOperation(async () => {
@@ -502,11 +507,9 @@ export const ACTION_HANDLERS = Object.freeze({
     const form = new FormData();
     form.append("file", file);
     const revision = appearanceRevisions.bump();
-    const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 });
-    appearanceRevisions.apply(revision, () => {
-      applyAppearance(saved);
-      refreshBackground();
-      toast("背景已更新", "success");
+    return backgroundWriteQueue.enqueue(async () => {
+      const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 });
+      completeBackgroundWrite(revision, saved, "背景已更新");
     });
   }),
   changeMask: (event) => previewAppearance({ mask: Number(event.currentTarget.value) / 100 }),

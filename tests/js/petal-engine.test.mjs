@@ -17,7 +17,7 @@ import {
   renderWatercolorPetal,
   watercolorSpriteKind,
 } from "../../frontend/effects.js";
-import { createRevisionGuard } from "../../frontend/interaction-policy.js";
+import { createRevisionGuard, createSerialQueue } from "../../frontend/interaction-policy.js";
 
 const viewport = { width: 1200, height: 800 };
 
@@ -218,18 +218,49 @@ test("revision guard rejects late save responses after a newer preview", async (
   assert.equal(applied, "server-current");
 });
 
-test("background request revisions allow only the newest reset or upload response", async () => {
+test("background writes complete in request order and queue survives failure", async () => {
+  const queue = createSerialQueue();
+  const events = [];
+  let releaseFirst;
+  const gate = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = queue.enqueue(async () => {
+    events.push("reset:start");
+    await gate;
+    events.push("reset:finish");
+  });
+  const second = queue.enqueue(async () => {
+    events.push("upload:start");
+    events.push("upload:finish");
+  });
+  await Promise.resolve();
+  assert.deepEqual(events, ["reset:start"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["reset:start", "reset:finish", "upload:start", "upload:finish"]);
+
+  await assert.rejects(queue.enqueue(async () => { throw new Error("write failed"); }), /write failed/);
+  await queue.enqueue(async () => { events.push("after-failure"); });
+  assert.equal(events.at(-1), "after-failure");
+});
+
+test("successful queued background writes always refresh but never replace a newer preview", async () => {
+  const queue = createSerialQueue();
   const revisions = createRevisionGuard();
+  const sideEffects = [];
+  let appearance = "original";
+  const complete = (revision, saved, label) => {
+    revisions.apply(revision, () => { appearance = saved; });
+    sideEffects.push(`${label}:refresh`, `${label}:success`);
+  };
   const resetRevision = revisions.bump();
-  const resetResponse = Promise.resolve("reset-response");
+  const reset = queue.enqueue(async () => complete(resetRevision, "reset-server", "reset"));
   const uploadRevision = revisions.bump();
-  const uploadResponse = Promise.resolve("upload-response");
-  let appearance = "local-preview";
-  assert.equal(revisions.apply(resetRevision, () => { appearance = "stale-reset"; }), false);
-  assert.equal(await resetResponse, "reset-response");
-  assert.equal(revisions.apply(uploadRevision, () => { appearance = "latest-upload"; }), true);
-  assert.equal(await uploadResponse, "upload-response");
-  assert.equal(appearance, "latest-upload");
+  const upload = queue.enqueue(async () => complete(uploadRevision, "upload-server", "upload"));
+  revisions.bump();
+  appearance = "new-mask-style-preview";
+  await Promise.all([reset, upload]);
+  assert.equal(appearance, "new-mask-style-preview");
+  assert.deepEqual(sideEffects, ["reset:refresh", "reset:success", "upload:refresh", "upload:success"]);
 });
 
 function recordingContext() {

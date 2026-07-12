@@ -311,10 +311,16 @@ def test_petal_style_preview_persists_only_on_save_and_recovers_after_failure():
     assert "appearanceRevisions.capture()" in save.group(1)
     assert "appearanceRevisions.apply" in save.group(1)
     assert "previewAppearance" in app
+    assert "const backgroundWriteQueue = createSerialQueue()" in app
+    assert app.count("backgroundWriteQueue.enqueue") == 2
+    completion = re.search(r"function completeBackgroundWrite\([^)]*\) \{(.*?)^\}", app, re.S | re.M)
+    assert completion
+    assert completion.group(1).index("appearanceRevisions.apply") < completion.group(1).index("refreshBackground()")
+    assert completion.group(1).index("refreshBackground()") < completion.group(1).index("toast(")
     for action in ("resetBackground", "selectBackground"):
         entry = re.search(rf"^  {action}: (.*?)(?=^  [A-Za-z]|^\}}\);)", app, re.S | re.M)
         assert entry and "appearanceRevisions.bump()" in entry.group(1)
-        assert "appearanceRevisions.apply" in entry.group(1)
+        assert "completeBackgroundWrite" in entry.group(1)
 
 
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
