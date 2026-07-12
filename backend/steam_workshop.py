@@ -458,9 +458,15 @@ def _updated_settings(
             )
         ]
     elif enable_packages is not None:
-        package_by_key = {package.casefold(): package for package in enable_packages}
-        seen: set[str] = set()
+        ordered_packages = list(
+            dict.fromkeys(package.casefold() for package in enable_packages)
+        )
+        package_names = {
+            package.casefold(): package for package in enable_packages
+        }
+        closure_keys = set(ordered_packages)
         rewritten: list[str] = []
+        closure_insertion: int | None = None
         has_global = False
         for line in body:
             parsed = _key_value(line)
@@ -470,15 +476,17 @@ def _updated_settings(
                     f"bGlobalEnableMod=True{document.newline}" if enable_global else line
                 )
                 continue
-            if parsed is not None and parsed[0] == "activemodlist":
-                key = parsed[1].casefold()
-                if key in package_by_key:
-                    if key in seen:
-                        continue
-                    seen.add(key)
+            if (
+                parsed is not None
+                and parsed[0] == "activemodlist"
+                and parsed[1].casefold() in closure_keys
+            ):
+                if closure_insertion is None:
+                    closure_insertion = len(rewritten)
+                continue
             rewritten.append(line)
         if enable_global and not has_global:
-            first_active = next(
+            global_insertion = next(
                 (
                     index
                     for index, line in enumerate(rewritten)
@@ -488,24 +496,24 @@ def _updated_settings(
                 0,
             )
             rewritten.insert(
-                first_active, f"bGlobalEnableMod=True{document.newline}"
+                global_insertion, f"bGlobalEnableMod=True{document.newline}"
             )
-        missing = [
-            package
-            for package in enable_packages
-            if package.casefold() not in seen
-        ]
-        if missing:
+            if closure_insertion is not None and global_insertion <= closure_insertion:
+                closure_insertion += 1
+        if closure_insertion is None:
             active_indices = [
                 index
                 for index, line in enumerate(rewritten)
                 if (parsed := _key_value(line)) is not None
                 and parsed[0] == "activemodlist"
             ]
-            insertion = active_indices[-1] + 1 if active_indices else len(rewritten)
-            rewritten[insertion:insertion] = [
-                f"ActiveModList={package}{document.newline}" for package in missing
-            ]
+            closure_insertion = (
+                active_indices[-1] + 1 if active_indices else len(rewritten)
+            )
+        rewritten[closure_insertion:closure_insertion] = [
+            f"ActiveModList={package_names[key]}{document.newline}"
+            for key in ordered_packages
+        ]
         body = rewritten
 
     return document.bom + "".join(before + body + after).encode(document.encoding)

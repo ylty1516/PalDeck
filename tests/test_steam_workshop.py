@@ -628,6 +628,36 @@ def test_disable_removes_only_target_lines_and_preserves_unrelated_duplicates_an
     )
 
 
+def test_enable_reorders_existing_feature_after_missing_dependency_only(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Core", "Dependencies": []},
+            "1002": {"PackageName": "Feature", "Dependencies": ["Core"]},
+            "1003": {"PackageName": "Unrelated", "Dependencies": []},
+        },
+    )
+    settings.write_bytes(
+        b"[PalModSettings]\r\nbGlobalEnableMod=False\r\n"
+        b"  ActiveModList = Unrelated  \r\n"
+        b"; keep between unrelated entries\r\n"
+        b"ActiveModList=Feature\r\n"
+        b"UnknownKey = untouched\r\n"
+        b"ActiveModList=Unrelated\r\n"
+    )
+
+    service.set_enabled("1002", True)
+
+    raw = settings.read_bytes()
+    assert active_values(settings) == ["Unrelated", "Core", "Feature", "Unrelated"]
+    assert b"  ActiveModList = Unrelated  \r\n" in raw
+    assert b"; keep between unrelated entries\r\n" in raw
+    assert b"UnknownKey = untouched\r\n" in raw
+    assert raw.index(b"  ActiveModList = Unrelated") < raw.index(
+        b"ActiveModList=Unrelated\r\n", raw.index(b"ActiveModList=Feature")
+    )
+
+
 def test_enable_adds_transitive_dependencies_in_topological_order_by_name_or_id(tmp_path):
     service, settings = workshop_service(
         tmp_path,
