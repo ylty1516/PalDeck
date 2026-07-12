@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+from .game_lock import game_write_lock
+from .mod_service import GameRunningError
+from .process_utils import is_palworld_running
 
 from .game_detector import (
     APP_ID,
@@ -68,8 +74,25 @@ class WorkshopMod:
         return value
 
 
+class WorkshopDependencyError(RuntimeError):
+    """A Workshop dependency graph prevents the requested state change."""
+
+    def __init__(self, details: dict[str, object]):
+        self.details = details
+        super().__init__("Workshop 模组依赖冲突")
+
+
+@dataclass(frozen=True)
+class _SettingsDocument:
+    path: Path
+    encoding: str
+    bom: bytes
+    newline: str
+    text: str
+
+
 class SteamWorkshopService:
-    """Scan only Palworld's fixed Workshop manifest and content directory."""
+    """Scan Workshop metadata and manage Palworld's ActiveModList."""
 
     def __init__(
         self,
@@ -77,8 +100,10 @@ class SteamWorkshopService:
         game_root: str | Path | None = None,
         *,
         steam_roots: list[str | Path] | None = None,
+        game_running=is_palworld_running,
     ) -> None:
-        del game_root  # Reserved for later state management; discovery is read-only.
+        self.game_root = Path(game_root) if game_root is not None else None
+        self.game_running = game_running
         if steam_roots is not None and steam_root is not None:
             raise ValueError("provide steam_root or steam_roots, not both")
         if steam_roots is not None:
@@ -91,6 +116,12 @@ class SteamWorkshopService:
         self._cache_fingerprint: tuple[object, ...] | None = None
         self._cache: tuple[WorkshopMod, ...] | None = None
         self.last_scan_paths: list[str] = []
+
+    @property
+    def settings_path(self) -> Path:
+        if self.game_root is None:
+            raise ValueError("game_root is required for Workshop state changes")
+        return self.game_root / "Palworld" / "Mods" / "PalModSettings.ini"
 
     def scan(self, *, force: bool = False) -> list[WorkshopMod]:
         self.last_scan_paths = []
@@ -136,6 +167,86 @@ class SteamWorkshopService:
         self._cache_fingerprint = key
         self._cache = tuple(mods)
         return list(self._cache)
+
+    def set_enabled(
+        self,
+        workshop_id: str,
+        enabled: bool,
+        *,
+        confirm_dependents: bool = False,
+    ) -> dict[str, object]:
+        """Atomically update ActiveModList using only the latest trusted scan."""
+        if type(enabled) is not bool or type(confirm_dependents) is not bool:
+            raise ValueError("enabled and confirm_dependents must be boolean")
+        target, mods = self._trusted_mod(workshop_id)
+        if self.game_root is None:
+            raise ValueError("game_root is required for Workshop state changes")
+
+        with game_write_lock(self.game_root):
+            if self.game_running():
+                raise GameRunningError("Palworld 正在运行，无法修改 Workshop 模组")
+            document = _read_settings(self.settings_path)
+            active = _active_packages(document.text)
+            affected: list[str] = []
+
+            if enabled:
+                additions = _dependency_order(target, mods)
+                desired = _deduplicate(active + [mod.package_name for mod in additions])
+                global_enabled = True
+            else:
+                affected = _enabled_dependents(target, mods, active)
+                if affected and not confirm_dependents:
+                    raise WorkshopDependencyError(
+                        {
+                            "reason": "enabled_dependents",
+                            "dependents": affected,
+                        }
+                    )
+                desired = [
+                    package
+                    for package in _deduplicate(active)
+                    if package.casefold() != target.package_name.casefold()
+                ]
+                global_enabled = None
+
+            updated = _updated_settings(document, desired, global_enabled)
+            if updated != document.bom + document.text.encode(document.encoding):
+                _atomic_write(document.path, updated)
+
+            confirmed = _read_settings(document.path)
+            confirmed_active = _active_packages(confirmed.text)
+            authoritative_enabled = any(
+                package.casefold() == target.package_name.casefold()
+                for package in confirmed_active
+            )
+            if [value.casefold() for value in _deduplicate(confirmed_active)] != [
+                value.casefold() for value in desired
+            ]:
+                raise RuntimeError("PalModSettings.ini 写入确认失败")
+            if authoritative_enabled is not enabled:
+                raise RuntimeError("PalModSettings.ini 写入确认失败")
+            if enabled and not _global_enabled(confirmed.text):
+                raise RuntimeError("PalModSettings.ini 全局开关写入确认失败")
+
+            result = target.to_dict()
+            result.update({"enabled": authoritative_enabled, "needs_restart": True})
+            if affected and confirm_dependents:
+                result["affected_dependents"] = affected
+            return result
+
+    def _trusted_mod(
+        self, workshop_id: str
+    ) -> tuple[WorkshopMod, tuple[WorkshopMod, ...]]:
+        if not isinstance(workshop_id, str) or _WORKSHOP_ID.fullmatch(workshop_id) is None:
+            raise ValueError("workshop_id must be a positive decimal ID")
+        if self._cache is None:
+            raise ValueError("a trusted Workshop scan is required")
+        matches = [mod for mod in self._cache if mod.workshop_id == workshop_id]
+        if len(matches) != 1:
+            raise ValueError("Workshop ID is not present in the latest scan")
+        if not matches[0].valid:
+            raise ValueError("invalid Workshop records cannot be toggled")
+        return matches[0], self._cache
 
     def _record(self, path: Path) -> None:
         self.last_scan_paths.append(str(path))
@@ -241,6 +352,253 @@ class SteamWorkshopService:
             valid=True,
             error=None,
         )
+
+
+def _read_settings(path: Path) -> _SettingsDocument:
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        bom, encoding, payload = b"\xef\xbb\xbf", "utf-8", raw[3:]
+    elif raw.startswith(b"\xff\xfe"):
+        bom, encoding, payload = b"\xff\xfe", "utf-16-le", raw[2:]
+    else:
+        bom, encoding, payload = b"", "utf-8", raw
+    text = payload.decode(encoding)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    return _SettingsDocument(path, encoding, bom, newline, text)
+
+
+def _settings_range(lines: list[str]) -> tuple[int, int] | None:
+    for index, line in enumerate(lines):
+        if line.strip().casefold() != "[palmodsettings]":
+            continue
+        for end in range(index + 1, len(lines)):
+            stripped = lines[end].strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                return index, end
+        return index, len(lines)
+    return None
+
+
+def _key_value(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith((";", "#")) or "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    return key.strip().casefold(), value.strip()
+
+
+def _active_packages(text: str) -> list[str]:
+    lines = text.splitlines(keepends=True)
+    section = _settings_range(lines)
+    if section is None:
+        return []
+    _, end = section
+    return [
+        parsed[1]
+        for line in lines[section[0] + 1 : end]
+        if (parsed := _key_value(line)) is not None
+        and parsed[0] == "activemodlist"
+        and parsed[1]
+    ]
+
+
+def _global_enabled(text: str) -> bool:
+    lines = text.splitlines(keepends=True)
+    section = _settings_range(lines)
+    if section is None:
+        return False
+    _, end = section
+    for line in lines[section[0] + 1 : end]:
+        parsed = _key_value(line)
+        if parsed is not None and parsed[0] == "bglobalenablemod":
+            return parsed[1].casefold() == "true"
+    return False
+
+
+def _updated_settings(
+    document: _SettingsDocument,
+    active: list[str],
+    global_enabled: bool | None,
+) -> bytes:
+    lines = document.text.splitlines(keepends=True)
+    section = _settings_range(lines)
+    if section is None:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += document.newline
+        start = len(lines)
+        lines.extend([f"[PalModSettings]{document.newline}"])
+        end = len(lines)
+    else:
+        start, end = section
+
+    target_indices: list[int] = []
+    preserved_global: str | None = None
+    for index in range(start + 1, end):
+        parsed = _key_value(lines[index])
+        if parsed is None:
+            continue
+        if parsed[0] == "bglobalenablemod":
+            target_indices.append(index)
+            if preserved_global is None:
+                preserved_global = lines[index]
+        elif parsed[0] == "activemodlist":
+            target_indices.append(index)
+
+    insertion = min(target_indices, default=end)
+    target_set = set(target_indices)
+    if global_enabled is True:
+        replacement = [f"bGlobalEnableMod=True{document.newline}"]
+    elif preserved_global is not None:
+        replacement = [preserved_global]
+    else:
+        replacement = []
+    replacement.extend(
+        f"ActiveModList={package}{document.newline}" for package in _deduplicate(active)
+    )
+    rewritten = [line for index, line in enumerate(lines) if index not in target_set]
+    removed_before = sum(1 for index in target_indices if index < insertion)
+    rewritten[insertion - removed_before : insertion - removed_before] = replacement
+    return document.bom + "".join(rewritten).encode(document.encoding)
+
+
+def _deduplicate(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
+
+
+def _mod_indexes(
+    mods: tuple[WorkshopMod, ...],
+) -> tuple[dict[str, WorkshopMod], dict[str, WorkshopMod]]:
+    by_id = {mod.workshop_id: mod for mod in mods if mod.valid}
+    by_package: dict[str, WorkshopMod] = {}
+    ambiguous: set[str] = set()
+    for mod in mods:
+        if not mod.valid:
+            continue
+        key = mod.package_name.casefold()
+        if key in by_package:
+            ambiguous.add(key)
+        else:
+            by_package[key] = mod
+    for key in ambiguous:
+        by_package.pop(key, None)
+    return by_id, by_package
+
+
+def _resolve_dependency(
+    dependency: str,
+    by_id: dict[str, WorkshopMod],
+    by_package: dict[str, WorkshopMod],
+) -> WorkshopMod | None:
+    if _WORKSHOP_ID.fullmatch(dependency):
+        return by_id.get(dependency)
+    return by_package.get(dependency.casefold())
+
+
+def _dependency_order(
+    target: WorkshopMod, mods: tuple[WorkshopMod, ...]
+) -> list[WorkshopMod]:
+    by_id, by_package = _mod_indexes(mods)
+    visiting: list[str] = []
+    visited: set[str] = set()
+    ordered: list[WorkshopMod] = []
+
+    def visit(mod: WorkshopMod) -> None:
+        if mod.workshop_id in visiting:
+            first = visiting.index(mod.workshop_id)
+            raise WorkshopDependencyError(
+                {
+                    "reason": "dependency_cycle",
+                    "cycle": visiting[first:] + [mod.workshop_id],
+                }
+            )
+        if mod.workshop_id in visited:
+            return
+        visiting.append(mod.workshop_id)
+        missing: list[str] = []
+        dependencies: list[WorkshopMod] = []
+        for dependency in mod.dependencies:
+            resolved = _resolve_dependency(dependency, by_id, by_package)
+            if resolved is None:
+                missing.append(dependency)
+            else:
+                dependencies.append(resolved)
+        if missing:
+            raise WorkshopDependencyError(
+                {
+                    "reason": "missing_dependencies",
+                    "workshop_id": mod.workshop_id,
+                    "missing": missing,
+                }
+            )
+        for dependency in dependencies:
+            visit(dependency)
+        visiting.pop()
+        visited.add(mod.workshop_id)
+        ordered.append(mod)
+
+    visit(target)
+    return ordered
+
+
+def _enabled_dependents(
+    target: WorkshopMod,
+    mods: tuple[WorkshopMod, ...],
+    active: list[str],
+) -> list[str]:
+    active_keys = {package.casefold() for package in active}
+    by_id, by_package = _mod_indexes(mods)
+
+    def depends_on(mod: WorkshopMod, examined: set[str]) -> bool:
+        if mod.workshop_id in examined:
+            return False
+        examined.add(mod.workshop_id)
+        for dependency in mod.dependencies:
+            resolved = _resolve_dependency(dependency, by_id, by_package)
+            if resolved is None:
+                continue
+            if resolved.workshop_id == target.workshop_id or depends_on(resolved, examined):
+                return True
+        return False
+
+    dependents = [
+        mod.workshop_id
+        for mod in mods
+        if mod.valid
+        and mod.workshop_id != target.workshop_id
+        and mod.package_name.casefold() in active_keys
+        and depends_on(mod, set())
+    ]
+    return sorted(dependents, key=int)
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor: int | None = None
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        offset = 0
+        while offset < len(content):
+            written = os.write(descriptor, content[offset:])
+            if written <= 0:
+                raise OSError("failed to write PalModSettings.ini temporary file")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _validate_info(value: Any) -> dict[str, Any]:

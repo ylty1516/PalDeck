@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.steam_workshop import SteamWorkshopService
+from backend.mod_service import GameRunningError
+from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError
 
 
 def write_library_config(steam_root: Path, libraries: list[Path]) -> None:
@@ -471,6 +472,322 @@ def test_scan_never_opens_or_iterates_other_appids_or_common(tmp_path, monkeypat
     assert [mod.workshop_id for mod in SteamWorkshopService(steam).scan(force=True)] == [
         "9007"
     ]
+
+
+def workshop_service(
+    tmp_path: Path,
+    specs: dict[str, dict[str, object]],
+    *,
+    game_running=lambda: False,
+) -> tuple[SteamWorkshopService, Path]:
+    steam = tmp_path / "Steam"
+    game = tmp_path / "Game"
+    write_library_config(steam, [])
+    write_acf(steam, list(specs))
+    for workshop_id, overrides in specs.items():
+        write_item(steam, workshop_id, valid_info(**overrides))
+    settings = game / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings.parent.mkdir(parents=True)
+    service = SteamWorkshopService(steam, game, game_running=game_running)
+    service.scan(force=True)
+    return service, settings
+
+
+def active_values(settings: Path, encoding: str = "utf-8") -> list[str]:
+    text = settings.read_bytes().decode(encoding)
+    in_settings = False
+    values = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_settings = stripped.casefold() == "[palmodsettings]"
+        elif in_settings and "=" in line:
+            key, value = line.split("=", 1)
+            if key.strip().casefold() == "activemodlist":
+                values.append(value.strip())
+    return values
+
+
+@pytest.mark.parametrize(
+    ("prefix", "codec", "newline", "decode"),
+    [
+        (b"\xef\xbb\xbf", "utf-8", "\r\n", "utf-8-sig"),
+        (b"\xff\xfe", "utf-16-le", "\n", "utf-16"),
+        (b"", "utf-8", "\n", "utf-8"),
+    ],
+)
+def test_enable_preserves_encoding_newlines_comments_unknown_fields_and_order(
+    tmp_path, prefix, codec, newline, decode
+):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Dependency", "Dependencies": []},
+            "1002": {"PackageName": "Feature", "Dependencies": ["1001"]},
+        },
+    )
+    text = newline.join(
+        [
+            "; note",
+            "[PalModSettings]",
+            "UnknownBefore=keep",
+            "bGlobalEnableMod=False",
+            "ActiveModList=Old",
+            "; middle",
+            "ActiveModList=Old",
+            "UnknownAfter=stay",
+            "[Other]",
+            "Keep=值",
+            "",
+        ]
+    )
+    settings.write_bytes(prefix + text.encode(codec))
+
+    result = service.set_enabled("1002", True)
+    raw = settings.read_bytes()
+    decoded = raw.decode(decode)
+
+    assert raw.startswith(prefix)
+    assert (newline.encode(codec)) in raw
+    assert decoded.index("UnknownBefore=keep") < decoded.index("UnknownAfter=stay")
+    assert "; note" in decoded and "; middle" in decoded and "[Other]" in decoded
+    assert "Keep=值" in decoded
+    assert "bGlobalEnableMod=True" in decoded
+    assert active_values(settings, decode) == ["Old", "Dependency", "Feature"]
+    assert result["enabled"] is True
+    assert result["needs_restart"] is True
+
+
+def test_enable_and_disable_are_deduplicated_idempotent_and_disable_only_target(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Base", "Dependencies": []},
+            "1002": {"PackageName": "Feature", "Dependencies": ["Base"]},
+        },
+    )
+    settings.write_bytes(
+        b"[PalModSettings]\r\nbGlobalEnableMod=True\r\n"
+        b"ActiveModList=Base\r\nActiveModList=Base\r\n"
+        b"ActiveModList=Feature\r\n"
+    )
+
+    first = service.set_enabled("1002", True)
+    after_first = settings.read_bytes()
+    second = service.set_enabled("1002", True)
+    assert settings.read_bytes() == after_first
+    assert first["enabled"] is second["enabled"] is True
+    assert active_values(settings) == ["Base", "Feature"]
+
+    result = service.set_enabled("1002", False)
+    assert active_values(settings) == ["Base"]
+    assert "bGlobalEnableMod=True" in settings.read_text(encoding="utf-8")
+    after_disable = settings.read_bytes()
+    assert service.set_enabled("1002", False)["enabled"] is False
+    assert settings.read_bytes() == after_disable
+    assert result["needs_restart"] is True
+
+
+def test_enable_adds_transitive_dependencies_in_topological_order_by_name_or_id(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Core", "Dependencies": []},
+            "1002": {"PackageName": "Middle", "Dependencies": ["1001"]},
+            "1003": {"PackageName": "Feature", "Dependencies": ["Middle", "1001"]},
+        },
+    )
+    settings.write_text("[PalModSettings]\nbGlobalEnableMod=False\n", encoding="utf-8")
+
+    service.set_enabled("1003", True)
+
+    assert active_values(settings) == ["Core", "Middle", "Feature"]
+
+
+@pytest.mark.parametrize(
+    ("specs", "workshop_id", "reason"),
+    [
+        ({"1001": {"PackageName": "Feature", "Dependencies": ["Missing"]}}, "1001", "missing_dependencies"),
+        (
+            {
+                "1001": {"PackageName": "First", "Dependencies": ["Second"]},
+                "1002": {"PackageName": "Second", "Dependencies": ["First"]},
+            },
+            "1001",
+            "dependency_cycle",
+        ),
+    ],
+)
+def test_enable_reports_structured_missing_dependency_or_cycle(
+    tmp_path, specs, workshop_id, reason
+):
+    service, settings = workshop_service(tmp_path, specs)
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+
+    with pytest.raises(WorkshopDependencyError) as caught:
+        service.set_enabled(workshop_id, True)
+
+    assert caught.value.details["reason"] == reason
+    assert settings.read_bytes() == original
+
+
+def test_disable_requires_confirmation_for_enabled_transitive_dependents(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Core", "Dependencies": []},
+            "1002": {"PackageName": "Middle", "Dependencies": ["Core"]},
+            "1003": {"PackageName": "Feature", "Dependencies": ["Middle"]},
+        },
+    )
+    original = (
+        b"[PalModSettings]\nbGlobalEnableMod=True\n"
+        b"ActiveModList=Core\nActiveModList=Middle\nActiveModList=Feature\n"
+    )
+    settings.write_bytes(original)
+
+    with pytest.raises(WorkshopDependencyError) as caught:
+        service.set_enabled("1001", False)
+    assert caught.value.details == {
+        "reason": "enabled_dependents",
+        "dependents": ["1002", "1003"],
+    }
+    assert settings.read_bytes() == original
+
+    result = service.set_enabled("1001", False, confirm_dependents=True)
+    assert active_values(settings) == ["Middle", "Feature"]
+    assert result["enabled"] is False
+    assert result["affected_dependents"] == ["1002", "1003"]
+
+
+def test_disable_still_detects_target_when_dependent_has_another_missing_dependency(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Core", "Dependencies": []},
+            "1002": {
+                "PackageName": "BrokenFeature",
+                "Dependencies": ["Core", "Missing"],
+            },
+        },
+    )
+    settings.write_bytes(
+        b"[PalModSettings]\nbGlobalEnableMod=True\n"
+        b"ActiveModList=Core\nActiveModList=BrokenFeature\n"
+    )
+
+    with pytest.raises(WorkshopDependencyError) as caught:
+        service.set_enabled("1001", False)
+
+    assert caught.value.details["dependents"] == ["1002"]
+
+
+def test_set_enabled_rejects_unscanned_unknown_invalid_and_non_numeric_records(tmp_path):
+    steam = tmp_path / "Steam"
+    game = tmp_path / "Game"
+    service = SteamWorkshopService(steam, game)
+    for value in ("../1001", "steam-workshop:1001", "1001"):
+        with pytest.raises(ValueError):
+            service.set_enabled(value, True)
+
+    write_library_config(steam, [])
+    write_acf(steam, ["1001", "1002"])
+    write_item(steam, "1001")
+    write_item(steam, "1002", valid_info(PackageName="../bad"))
+    service.scan(force=True)
+    with pytest.raises(ValueError):
+        service.set_enabled("9999", True)
+    with pytest.raises(ValueError):
+        service.set_enabled("1002", True)
+
+
+def test_game_running_rejects_change_without_touching_settings(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {"1001": {"PackageName": "Feature", "Dependencies": []}},
+        game_running=lambda: True,
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+
+    with pytest.raises(GameRunningError):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_atomic_write_failure_preserves_original_and_removes_temp_files(
+    tmp_path, monkeypatch, failure
+):
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    if failure == "replace":
+        monkeypatch.setattr(
+            steam_workshop.os,
+            "replace",
+            lambda *_: (_ for _ in ()).throw(OSError("replace")),
+        )
+    else:
+        real_write = steam_workshop.os.write
+        monkeypatch.setattr(
+            steam_workshop.os,
+            "write",
+            lambda fd, data: (
+                (_ for _ in ()).throw(OSError("write"))
+                if data
+                else real_write(fd, data)
+            ),
+        )
+
+    with pytest.raises(OSError):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+    assert list(settings.parent.glob(".PalModSettings.ini.*.tmp")) == []
+
+
+def test_set_enabled_uses_shared_game_lock_for_concurrent_services(tmp_path, monkeypatch):
+    import threading
+    import time
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "First", "Dependencies": []},
+            "1002": {"PackageName": "Second", "Dependencies": []},
+        },
+    )
+    other = SteamWorkshopService(
+        service._steam_roots[0], service.game_root, game_running=lambda: False
+    )
+    other.scan(force=True)
+    settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
+    real_replace = steam_workshop.os.replace
+    entered = threading.Event()
+
+    def slow_replace(source, destination):
+        entered.set()
+        time.sleep(0.05)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(steam_workshop.os, "replace", slow_replace)
+    first = threading.Thread(target=service.set_enabled, args=("1001", True))
+    first.start()
+    assert entered.wait(1)
+    second = threading.Thread(target=other.set_enabled, args=("1002", True))
+    second.start()
+    first.join()
+    second.join()
+
+    assert active_values(settings) == ["First", "Second"]
 
 
 def test_item_symlink_is_rejected_when_supported(tmp_path):
