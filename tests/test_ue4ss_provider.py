@@ -2,6 +2,7 @@ import hashlib
 import json
 import sys
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 
@@ -188,21 +189,68 @@ def test_asset_is_immutable():
         asset.size = 2
 
 
-def test_bundled_zip_finds_development_resources_and_reports_status(tmp_path):
+def test_bundled_archive_finds_development_resources_and_reports_status(tmp_path):
     archive, manifest = _make_bundle(tmp_path)
     provider = Ue4ssProvider(resource_root=tmp_path)
-    assert provider.bundled_zip() == archive
+    assert provider.bundled_archive() == archive.read_bytes()
     assert provider.bundled_status() == {
         "available": True,
         "asset": Ue4ssAsset(vendor.ASSET, manifest["size"], manifest["sha256"], vendor.UPDATED_AT, vendor.URL),
     }
 
 
-def test_bundled_zip_finds_frozen_resources(tmp_path, monkeypatch):
+def test_bundled_status_uses_metadata_from_same_verified_snapshot(tmp_path, monkeypatch):
+    _, manifest = _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    original_read_manifest = provider._read_manifest
+    calls = 0
+
+    def replacing_manifest():
+        nonlocal calls
+        calls += 1
+        result = original_read_manifest()
+        if calls == 1:
+            changed = dict(result)
+            changed["sha256"] = "0" * 64
+            manifest_path = tmp_path / "third_party" / "ue4ss-palworld" / "manifest.json"
+            manifest_path.write_text(json.dumps(changed), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(provider, "_read_manifest", replacing_manifest)
+    status = provider.bundled_status()
+    assert status["available"] is True
+    assert status["asset"].sha256 == manifest["sha256"]
+    assert calls == 1
+
+
+def test_bundled_archive_finds_frozen_resources(tmp_path, monkeypatch):
     archive, _ = _make_bundle(tmp_path)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
-    assert Ue4ssProvider().bundled_zip() == archive
+    assert Ue4ssProvider().bundled_archive() == archive.read_bytes()
+
+
+def test_bundled_archive_returns_verified_snapshot_if_source_changes_during_or_after_validation(
+    tmp_path, monkeypatch
+):
+    archive, _ = _make_bundle(tmp_path)
+    trusted = archive.read_bytes()
+    replacement = b"untrusted replacement"
+    original_read_bytes = Path.read_bytes
+
+    def replacing_read(path):
+        payload = original_read_bytes(path)
+        if path == archive:
+            path.write_bytes(replacement)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replacing_read)
+    returned = Ue4ssProvider(resource_root=tmp_path).bundled_archive()
+    assert returned == trusted
+    assert archive.read_bytes() == replacement
+
+    archive.write_bytes(b"changed again")
+    assert returned == trusted
 
 
 @pytest.mark.parametrize(
@@ -216,18 +264,18 @@ def test_bundled_zip_finds_frozen_resources(tmp_path, monkeypatch):
         ({"sha256": "bad"}, "sha256"),
     ],
 )
-def test_bundled_zip_rejects_tampered_manifest(tmp_path, change, error):
+def test_bundled_archive_rejects_tampered_manifest(tmp_path, change, error):
     _make_bundle(tmp_path, manifest_changes=change)
     with pytest.raises(ValueError, match=error):
-        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path).bundled_archive()
 
 
-def test_bundled_zip_rejects_manifest_parse_and_read_failures(tmp_path, monkeypatch):
+def test_bundled_archive_rejects_manifest_parse_and_read_failures(tmp_path, monkeypatch):
     _make_bundle(tmp_path)
     manifest_path = tmp_path / "third_party" / "ue4ss-palworld" / "manifest.json"
     manifest_path.write_text("{not-json", encoding="utf-8")
     with pytest.raises(ValueError, match="manifest"):
-        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path).bundled_archive()
 
     original_read_text = Path.read_text
     def failing_read_text(path, *args, **kwargs):
@@ -236,25 +284,25 @@ def test_bundled_zip_rejects_manifest_parse_and_read_failures(tmp_path, monkeypa
         return original_read_text(path, *args, **kwargs)
     monkeypatch.setattr(Path, "read_text", failing_read_text)
     with pytest.raises(ValueError, match="manifest"):
-        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path).bundled_archive()
 
 
-def test_bundled_zip_rejects_missing_unreadable_and_invalid_zip(tmp_path, monkeypatch):
+def test_bundled_archive_rejects_missing_unreadable_and_invalid_zip(tmp_path, monkeypatch):
     archive, manifest = _make_bundle(tmp_path)
     archive.unlink()
     with pytest.raises(ValueError, match="unavailable"):
-        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path).bundled_archive()
 
     archive, manifest = _make_bundle(tmp_path / "unreadable")
-    original_open = Path.open
-    def failing_open(path, *args, **kwargs):
+    original_read_bytes = Path.read_bytes
+    def failing_read_bytes(path):
         if path == archive:
             raise OSError("archive unreadable")
-        return original_open(path, *args, **kwargs)
-    monkeypatch.setattr(Path, "open", failing_open)
+        return original_read_bytes(path)
+    monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
     with pytest.raises(ValueError, match="cannot read"):
-        Ue4ssProvider(resource_root=tmp_path / "unreadable").bundled_zip()
-    monkeypatch.setattr(Path, "open", original_open)
+        Ue4ssProvider(resource_root=tmp_path / "unreadable").bundled_archive()
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
 
     bad_archive, bad_manifest = _make_bundle(tmp_path / "bad-zip")
     bad_archive.write_bytes(b"not a zip")
@@ -262,14 +310,14 @@ def test_bundled_zip_rejects_missing_unreadable_and_invalid_zip(tmp_path, monkey
     bad_manifest["sha256"] = hashlib.sha256(bad_archive.read_bytes()).hexdigest()
     (bad_archive.parent / "manifest.json").write_text(json.dumps(bad_manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid bundled UE4SS ZIP"):
-        Ue4ssProvider(resource_root=tmp_path / "bad-zip").bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path / "bad-zip").bundled_archive()
 
 
-def test_bundled_zip_rejects_changed_bytes_and_missing_required_entry(tmp_path):
+def test_bundled_archive_rejects_changed_bytes_and_missing_required_entry(tmp_path):
     archive, _ = _make_bundle(tmp_path)
     archive.write_bytes(archive.read_bytes() + b"tamper")
     with pytest.raises(ValueError, match="size"):
-        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+        Ue4ssProvider(resource_root=tmp_path).bundled_archive()
 
     hash_root = tmp_path / "changed-hash"
     hash_archive, _ = _make_bundle(hash_root)
@@ -277,12 +325,12 @@ def test_bundled_zip_rejects_changed_bytes_and_missing_required_entry(tmp_path):
     changed[-1] ^= 1
     hash_archive.write_bytes(changed)
     with pytest.raises(ValueError, match="sha256"):
-        Ue4ssProvider(resource_root=hash_root).bundled_zip()
+        Ue4ssProvider(resource_root=hash_root).bundled_archive()
 
     root2 = tmp_path / "second"
     _make_bundle(root2, payloads={"dwmapi.dll": b"x"})
     with pytest.raises(ValueError, match="required"):
-        Ue4ssProvider(resource_root=root2).bundled_zip()
+        Ue4ssProvider(resource_root=root2).bundled_archive()
 
 
 class JsonResponse(ChunkedResponse):
@@ -351,6 +399,18 @@ def test_check_upstream_rejects_same_host_wrong_release_url(tmp_path, url):
         provider.check_upstream()
 
 
+@pytest.mark.parametrize("assets", [None, {}, "UE4SS-Palworld.zip", 1])
+def test_check_upstream_rejects_invalid_assets_container(tmp_path, assets):
+    _make_bundle(tmp_path)
+    payload = json.dumps({"assets": assets}).encode()
+    provider = Ue4ssProvider(
+        resource_root=tmp_path,
+        opener=lambda *_a, **_k: JsonResponse(payload),
+    )
+    with pytest.raises(ValueError, match="invalid GitHub release response"):
+        provider.check_upstream()
+
+
 def test_check_upstream_rejects_oversized_invalid_duplicate_and_missing_updated_at(tmp_path):
     _make_bundle(tmp_path)
     cases = [
@@ -387,6 +447,15 @@ def test_redirect_handler_rejects_http_and_unapproved_hosts():
         handler.redirect_request(None, None, 302, "", {}, "https://evil.example/x")
 
 
+def _zip_payload(*, missing_required=False):
+    output = BytesIO()
+    names = {"dwmapi.dll"} if missing_required else EXPECTED_FILES
+    with zipfile.ZipFile(output, "w") as archive:
+        for name in names:
+            archive.writestr(name, b"payload")
+    return output.getvalue()
+
+
 def _checked_asset(provider, payload, *, url=vendor.URL):
     response = _release({"size": len(payload), "digest": "sha256:" + hashlib.sha256(payload).hexdigest(), "browser_download_url": url})
     provider._opener = lambda *_a, **_k: JsonResponse(response)
@@ -403,7 +472,7 @@ def test_download_verified_requires_provider_constructed_asset(tmp_path):
 def test_download_verified_streams_and_replaces_atomically(tmp_path):
     _make_bundle(tmp_path)
     provider = Ue4ssProvider(resource_root=tmp_path)
-    payload = b"downloaded"
+    payload = _zip_payload()
     asset = _checked_asset(provider, payload)
     target = tmp_path / "target.zip"
     target.write_bytes(b"old")
@@ -418,14 +487,21 @@ def test_download_verified_write_and_replace_failures_clean_temp_and_preserve_ta
 ):
     _make_bundle(tmp_path)
     provider = Ue4ssProvider(resource_root=tmp_path)
-    payload = b"expected"
+    payload = _zip_payload()
     asset = _checked_asset(provider, payload)
     target = tmp_path / "target.zip"
-    temporary = target.with_name(target.name + ".tmp")
     target.write_bytes(b"old")
     provider._opener = lambda *_a, **_k: ChunkedResponse(payload)
+    created = []
+    original_mkstemp = ue4ss_provider.tempfile.mkstemp
 
-    original_open = Path.open
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, name = original_mkstemp(*args, **kwargs)
+        created.append(Path(name))
+        return descriptor, name
+
+    monkeypatch.setattr(ue4ss_provider.tempfile, "mkstemp", recording_mkstemp)
+    original_fdopen = ue4ss_provider.os.fdopen
     class FailingWriter:
         def __init__(self, stream):
             self.stream = stream
@@ -440,28 +516,69 @@ def test_download_verified_write_and_replace_failures_clean_temp_and_preserve_ta
         def write(self, _chunk):
             raise OSError("disk full")
 
-    def failing_open(path, *args, **kwargs):
-        stream = original_open(path, *args, **kwargs)
-        return FailingWriter(stream) if path == temporary else stream
-    monkeypatch.setattr(Path, "open", failing_open)
+    def failing_fdopen(*args, **kwargs):
+        return FailingWriter(original_fdopen(*args, **kwargs))
+    monkeypatch.setattr(ue4ss_provider.os, "fdopen", failing_fdopen)
     with pytest.raises(OSError, match="disk full"):
         provider.download_verified(asset, target)
     assert target.read_bytes() == b"old"
-    assert not temporary.exists()
+    assert all(not path.exists() for path in created)
 
-    monkeypatch.setattr(Path, "open", original_open)
+    monkeypatch.setattr(ue4ss_provider.os, "fdopen", original_fdopen)
     monkeypatch.setattr(ue4ss_provider.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("replace failed")))
     with pytest.raises(OSError, match="replace failed"):
         provider.download_verified(asset, target)
     assert target.read_bytes() == b"old"
-    assert not temporary.exists()
+    assert len(created) == 2
+    assert all(not path.exists() for path in created)
+
+
+def test_download_verified_uses_distinct_exclusive_temporary_files_concurrently(
+    tmp_path, monkeypatch
+):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    payload = _zip_payload()
+    asset = _checked_asset(provider, payload)
+    provider._opener = lambda *_a, **_k: ChunkedResponse(payload)
+    created = []
+    original_mkstemp = ue4ss_provider.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, name = original_mkstemp(*args, **kwargs)
+        created.append(Path(name))
+        return descriptor, name
+
+    monkeypatch.setattr(ue4ss_provider.tempfile, "mkstemp", recording_mkstemp)
+    targets = [tmp_path / "first.zip", tmp_path / "second.zip"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda target: provider.download_verified(asset, target), targets))
+
+    assert results == targets
+    assert len(created) == 2
+    assert len(set(created)) == 2
+    assert all(path.parent == tmp_path and not path.exists() for path in created)
+
+
+def test_download_verified_rejects_invalid_or_incomplete_zip_and_preserves_target(tmp_path):
+    _make_bundle(tmp_path)
+    for payload in (b"not a zip", _zip_payload(missing_required=True)):
+        provider = Ue4ssProvider(resource_root=tmp_path)
+        asset = _checked_asset(provider, payload)
+        target = tmp_path / "target.zip"
+        target.write_bytes(b"old")
+        provider._opener = lambda *_a, payload=payload, **_k: ChunkedResponse(payload)
+        with pytest.raises(ValueError, match="ZIP|required"):
+            provider.download_verified(asset, target)
+        assert target.read_bytes() == b"old"
+        assert set(tmp_path.iterdir()) == {tmp_path / "third_party", target}
 
 
 @pytest.mark.parametrize("kind", ["short", "long", "digest", "read-error", "bad-host"])
 def test_download_verified_failures_clean_temp_and_preserve_target(tmp_path, kind):
     _make_bundle(tmp_path)
     provider = Ue4ssProvider(resource_root=tmp_path)
-    expected = b"expected"
+    expected = _zip_payload()
     asset = _checked_asset(provider, expected)
     target = tmp_path / "target.zip"
     target.write_bytes(b"old")

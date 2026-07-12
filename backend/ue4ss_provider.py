@@ -8,9 +8,11 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.request
 import zipfile
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -74,6 +76,16 @@ def _default_opener(request, *, timeout):
     return opener.open(request, timeout=timeout)
 
 
+def _validate_zip(source) -> None:
+    try:
+        with zipfile.ZipFile(source) as archive:
+            missing = REQUIRED_FILES - set(archive.namelist())
+    except (OSError, zipfile.BadZipFile) as error:
+        raise ValueError("invalid UE4SS ZIP") from error
+    if missing:
+        raise ValueError(f"UE4SS ZIP is missing required entries: {sorted(missing)}")
+
+
 class Ue4ssProvider:
     def __init__(
         self,
@@ -124,37 +136,34 @@ class Ue4ssProvider:
             raise ValueError("invalid manifest updated_at")
         return manifest
 
-    def bundled_zip(self) -> Path:
+    def _validated_bundle(self) -> tuple[bytes, dict[str, object]]:
         manifest = self._read_manifest()
         _, archive_path = self._bundle_paths()
         try:
-            actual_size = archive_path.stat().st_size
-        except OSError as error:
+            payload = archive_path.read_bytes()
+        except FileNotFoundError as error:
             raise ValueError("bundled UE4SS archive is unavailable") from error
-        if actual_size != manifest["size"]:
-            raise ValueError("bundled UE4SS size mismatch")
-        digest = hashlib.sha256()
-        try:
-            with archive_path.open("rb") as stream:
-                while chunk := stream.read(64 * 1024):
-                    digest.update(chunk)
         except OSError as error:
             raise ValueError("cannot read bundled UE4SS archive") from error
-        if not hmac.compare_digest(digest.hexdigest(), str(manifest["sha256"])):
+        if len(payload) != manifest["size"]:
+            raise ValueError("bundled UE4SS size mismatch")
+        if not hmac.compare_digest(
+            hashlib.sha256(payload).hexdigest(), str(manifest["sha256"])
+        ):
             raise ValueError("bundled UE4SS sha256 mismatch")
         try:
-            with zipfile.ZipFile(archive_path) as archive:
-                missing = REQUIRED_FILES - set(archive.namelist())
-        except (OSError, zipfile.BadZipFile) as error:
-            raise ValueError("invalid bundled UE4SS ZIP") from error
-        if missing:
-            raise ValueError(f"bundled UE4SS ZIP is missing required entries: {sorted(missing)}")
-        return archive_path
+            _validate_zip(BytesIO(payload))
+        except ValueError as error:
+            raise ValueError(str(error).replace("UE4SS ZIP", "bundled UE4SS ZIP", 1)) from error
+        return payload, manifest
+
+    def bundled_archive(self) -> bytes:
+        payload, _ = self._validated_bundle()
+        return payload
 
     def bundled_status(self) -> dict[str, object]:
         try:
-            self.bundled_zip()
-            manifest = self._read_manifest()
+            _, manifest = self._validated_bundle()
         except ValueError as error:
             return {"available": False, "error": str(error)}
         return {
@@ -197,6 +206,8 @@ class Ue4ssProvider:
             assets = release["assets"]
         except (UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValueError("invalid GitHub release response") from error
+        if not isinstance(assets, list):
+            raise ValueError("invalid GitHub release response")
         matches = [item for item in assets if isinstance(item, dict) and item.get("name") == ASSET_NAME]
         if len(matches) != 1:
             raise ValueError("fixed UE4SS asset was not found uniquely")
@@ -227,24 +238,34 @@ class Ue4ssProvider:
             raise ValueError("asset must be returned by check_upstream")
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + ".tmp")
-        temporary.unlink(missing_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
         digest = hashlib.sha256()
         total = 0
         try:
-            with self._request(asset.download_url) as response, temporary.open("wb") as output:
+            with self._request(asset.download_url) as response, os.fdopen(
+                descriptor, "w+b"
+            ) as output:
+                descriptor = -1
                 while chunk := response.read(64 * 1024):
                     total += len(chunk)
                     if total > asset.size:
                         raise ValueError("download exceeds declared size")
                     digest.update(chunk)
                     output.write(chunk)
-            if total != asset.size:
-                raise ValueError(f"download size mismatch: expected {asset.size}, got {total}")
-            if not hmac.compare_digest(digest.hexdigest(), asset.sha256):
-                raise ValueError("download sha256 mismatch")
+                if total != asset.size:
+                    raise ValueError(f"download size mismatch: expected {asset.size}, got {total}")
+                if not hmac.compare_digest(digest.hexdigest(), asset.sha256):
+                    raise ValueError("download sha256 mismatch")
+                output.flush()
+                output.seek(0)
+                _validate_zip(output)
             os.replace(temporary, destination)
         except Exception:
+            if descriptor >= 0:
+                os.close(descriptor)
             temporary.unlink(missing_ok=True)
             raise
         return destination
