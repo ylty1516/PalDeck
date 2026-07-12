@@ -8,6 +8,7 @@ import {
   stepParticles,
 } from "../../frontend/petal-engine.js";
 import {
+  createNaturalSpriteAtlas,
   createPetalUpdateCache,
   createWatercolorSpriteSet,
   naturalPalette,
@@ -217,6 +218,20 @@ test("revision guard rejects late save responses after a newer preview", async (
   assert.equal(applied, "server-current");
 });
 
+test("background request revisions allow only the newest reset or upload response", async () => {
+  const revisions = createRevisionGuard();
+  const resetRevision = revisions.bump();
+  const resetResponse = Promise.resolve("reset-response");
+  const uploadRevision = revisions.bump();
+  const uploadResponse = Promise.resolve("upload-response");
+  let appearance = "local-preview";
+  assert.equal(revisions.apply(resetRevision, () => { appearance = "stale-reset"; }), false);
+  assert.equal(await resetResponse, "reset-response");
+  assert.equal(revisions.apply(uploadRevision, () => { appearance = "latest-upload"; }), true);
+  assert.equal(await uploadResponse, "upload-response");
+  assert.equal(appearance, "latest-upload");
+});
+
 function recordingContext() {
   const calls = [];
   const gradient = { addColorStop: (...args) => calls.push(["addColorStop", ...args]) };
@@ -238,33 +253,32 @@ const renderedParticle = Object.freeze({
   gustFactor: 0.32, drift: 20, lifetime: 14,
 });
 
-test("natural renderer uses asymmetric bezier geometry, gradient, vein and depth effects", () => {
-  const context = recordingContext();
-  renderNaturalPetal(context, renderedParticle);
-  const names = context.calls.map(([name]) => name);
-  assert.ok(names.includes("bezierCurveTo"));
-  assert.equal(names.filter((name) => name === "quadraticCurveTo").length, 2);
-  const notchCalls = context.calls.filter(([name]) => name === "quadraticCurveTo");
-  assert.ok(notchCalls[0][4] > -renderedParticle.size * 0.6, "notch must visibly indent below both tips");
-  assert.ok(names.includes("createLinearGradient"));
-  assert.ok(names.includes("stroke"));
-  assert.ok(context.calls.some((call) => call[0] === "set" && call[1] === "shadowBlur"));
-  assert.ok(context.calls.some((call) => call[0] === "scale" && call[2] === renderedParticle.flip));
-  renderNaturalPetal(context, { ...renderedParticle, rotation: 1.2, flip: 0.4 });
-  assert.equal(context.calls.filter(([name]) => name === "createLinearGradient").length, 1);
+test("natural atlas owns local gradients while the transformed renderer reuses sprites", () => {
+  const offscreen = [];
+  const atlas = createNaturalSpriteAtlas({
+    createCanvas: () => {
+      const context = recordingContext();
+      const canvas = { width: 0, height: 0, getContext: () => context };
+      offscreen.push({ canvas, context });
+      return canvas;
+    },
+  });
+  assert.equal(atlas.length, 12);
+  assert.equal(offscreen.length, 12);
+  assert.ok(offscreen.every(({ context }) => context.calls.some(([name]) => name === "createLinearGradient")));
+  assert.ok(offscreen.every(({ context }) => context.calls.filter(([name]) => name === "quadraticCurveTo").length === 2));
+  assert.ok(offscreen.every(({ context }) => context.calls.some(([name]) => name === "stroke")));
 
-  const rotated = recordingContext();
-  renderNaturalPetal(rotated, { ...renderedParticle, rotation: 1.4 });
-  assert.deepEqual(
-    context.calls.filter(([name]) => name === "bezierCurveTo")[0],
-    rotated.calls.filter(([name]) => name === "bezierCurveTo")[0],
-  );
-  const differentlySeeded = recordingContext();
-  renderNaturalPetal(differentlySeeded, { ...renderedParticle, gustFactor: 0.9 });
-  assert.notDeepEqual(
-    context.calls.filter(([name]) => name === "bezierCurveTo")[0],
-    differentlySeeded.calls.filter(([name]) => name === "bezierCurveTo")[0],
-  );
+  const context = recordingContext();
+  renderNaturalPetal(context, renderedParticle, atlas);
+  renderNaturalPetal(context, { ...renderedParticle, rotation: 1.2, flip: 0.4 }, atlas);
+  const names = context.calls.map(([name]) => name);
+  assert.equal(names.filter((name) => name === "createLinearGradient").length, 0);
+  assert.equal(names.filter((name) => name === "drawImage").length, 2);
+  const images = context.calls.filter(([name]) => name === "drawImage").map((call) => call[1]);
+  assert.equal(images[0], images[1]);
+  assert.ok(context.calls.some((call) => call[0] === "scale" && call[2] === renderedParticle.flip));
+  assert.ok(context.calls.some((call) => call[0] === "set" && call[1] === "filter"));
 
   const firstPalette = naturalPalette(renderedParticle);
   assert.deepEqual(naturalPalette({ ...renderedParticle, rotation: 2.8, flip: 0.2 }), firstPalette);

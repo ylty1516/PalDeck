@@ -487,8 +487,28 @@ export const ACTION_HANDLERS = Object.freeze({
   themeIvory: chooseTheme,
   themeStarlit: chooseTheme,
   chooseBackground: () => $("#backgroundInput").click(),
-  resetBackground: async () => { const saved = await request("/api/appearance/background", { method: "DELETE" }); applyAppearance(saved); refreshBackground(); toast("已恢复默认背景", "success"); },
-  selectBackground: async (event) => executeFileOperation(async () => { const file = event.currentTarget.files?.[0]; if (!file) return; const form = new FormData(); form.append("file", file); const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 }); applyAppearance(saved); refreshBackground(); toast("背景已更新", "success"); }),
+  resetBackground: async () => {
+    const revision = appearanceRevisions.bump();
+    const saved = await request("/api/appearance/background", { method: "DELETE" });
+    appearanceRevisions.apply(revision, () => {
+      applyAppearance(saved);
+      refreshBackground();
+      toast("已恢复默认背景", "success");
+    });
+  },
+  selectBackground: async (event) => executeFileOperation(async () => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    const revision = appearanceRevisions.bump();
+    const saved = await request("/api/appearance/background", { method: "POST", body: form, timeout: 60000 });
+    appearanceRevisions.apply(revision, () => {
+      applyAppearance(saved);
+      refreshBackground();
+      toast("背景已更新", "success");
+    });
+  }),
   changeMask: (event) => previewAppearance({ mask: Number(event.currentTarget.value) / 100 }),
   changeBlur: (event) => previewAppearance({ blur: Number(event.currentTarget.value) }),
   positionTopLeft: choosePosition,

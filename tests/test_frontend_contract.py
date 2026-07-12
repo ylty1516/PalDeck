@@ -279,6 +279,8 @@ def test_three_petal_styles_share_engine_lifecycle_and_old_ellipse_is_gone():
     assert "clearRect" in effects
     assert "createWatercolorSpriteSet" in effects
     assert "naturalPalette" in effects
+    assert "createNaturalSpriteAtlas" in effects
+    assert "NATURAL_GRADIENT_CACHE" not in effects
     assert "quadraticCurveTo" in effects
     assert "watercolorSpriteKind" in effects
     assert 'spriteIndex === 0 ? "bloom" : "petal"' in effects
@@ -309,6 +311,10 @@ def test_petal_style_preview_persists_only_on_save_and_recovers_after_failure():
     assert "appearanceRevisions.capture()" in save.group(1)
     assert "appearanceRevisions.apply" in save.group(1)
     assert "previewAppearance" in app
+    for action in ("resetBackground", "selectBackground"):
+        entry = re.search(rf"^  {action}: (.*?)(?=^  [A-Za-z]|^\}}\);)", app, re.S | re.M)
+        assert entry and "appearanceRevisions.bump()" in entry.group(1)
+        assert "appearanceRevisions.apply" in entry.group(1)
 
 
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
@@ -382,7 +388,7 @@ def test_all_async_file_branches_use_shared_actionable_error_mapping():
     handlers = re.search(r"export const ACTION_HANDLERS.*?Object\.freeze\(\{(.*?)^\}\);", app, re.S | re.M)
     assert handlers
     for action in ("selectModFile", "selectUe4ssZip", "selectBackground"):
-        entry = re.search(rf"^  {action}: (.*),$", handlers.group(1), re.M)
+        entry = re.search(rf"^  {action}: (.*?)(?=^  [A-Za-z]|\Z)", handlers.group(1), re.S | re.M)
         assert entry, action
         assert "executeFileOperation" in entry.group(1) or "executeModFileSelection" in entry.group(1)
     dropzone = re.search(r"function setupDropzone\(\) \{(.*?)^\}", app, re.S | re.M)
