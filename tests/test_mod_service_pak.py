@@ -438,7 +438,7 @@ def test_transaction_lock_is_reentrant_in_same_thread(fake_game_root, tmp_path):
     with service._transaction_lock(timeout=0.1):
         with service._transaction_lock(timeout=0.1):
             pass
-    assert not (tmp_path / "data" / ".mod-service.lock").exists()
+    assert (tmp_path / "data" / ".mod-service.lock").is_file()
 
 
 def test_two_services_serialize_writes_without_deleting_each_others_manifests(fake_game_root, tmp_path, monkeypatch):

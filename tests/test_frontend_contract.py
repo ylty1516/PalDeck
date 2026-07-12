@@ -547,6 +547,11 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     assert "authoritative.mods" in app
     assert "authoritative.cleanup_pending" in app
     assert "检测到无法安全自动清理的 Workshop 事务文件" in app
+    for field in ("global_enabled", "deployed", "needs_restart"):
+        assert f"mod.{field}" in render
+    for label in ("全局开关", "已部署", "下次启动生效"):
+        assert label in render
+    assert "下次启动生效" in app
     updater = re.search(r"function replaceWorkshopMods\(authoritative\) \{(.*?)^\}", app, re.S | re.M)
     assert updater
     assert "authoritative.map" in updater.group(1)

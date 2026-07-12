@@ -386,9 +386,15 @@ def create_app(
                 and name.endswith(".quarantine")
             ):
                 safe_cleanup.append(str(candidate))
+        changed_ids = list(operation.get("changed_ids", [workshop_id]))
+        changed = set(changed_ids)
+        mods = workshop.list_mods()
+        for item in mods:
+            if item.get("workshop_id") in changed:
+                item["needs_restart"] = True
         return success({
-            "mods": workshop.list_mods(),
-            "changed_ids": list(operation.get("changed_ids", [workshop_id])),
+            "mods": mods,
+            "changed_ids": changed_ids,
             "cleanup_pending": safe_cleanup,
         })
 

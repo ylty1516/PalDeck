@@ -67,6 +67,7 @@ export function renderMods(container, mods) {
         title,
         el("p", "mod-meta", `${mod.enabled ? "已启用" : "已禁用"} · Workshop ID ${mod.workshop_id} · 作者 ${mod.author || "未知"} · 版本 ${mod.version || "未知"}`),
         el("p", "mod-meta workshop-details", `类型 ${types} · 依赖 ${dependencies}`),
+        el("p", "mod-meta workshop-state", `全局开关：${mod.global_enabled ? "开启" : "关闭"} · ${mod.deployed ? "已部署" : "未部署"}${mod.needs_restart ? " · 下次启动生效" : ""}`),
         el("p", "mod-path", mod.source_dir || ""),
       );
       const actions = el("div", "button-row");

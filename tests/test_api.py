@@ -822,6 +822,9 @@ def _workshop_mod(**changes):
         "dependencies": ["3625000000"],
         "install_types": ["Paks"],
         "enabled": False,
+        "global_enabled": False,
+        "deployed": False,
+        "needs_restart": False,
         "status": "disabled",
         "valid": True,
         "can_delete": False,
@@ -880,9 +883,11 @@ def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation
 
     assert rescanned.status_code == 200
     assert enabled.json["data"]["mods"][0]["enabled"] is True
+    assert enabled.json["data"]["mods"][0]["needs_restart"] is True
     assert enabled.json["data"]["changed_ids"] == ["3625223587"]
     assert enabled.json["data"]["cleanup_pending"] == []
     assert disabled.json["data"]["mods"][0]["enabled"] is False
+    assert disabled.json["data"]["mods"][0]["needs_restart"] is True
     assert disabled.json["data"]["changed_ids"] == ["3625223587"]
     assert workshop.calls == [
         ("list", True),
@@ -970,7 +975,7 @@ def test_enabling_mod_with_workshop_ue4ss_dependency_is_blocked_by_manual_ue4ss(
     app, auth_client, tmp_path, monkeypatch
 ):
     game_root = Path(app.extensions["mod_service"].game_root)
-    settings = game_root / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings = game_root / "Mods" / "PalModSettings.ini"
     settings.parent.mkdir(parents=True, exist_ok=True)
     original = "[PalModSettings]\nbGlobalEnableMod=False\n"
     settings.write_text(original, encoding="utf-8")
@@ -1063,7 +1068,7 @@ def test_concurrent_workshop_ue4ss_enable_and_bundled_install_never_both_succeed
 ):
     workshop_root = tmp_path / "Steam"
     game_root = Path(app.extensions["mod_service"].game_root)
-    settings = game_root / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings = game_root / "Mods" / "PalModSettings.ini"
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text("[PalModSettings]\nbGlobalEnableMod=False\n", encoding="utf-8")
     mod = WorkshopMod(

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.game_detector import UnsafeSteamFileError
+from backend.game_detector import UnsafeSteamFileError, get_mod_directories
 from backend.mod_service import GameRunningError, ModService
 from backend.steam_workshop import (
     SteamWorkshopService,
@@ -105,17 +105,16 @@ def test_manifest_ids_must_be_positive_decimal_and_appid_must_match(tmp_path):
     assert [mod.workshop_id for mod in mods] == ["123"]
 
 
-def test_missing_manifest_recovers_only_direct_numeric_children(tmp_path):
+def test_missing_manifest_ignores_legacy_numeric_content_directories(tmp_path):
     steam = tmp_path / "Steam"
     write_library_config(steam, [])
     write_item(steam, "2002")
     write_item(steam, "not-an-id")
-    nested = steam / "steamapps" / "workshop" / "content" / "1623730" / "container"
-    write_item(nested, "3003")
 
-    mods = SteamWorkshopService(steam).scan(force=True)
+    service = SteamWorkshopService(steam)
 
-    assert [mod.workshop_id for mod in mods] == ["2002"]
+    assert service.scan(force=True) == []
+    assert not any(path.endswith("/2002/Info.json") for path in service.last_scan_paths)
 
 
 @pytest.mark.parametrize(
@@ -493,7 +492,7 @@ def workshop_service(
     write_acf(steam, list(specs))
     for workshop_id, overrides in specs.items():
         write_item(steam, workshop_id, valid_info(**overrides))
-    settings = game / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings = game / "Mods" / "PalModSettings.ini"
     settings.parent.mkdir(parents=True)
     service = SteamWorkshopService(
         steam,
@@ -594,6 +593,65 @@ def test_list_mods_reports_authoritative_active_state_and_ui_identity(tmp_path):
     assert service.active_ue4ss_mods() == []
     settings.write_text("[PalModSettings]\nbGlobalEnableMod=True\nActiveModList=Framework\n", encoding="utf-8")
     assert [item["workshop_id"] for item in service.active_ue4ss_mods()] == ["1002"]
+
+
+def test_settings_path_matches_game_detector_and_never_writes_nested_palworld(tmp_path):
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Core", "Dependencies": []}}
+    )
+    game = service.game_root
+    wrong = game / "Palworld" / "Mods" / "PalModSettings.ini"
+    wrong.parent.mkdir(parents=True)
+    wrong.write_text("sentinel", encoding="utf-8")
+
+    assert settings == get_mod_directories(game)["pal_mod_settings"]
+    service.set_enabled("1001", True)
+
+    assert "ActiveModList=Core" in settings.read_text(encoding="utf-8")
+    assert wrong.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_list_mods_reports_global_deployment_and_initial_restart_state(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Core", "Dependencies": []},
+            "1002": {"PackageName": "Missing", "Dependencies": []},
+        },
+    )
+    settings.write_text(
+        "[PalModSettings]\nbGlobalEnableMod=True\nActiveModList=Core\n",
+        encoding="utf-8",
+    )
+    manifest = service.game_root / "Mods" / "ManagedMods" / "Core" / "InstallManifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+
+    listed = service.list_mods(force=True)
+
+    assert listed[0]["global_enabled"] is True
+    assert listed[0]["deployed"] is True
+    assert listed[0]["needs_restart"] is False
+    assert listed[1]["global_enabled"] is True
+    assert listed[1]["deployed"] is False
+    assert listed[1]["needs_restart"] is False
+
+
+def test_list_mods_treats_unsafe_or_missing_deployment_manifest_as_not_deployed(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    service, _ = workshop_service(tmp_path, {"1001": {"PackageName": "Core"}})
+    manifest = service.game_root / "Mods" / "ManagedMods" / "Core" / "InstallManifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    original = steam_workshop._is_reparse
+    monkeypatch.setattr(
+        steam_workshop,
+        "_is_reparse",
+        lambda path: Path(path) == manifest.parent or original(path),
+    )
+
+    assert service.list_mods(force=True)[0]["deployed"] is False
 
 
 def test_list_mods_requires_global_enable_for_active_state(tmp_path):
@@ -1107,7 +1165,7 @@ def test_scan_and_set_enabled_share_one_cache_snapshot(tmp_path, monkeypatch):
 def test_iterative_dependency_graph_supports_1200_mod_chain(tmp_path, monkeypatch):
     count = 1200
     game = tmp_path / "Game"
-    settings = game / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings = game / "Mods" / "PalModSettings.ini"
     settings.parent.mkdir(parents=True)
     settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
     mods = tuple(

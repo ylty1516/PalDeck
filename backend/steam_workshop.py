@@ -21,6 +21,7 @@ from .game_detector import (
     UnsafeSteamFileError,
     find_steam_libraries,
     get_keyvalues_value,
+    get_mod_directories,
     load_steam_keyvalues,
     read_safe_file,
 )
@@ -143,7 +144,7 @@ class SteamWorkshopService:
     def settings_path(self) -> Path:
         if self.game_root is None:
             raise ValueError("game_root is required for Workshop state changes")
-        return self.game_root / "Palworld" / "Mods" / "PalModSettings.ini"
+        return get_mod_directories(self.game_root)["pal_mod_settings"]
 
     def scan(self, *, force: bool = False) -> list[WorkshopMod]:
         with self._scan_lock:
@@ -167,7 +168,7 @@ class SteamWorkshopService:
             fingerprint.append((str(content), _path_safety_fingerprint(content)))
 
             if manifest_fingerprint is None:
-                ids = self._fallback_ids(content)
+                ids = []
             else:
                 ids = self._manifest_ids(manifest)
 
@@ -198,9 +199,11 @@ class SteamWorkshopService:
         """Return scanned records with state derived from the current settings file."""
         mods = self.scan(force=force)
         active: set[str] = set()
+        global_enabled = False
         if self.game_root is not None and self.settings_path.exists():
             document = _read_settings(self.settings_path)
-            if _global_enabled(document.text):
+            global_enabled = _global_enabled(document.text)
+            if global_enabled:
                 active = {
                     package.casefold()
                     for package in _active_packages(document.text)
@@ -212,10 +215,24 @@ class SteamWorkshopService:
             item.update({
                 "name": mod.mod_name or f"Workshop {mod.workshop_id}",
                 "enabled": enabled,
+                "global_enabled": global_enabled,
+                "deployed": self._is_deployed(mod.package_name),
+                "needs_restart": False,
                 "status": "enabled" if enabled else ("disabled" if mod.valid else "conflict"),
             })
             result.append(item)
         return result
+
+    def _is_deployed(self, package_name: str) -> bool:
+        if self.game_root is None or _SAFE_NAME.fullmatch(package_name) is None:
+            return False
+        managed_root = self.game_root / "Mods" / "ManagedMods"
+        manifest = managed_root / package_name / "InstallManifest.json"
+        return (
+            _is_within(manifest, managed_root)
+            and not _has_reparse_ancestor(manifest)
+            and _is_regular_file(manifest)
+        )
 
     def active_ue4ss_mods(self) -> list[dict[str, object]]:
         return [
@@ -375,27 +392,6 @@ class SteamWorkshopService:
             if _WORKSHOP_ID.fullmatch(key) and isinstance(value, dict)
         ]
         if len(ids) > _MAX_WORKSHOP_ITEMS:
-            return []
-        return sorted(ids, key=int)
-
-    @staticmethod
-    def _fallback_ids(content: Path) -> list[str]:
-        if _has_reparse_ancestor(content) or not _is_real_directory(content):
-            return []
-        ids: list[str] = []
-        examined = 0
-        try:
-            for child in content.iterdir():
-                examined += 1
-                if examined > _MAX_WORKSHOP_ITEMS:
-                    return []
-                if (
-                    _WORKSHOP_ID.fullmatch(child.name)
-                    and _is_real_directory(child)
-                    and not _has_reparse_ancestor(child)
-                ):
-                    ids.append(child.name)
-        except OSError:
             return []
         return sorted(ids, key=int)
 
