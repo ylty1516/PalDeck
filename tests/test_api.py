@@ -279,7 +279,7 @@ def test_update_apply_exits_after_response(app, auth_client, monkeypatch):
     app.config["UPDATE_EXIT_DELAY"] = 0.01
     monkeypatch.setattr(
         "backend.app.self_updater.prepare_update",
-        lambda download_url=None: {"should_exit": True, "prepared": True},
+        lambda: {"should_exit": True, "prepared": True},
     )
 
     response = auth_client.post("/api/update/apply", json={})
@@ -290,6 +290,19 @@ def test_update_apply_exits_after_response(app, auth_client, monkeypatch):
     while not exited and time.time() < deadline:
         time.sleep(0.01)
     assert exited == [0]
+
+
+def test_update_apply_rejects_arbitrary_download_url(auth_client, monkeypatch):
+    called = []
+    monkeypatch.setattr("backend.app.self_updater.prepare_update", lambda: called.append(True))
+
+    response = auth_client.post(
+        "/api/update/apply", json={"url": "https://evil.example/PalDeck.exe"},
+    )
+
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+    assert called == []
 
 
 def test_create_app_removes_orphaned_uploads(tmp_path, fake_game_root, monkeypatch):

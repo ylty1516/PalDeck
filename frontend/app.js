@@ -367,7 +367,7 @@ export const ACTION_HANDLERS = Object.freeze({
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
   selectUe4ssZip: async (event) => executeFileOperation(() => installZip(event.currentTarget.files?.[0])),
   checkUpdate: async () => { state.updateInfo = await request("/api/update/check", { timeout: 30000 }); $("#updateStatus").textContent = state.updateInfo.update_available ? `发现新版本 ${state.updateInfo.remote_version}` : `已是最新版 ${state.updateInfo.local_version}`; },
-  applyUpdate: async () => { const result = await request("/api/update/apply", { method: "POST", body: { url: state.updateInfo?.asset?.browser_download_url }, timeout: 120000 }); toast(result.message || "更新已准备，将自动重启", "success"); },
+  applyUpdate: async () => { const result = await request("/api/update/apply", { method: "POST", body: {}, timeout: 120000 }); toast(result.message || "更新已准备，将自动重启", "success"); },
   themeAurora: chooseTheme,
   themeIvory: chooseTheme,
   themeStarlit: chooseTheme,

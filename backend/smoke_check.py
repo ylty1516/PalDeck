@@ -7,11 +7,19 @@ import json
 import os
 import re
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _REPORT_PATH = re.compile(r"^[Ff]:[\\/]")
+_HANDSHAKE = re.compile(r"^[0-9a-fA-F]{32}$")
 _THEMES = ("aurora-glass", "ivory-sakura", "starlit-night")
+
+
+@dataclass(frozen=True)
+class SmokeContext:
+    report_path: Path
+    marker_path: Path
 
 
 def smoke_report_path(value: str | None) -> Path | None:
@@ -28,6 +36,34 @@ def smoke_report_path(value: str | None) -> Path | None:
     ):
         return None
     return candidate
+
+
+def smoke_context(
+    report_value: str | None,
+    handshake: str | None,
+    data_dir: str | os.PathLike[str],
+    *,
+    frozen: bool,
+) -> SmokeContext | None:
+    """Authorize the one-shot packaged smoke flow without exposing a runtime endpoint."""
+    if not frozen or not _HANDSHAKE.fullmatch(handshake or ""):
+        return None
+    report_path = smoke_report_path(report_value)
+    if report_path is None or report_path.exists():
+        return None
+    writable = Path(data_dir).resolve(strict=False)
+    if writable.drive.casefold() != "f:":
+        return None
+    marker_path = (writable / f".paldeck-smoke-{handshake}").resolve(strict=False)
+    if marker_path.parent != writable or not marker_path.is_file():
+        return None
+    try:
+        marker_value = marker_path.read_text(encoding="ascii")
+    except OSError:
+        return None
+    if marker_value != handshake:
+        return None
+    return SmokeContext(report_path=report_path, marker_path=marker_path)
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:

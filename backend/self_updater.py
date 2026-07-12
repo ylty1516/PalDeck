@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -10,14 +12,18 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
 
-from .version import APP_VERSION, GITHUB_OWNER, GITHUB_REPO
+from .version import APP_VERSION
 
 USER_AGENT = f"PalworldModManager/{APP_VERSION}"
+TRUSTED_GITHUB_OWNER = "ylty1516"
+TRUSTED_GITHUB_REPO = "palworld-mod-manager"
+_CHECKSUM_LINE = re.compile(r"^([0-9a-fA-F]{64})  ([^\r\n]+)\r?\n?$")
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -76,7 +82,7 @@ def _api_get(url: str) -> Any:
 
 
 def fetch_latest_release() -> dict[str, Any]:
-    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+    url = f"https://api.github.com/repos/{TRUSTED_GITHUB_OWNER}/{TRUSTED_GITHUB_REPO}/releases/latest"
     data = _api_get(url)
     if not isinstance(data, dict) or data.get("message") == "Not Found":
         raise RuntimeError("未找到 Release，请确认仓库已发布版本")
@@ -118,13 +124,35 @@ def _pick_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
     return best
 
 
+def _select_release_assets(
+    assets: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    asset = _pick_asset(assets)
+    if asset is None:
+        return None, None
+    checksum_name = f"{asset.get('name', '')}.sha256"
+    checksum = next((item for item in assets if item.get("name") == checksum_name), None)
+    return asset, checksum
+
+
+def _public_asset(asset: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not asset:
+        return None
+    return {
+        "name": asset.get("name"),
+        "size": asset.get("size"),
+        "browser_download_url": asset.get("browser_download_url"),
+        "content_type": asset.get("content_type"),
+    }
+
+
 def check_for_update() -> dict[str, Any]:
     local = current_version()
     release = fetch_latest_release()
     tag = (release.get("tag_name") or release.get("name") or "").strip()
     remote = tag.lstrip("vV") or "0"
     assets = release.get("assets") or []
-    asset = _pick_asset(assets)
+    asset, checksum = _select_release_assets(assets)
     cmp = compare_versions(remote, local)
     return {
         "local_version": local,
@@ -138,23 +166,83 @@ def check_for_update() -> dict[str, Any]:
         "is_same": cmp == 0,
         "is_frozen": is_frozen(),
         "executable": str(executable_path()) if executable_path() else None,
-        "asset": {
-            "name": asset.get("name"),
-            "size": asset.get("size"),
-            "browser_download_url": asset.get("browser_download_url"),
-            "content_type": asset.get("content_type"),
-        }
-        if asset
-        else None,
-        "github": f"{GITHUB_OWNER}/{GITHUB_REPO}",
+        "asset": _public_asset(asset),
+        "checksum_asset": _public_asset(checksum),
+        "github": f"{TRUSTED_GITHUB_OWNER}/{TRUSTED_GITHUB_REPO}",
     }
+
+
+def _validate_release_url(url: str, asset_name: str) -> None:
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.fragment:
+        raise RuntimeError("更新资源 URL 不是受信任的 GitHub Release HTTPS 地址")
+    if parsed.hostname == "github.com":
+        prefix = f"/{TRUSTED_GITHUB_OWNER}/{TRUSTED_GITHUB_REPO}/releases/download/"
+        decoded_path = urllib.parse.unquote(parsed.path)
+        if not decoded_path.startswith(prefix) or Path(decoded_path).name != asset_name:
+            raise RuntimeError("更新资源 URL 不属于受信任的 GitHub Release")
+    elif parsed.hostname == "objects.githubusercontent.com":
+        if Path(urllib.parse.unquote(parsed.path)).name != asset_name:
+            raise RuntimeError("更新资源 URL 与 Release 资产名称不一致")
+    else:
+        raise RuntimeError("更新资源 URL 主机不受信任")
+
+
+class _TrustedReleaseRedirectHandler(urllib.request.HTTPRedirectHandler):
+    _HOSTS = {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlsplit(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in self._HOSTS:
+            raise RuntimeError("GitHub Release 重定向目标不受信任")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as f:
+    opener = urllib.request.build_opener(_TrustedReleaseRedirectHandler())
+    with opener.open(req, timeout=300) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
+
+
+def _download_verified_asset(
+    asset: dict[str, Any], checksum_asset: dict[str, Any] | None, staging_dir: Path,
+) -> Path:
+    name = str(asset.get("name") or "")
+    if not name or Path(name).name != name:
+        raise RuntimeError("Release 更新资产名称无效")
+    if checksum_asset is None:
+        raise RuntimeError("Release 更新资产缺少 checksum sidecar")
+    checksum_name = str(checksum_asset.get("name") or "")
+    if checksum_name != f"{name}.sha256" or Path(checksum_name).name != checksum_name:
+        raise RuntimeError("Release checksum 资产名称无效")
+    asset_url = str(asset.get("browser_download_url") or "")
+    checksum_url = str(checksum_asset.get("browser_download_url") or "")
+    _validate_release_url(asset_url, name)
+    _validate_release_url(checksum_url, checksum_name)
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = staging_dir / name
+    checksum_path = staging_dir / checksum_name
+    raw_path.unlink(missing_ok=True)
+    checksum_path.unlink(missing_ok=True)
+    try:
+        _download(checksum_url, checksum_path)
+        checksum_text = checksum_path.read_text(encoding="ascii")
+        match = _CHECKSUM_LINE.fullmatch(checksum_text)
+        if not match or match.group(2) != name:
+            raise RuntimeError("Release checksum 格式或资产名称无效")
+        _download(asset_url, raw_path)
+        actual = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        if not hmac.compare_digest(actual, match.group(1).casefold()):
+            raise RuntimeError("Release 资产 SHA-256 校验失败")
+        checksum_path.unlink(missing_ok=True)
+        return raw_path
+    except Exception:
+        raw_path.unlink(missing_ok=True)
+        checksum_path.unlink(missing_ok=True)
+        raise
 
 
 def _extract_exe_from_zip(zip_path: Path, dest_exe: Path) -> Path:
@@ -178,20 +266,18 @@ def _extract_exe_from_zip(zip_path: Path, dest_exe: Path) -> Path:
         return target
 
 
-def prepare_update(download_url: str | None = None) -> dict[str, Any]:
+def prepare_update() -> dict[str, Any]:
     """
     Download new build next to current EXE and write a batch updater.
     Caller should exit the app after this so the batch can replace the file.
     """
     info = check_for_update()
     if not info.get("update_available") and not os.environ.get("PALMOD_FORCE_UPDATE"):
-        # Allow re-download same version if forced via asset url
-        if not download_url:
-            raise RuntimeError("当前已是最新版本，无需更新")
+        raise RuntimeError("当前已是最新版本，无需更新")
 
     asset = info.get("asset")
-    url = download_url or (asset or {}).get("browser_download_url")
-    if not url:
+    checksum_asset = info.get("checksum_asset")
+    if not asset:
         raise RuntimeError("Release 中没有可下载的更新文件（需要 PalDeck.exe、PalMod.exe 或 zip）")
 
     exe = executable_path()
@@ -205,12 +291,10 @@ def prepare_update(download_url: str | None = None) -> dict[str, Any]:
         target_exe = exe  # final destination
 
     staging_dir.mkdir(parents=True, exist_ok=True)
-    name = (asset or {}).get("name") or "update.bin"
-    raw_path = staging_dir / name
-
-    _download(url, raw_path)
-
     new_exe = staging_dir / "PalDeck_new.exe"
+    new_exe.unlink(missing_ok=True)
+    raw_path = _download_verified_asset(asset, checksum_asset, staging_dir)
+
     if raw_path.suffix.lower() == ".zip":
         _extract_exe_from_zip(raw_path, new_exe)
     elif raw_path.suffix.lower() == ".exe":

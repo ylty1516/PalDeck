@@ -10,13 +10,17 @@ if (-not $repoRoot.StartsWith("F:\", [System.StringComparison]::OrdinalIgnoreCas
 }
 Set-Location $repoRoot
 
-$version = "2.0.0"
 $cacheRoot = Join-Path $repoRoot ".build-cache"
 $env:TMP = Join-Path $cacheRoot "tmp"
 $env:TEMP = Join-Path $cacheRoot "temp"
 $env:PIP_CACHE_DIR = Join-Path $cacheRoot "pip"
 $env:PYTHONPYCACHEPREFIX = Join-Path $cacheRoot "pycache"
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $cacheRoot "pyinstaller-config"
+$env:PYTHONHASHSEED = "0"
+$env:SOURCE_DATE_EPOCH = (& git log -1 --format=%ct).Trim()
+if ($LASTEXITCODE -ne 0 -or $env:SOURCE_DATE_EPOCH -notmatch "^\d+$") {
+    throw "无法从 Git commit 读取 SOURCE_DATE_EPOCH"
+}
 @($cacheRoot, $env:TMP, $env:TEMP, $env:PIP_CACHE_DIR, $env:PYTHONPYCACHEPREFIX, $env:PYINSTALLER_CONFIG_DIR) |
     ForEach-Object { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
 
@@ -35,14 +39,29 @@ function Invoke-Checked {
 
 $venvDir = Join-Path $repoRoot ".venv-build"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
-if (-not (Test-Path $venvPython -PathType Leaf)) {
-    Invoke-Checked "创建隔离构建环境" "py" @("-3", "-m", "venv", $venvDir)
+$workDir = Join-Path $cacheRoot "pyinstaller-work"
+$specDir = Join-Path $cacheRoot "spec"
+$legacyBuildDir = Join-Path $repoRoot "build"
+@($venvDir, $workDir, $specDir, $legacyBuildDir, $env:PYINSTALLER_CONFIG_DIR) | ForEach-Object {
+    if (Test-Path $_) { Remove-Item $_ -Recurse -Force }
 }
+
+Invoke-Checked "确认 Python 3.13" "py" @(
+    "-3.13", "-c", "import sys; assert sys.version_info[:2] == (3, 13), sys.version"
+)
+Invoke-Checked "重建隔离构建环境" "py" @("-3.13", "-m", "venv", $venvDir)
+Invoke-Checked "确认构建环境 Python 3.13" $venvPython @(
+    "-c", "import sys; assert sys.version_info[:2] == (3, 13), sys.version"
+)
 
 Invoke-Checked "安装锁定的运行、测试与打包依赖" $venvPython @(
     "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes",
     "-r", (Join-Path $repoRoot "requirements-lock.txt")
 )
+$version = (& $venvPython -c "from backend.version import APP_VERSION; print(APP_VERSION)").Trim()
+if ($LASTEXITCODE -ne 0 -or $version -notmatch "^\d+\.\d+\.\d+$") {
+    throw "无法从 backend/version.py 读取有效 APP_VERSION"
+}
 Invoke-Checked "运行完整 pytest" $venvPython @("-m", "pytest", "-q")
 
 $javascriptFiles = Get-ChildItem (Join-Path $repoRoot "frontend") -Filter "*.js" -File -Recurse | Sort-Object FullName
@@ -65,9 +84,6 @@ $distDir = Join-Path $repoRoot "dist"
 $portableDir = Join-Path $distDir "PalDeck-portable"
 $zipPath = Join-Path $distDir "PalDeck-v$version-windows-portable.zip"
 $shaPath = "$zipPath.sha256"
-$workDir = Join-Path $cacheRoot "pyinstaller-work"
-$specDir = Join-Path $cacheRoot "spec"
-
 @($portableDir, $workDir, $specDir) | ForEach-Object {
     if (Test-Path $_) { Remove-Item $_ -Recurse -Force }
 }
@@ -120,9 +136,16 @@ PalDeck v$version - Windows 便携版
 
 项目说明见：https://github.com/ylty1516/palworld-mod-manager
 "@
-Set-Content -Path (Join-Path $portableDir "README.txt") -Value $portableReadme -Encoding UTF8
+[System.IO.File]::WriteAllText(
+    (Join-Path $portableDir "README.txt"), $portableReadme + "`n", (New-Object System.Text.UTF8Encoding($false))
+)
 
-Compress-Archive -Path $portableDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
+Invoke-Checked "创建确定性便携 ZIP" $venvPython @(
+    (Join-Path $repoRoot "scripts\create_portable_zip.py"),
+    $portableDir,
+    $zipPath,
+    "--epoch", $env:SOURCE_DATE_EPOCH
+)
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashLine = "$hash  $([System.IO.Path]::GetFileName($zipPath))"
 [System.IO.File]::WriteAllText($shaPath, $hashLine + "`n", [System.Text.Encoding]::ASCII)

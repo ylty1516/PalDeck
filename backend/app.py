@@ -465,9 +465,11 @@ def create_app(
 
     @app.post("/api/update/apply")
     def update_apply():
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if body not in (None, {}):
+            raise ApiError("更新请求不接受下载 URL 或其他参数", 400, "invalid_input")
         try:
-            result = self_updater.prepare_update(download_url=body.get("url"))
+            result = self_updater.prepare_update()
         except Exception as exc:
             app.logger.warning("Update preparation failed", exc_info=exc)
             return failure("远程服务请求失败", 502, "upstream_error")
@@ -576,17 +578,28 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
     if not server_ready:
         print("服务启动超时，请检查防火墙。")
 
-    report_path = smoke_check.smoke_report_path(os.environ.get("PALDECK_SMOKE_REPORT"))
-    if report_path is not None:
+    frozen = self_updater.is_frozen()
+    smoke = smoke_check.smoke_context(
+        os.environ.get("PALDECK_SMOKE_REPORT"),
+        os.environ.get("PALDECK_SMOKE_HANDSHAKE"),
+        application.config["DATA_DIR"],
+        frozen=frozen,
+    )
+    if smoke is not None:
         def run_smoke_report() -> None:
+            failed = False
             try:
                 if not server_ready:
                     raise RuntimeError("loopback server did not become ready")
                 smoke_check.run_http_smoke(
-                    base_url, token, report_path, frozen=self_updater.is_frozen(),
+                    base_url, token, smoke.report_path, frozen=frozen,
                 )
             except Exception:
+                failed = True
                 traceback.print_exc()
+            finally:
+                smoke.marker_path.unlink(missing_ok=True)
+            if failed:
                 os._exit(2)
 
         threading.Thread(target=run_smoke_report, name="paldeck-smoke-report", daemon=True).start()

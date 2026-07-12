@@ -22,7 +22,10 @@ def _resource_root() -> Path:
 
 
 def _writable_data_dir() -> Path:
-    """Config/registry should live next to the EXE (or project), not in temp."""
+    """Use an explicit data directory when supplied, otherwise stay portable."""
+    configured = os.environ.get("PALMOD_DATA_DIR")
+    if configured:
+        return Path(configured).resolve()
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "data"
     return Path(__file__).resolve().parent / "data"

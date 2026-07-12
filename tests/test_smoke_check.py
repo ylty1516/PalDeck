@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
 from werkzeug.serving import make_server
 
 from backend.app import create_app
-from backend.smoke_check import run_http_smoke, smoke_report_path
+from backend.smoke_check import run_http_smoke, smoke_context, smoke_report_path
 
 
 def test_smoke_report_path_only_accepts_f_drive_file():
@@ -61,6 +63,34 @@ def test_http_smoke_uses_real_cookie_session_and_records_all_checks(tmp_path, mo
         "petals_off",
         "default_background_webp",
     }
+
+
+def test_smoke_entry_requires_frozen_handshake_marker_and_tree_owned_script():
+    root = Path(__file__).resolve().parents[1]
+    data_dir = root / ".tmp" / f"smoke-context-{uuid.uuid4().hex}"
+    report_path = data_dir / "report.json"
+    handshake = uuid.uuid4().hex
+    marker = data_dir / f".paldeck-smoke-{handshake}"
+    data_dir.mkdir(parents=True)
+    try:
+        assert smoke_context(str(report_path), handshake, data_dir, frozen=False) is None
+        assert smoke_context(str(report_path), handshake, data_dir, frozen=True) is None
+        marker.write_text(handshake, encoding="ascii")
+        context = smoke_context(str(report_path), handshake, data_dir, frozen=True)
+        assert context is not None
+        assert context.report_path == report_path.resolve()
+        assert context.marker_path == marker.resolve()
+        report_path.write_text("{}", encoding="ascii")
+        assert smoke_context(str(report_path), handshake, data_dir, frozen=True) is None
+
+        smoke_script = (root / "scripts" / "smoke_portable.ps1").read_text(encoding="utf-8-sig")
+        assert "ParentProcessId" in smoke_script
+        assert "$started.Id" in smoke_script
+        assert "Get-ProcessTreeIds" in smoke_script
+        assert "Get-Process -Name" not in smoke_script
+        assert "$before" not in smoke_script
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def test_http_smoke_failure_writes_error_report(tmp_path):
