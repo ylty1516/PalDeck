@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -59,11 +60,15 @@ def test_notice_credits_sources_and_contains_fixed_links():
 
 
 class ChunkedResponse:
-    def __init__(self, payload: bytes):
+    def __init__(self, payload: bytes, url="https://github.com/Okaetsu/RE-UE4SS/releases/download/experimental-palworld/UE4SS-Palworld.zip"):
         self.stream = BytesIO(payload)
+        self.url = url
 
     def read(self, size: int = -1) -> bytes:
         return self.stream.read(min(size, 3))
+
+    def geturl(self):
+        return self.url
 
     def __enter__(self):
         return self
@@ -148,3 +153,208 @@ def test_download_read_error_preserves_existing_target_and_removes_temp(tmp_path
 
     assert destination.read_bytes() == b"existing"
     assert not destination.with_suffix(".zip.tmp").exists()
+
+
+# Runtime provider trust-chain tests.
+from backend.ue4ss_provider import Ue4ssAsset, Ue4ssProvider, _SafeRedirectHandler
+
+
+def _make_bundle(root: Path, *, payloads=None, manifest_changes=None):
+    directory = root / "third_party" / "ue4ss-palworld"
+    directory.mkdir(parents=True)
+    archive = directory / "UE4SS-Palworld.zip"
+    payloads = payloads or {name: b"x" for name in EXPECTED_FILES}
+    with zipfile.ZipFile(archive, "w") as output:
+        for name, payload in payloads.items():
+            output.writestr(name, payload)
+    manifest = {
+        "source": vendor.URL,
+        "repo": vendor.REPO,
+        "tag": vendor.TAG,
+        "asset": vendor.ASSET,
+        "size": archive.stat().st_size,
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "updated_at": vendor.UPDATED_AT,
+    }
+    manifest.update(manifest_changes or {})
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return archive, manifest
+
+
+def test_asset_is_immutable():
+    asset = Ue4ssAsset("a", 1, "0" * 64, "now", "https://github.com/x")
+    with pytest.raises((AttributeError, TypeError)):
+        asset.size = 2
+
+
+def test_bundled_zip_finds_development_resources_and_reports_status(tmp_path):
+    archive, manifest = _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    assert provider.bundled_zip() == archive
+    assert provider.bundled_status() == {
+        "available": True,
+        "asset": Ue4ssAsset(vendor.ASSET, manifest["size"], manifest["sha256"], vendor.UPDATED_AT, vendor.URL),
+    }
+
+
+def test_bundled_zip_finds_frozen_resources(tmp_path, monkeypatch):
+    archive, _ = _make_bundle(tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert Ue4ssProvider().bundled_zip() == archive
+
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        ({"extra": 1}, "schema"),
+        ({"repo": "https://github.com/evil/repo"}, "repo"),
+        ({"tag": "latest"}, "tag"),
+        ({"asset": "other.zip"}, "asset"),
+        ({"size": 8 * 1024 * 1024 + 1}, "size"),
+        ({"sha256": "bad"}, "sha256"),
+    ],
+)
+def test_bundled_zip_rejects_tampered_manifest(tmp_path, change, error):
+    _make_bundle(tmp_path, manifest_changes=change)
+    with pytest.raises(ValueError, match=error):
+        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+
+def test_bundled_zip_rejects_changed_bytes_and_missing_required_entry(tmp_path):
+    archive, _ = _make_bundle(tmp_path)
+    archive.write_bytes(archive.read_bytes() + b"tamper")
+    with pytest.raises(ValueError, match="size"):
+        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+    hash_root = tmp_path / "changed-hash"
+    hash_archive, _ = _make_bundle(hash_root)
+    changed = bytearray(hash_archive.read_bytes())
+    changed[-1] ^= 1
+    hash_archive.write_bytes(changed)
+    with pytest.raises(ValueError, match="sha256"):
+        Ue4ssProvider(resource_root=hash_root).bundled_zip()
+
+    root2 = tmp_path / "second"
+    _make_bundle(root2, payloads={"dwmapi.dll": b"x"})
+    with pytest.raises(ValueError, match="required"):
+        Ue4ssProvider(resource_root=root2).bundled_zip()
+
+
+class JsonResponse(ChunkedResponse):
+    pass
+
+
+def _release(asset_overrides=None):
+    asset = {
+        "name": vendor.ASSET,
+        "size": 20,
+        "digest": "sha256:" + "a" * 64,
+        "updated_at": "2026-07-10T00:00:00Z",
+        "browser_download_url": vendor.URL,
+    }
+    asset.update(asset_overrides or {})
+    return json.dumps({"assets": [asset]}).encode()
+
+
+def test_check_upstream_uses_fixed_api_headers_timeout_and_compares_digest(tmp_path):
+    _, manifest = _make_bundle(tmp_path)
+    calls = []
+    def opener(request, *, timeout):
+        calls.append((request, timeout))
+        return JsonResponse(_release())
+    result = Ue4ssProvider(resource_root=tmp_path, opener=opener).check_upstream()
+    assert result["asset"].sha256 == "a" * 64
+    assert result["update_available"] is (manifest["sha256"] != "a" * 64)
+    assert calls[0][0].full_url == "https://api.github.com/repos/Okaetsu/RE-UE4SS/releases/tags/experimental-palworld"
+    assert calls[0][0].get_header("User-agent") == "PalDeck/2.1"
+    assert calls[0][1] == 30
+
+
+def test_check_upstream_reports_same_digest(tmp_path):
+    _, manifest = _make_bundle(tmp_path)
+    response = _release({"digest": "sha256:" + manifest["sha256"]})
+    result = Ue4ssProvider(resource_root=tmp_path, opener=lambda *_a, **_k: JsonResponse(response)).check_upstream()
+    assert result["update_available"] is False
+
+
+@pytest.mark.parametrize("override,match", [
+    ({"digest": None}, "digest"), ({"digest": "sha256:bad"}, "digest"),
+    ({"name": "wrong.zip"}, "asset"), ({"size": 0}, "size"),
+    ({"size": 8 * 1024 * 1024 + 1}, "size"),
+    ({"browser_download_url": "https://evil.example/file.zip"}, "URL"),
+    ({"browser_download_url": "http://github.com/file.zip"}, "URL"),
+])
+def test_check_upstream_rejects_untrusted_metadata(tmp_path, override, match):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path, opener=lambda *_a, **_k: JsonResponse(_release(override)))
+    with pytest.raises(ValueError, match=match):
+        provider.check_upstream()
+
+
+def test_check_upstream_rejects_untrusted_final_response_host(tmp_path):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(
+        resource_root=tmp_path,
+        opener=lambda *_a, **_k: JsonResponse(_release(), "https://evil.example/release"),
+    )
+    with pytest.raises(ValueError, match="response URL"):
+        provider.check_upstream()
+
+
+def test_redirect_handler_rejects_http_and_unapproved_hosts():
+    handler = _SafeRedirectHandler()
+    with pytest.raises(ValueError, match="redirect"):
+        handler.redirect_request(None, None, 302, "", {}, "http://github.com/x")
+    with pytest.raises(ValueError, match="redirect"):
+        handler.redirect_request(None, None, 302, "", {}, "https://evil.example/x")
+
+
+def _checked_asset(provider, payload, *, url=vendor.URL):
+    response = _release({"size": len(payload), "digest": "sha256:" + hashlib.sha256(payload).hexdigest(), "browser_download_url": url})
+    provider._opener = lambda *_a, **_k: JsonResponse(response)
+    return provider.check_upstream()["asset"]
+
+
+def test_download_verified_requires_provider_constructed_asset(tmp_path):
+    provider = Ue4ssProvider(resource_root=tmp_path, opener=lambda *_a, **_k: None)
+    asset = Ue4ssAsset(vendor.ASSET, 1, hashlib.sha256(b"x").hexdigest(), "now", vendor.URL)
+    with pytest.raises(ValueError, match="check_upstream"):
+        provider.download_verified(asset, tmp_path / "x.zip")
+
+
+def test_download_verified_streams_and_replaces_atomically(tmp_path):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    payload = b"downloaded"
+    asset = _checked_asset(provider, payload)
+    target = tmp_path / "target.zip"
+    target.write_bytes(b"old")
+    provider._opener = lambda *_a, **_k: ChunkedResponse(payload)
+    assert provider.download_verified(asset, target) == target
+    assert target.read_bytes() == payload
+    assert not target.with_name(target.name + ".tmp").exists()
+
+
+@pytest.mark.parametrize("kind", ["short", "long", "digest", "read-error", "bad-host"])
+def test_download_verified_failures_clean_temp_and_preserve_target(tmp_path, kind):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    expected = b"expected"
+    asset = _checked_asset(provider, expected)
+    target = tmp_path / "target.zip"
+    target.write_bytes(b"old")
+    if kind == "short": response = ChunkedResponse(expected[:-1])
+    elif kind == "long": response = ChunkedResponse(expected + b"x")
+    elif kind == "digest": response = ChunkedResponse(b"X" * len(expected))
+    elif kind == "bad-host": response = ChunkedResponse(expected, "https://evil.example/x")
+    else:
+        class Broken(ChunkedResponse):
+            def read(self, size=-1):
+                raise OSError("lost")
+        response = Broken(expected)
+    provider._opener = lambda *_a, **_k: response
+    with pytest.raises((ValueError, OSError)):
+        provider.download_verified(asset, target)
+    assert target.read_bytes() == b"old"
+    assert not target.with_name(target.name + ".tmp").exists()
