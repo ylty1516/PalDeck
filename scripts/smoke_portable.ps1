@@ -94,8 +94,10 @@ try {
     $failedItems = @($report.items | Where-Object { $_.pass -ne $true })
     if ($failedItems.Count -ne 0) { throw "Self-check report contains failed items" }
     $expectedItems = @(
-        "index_four_views_and_petal_canvas", "health", "fresh_data_no_game_path", "appearance_get",
+        "index_five_views_and_release_markers", "health", "fresh_data_no_game_path",
+        "workshop_empty_state", "bundled_ue4ss_metadata", "appearance_get",
         "theme_aurora-glass", "theme_ivory-sakura", "theme_starlit-night",
+        "petal_style_natural", "petal_style_watercolor", "petal_style_minimal",
         "petals_high", "petals_off", "default_background_webp"
     )
     $actualItems = @($report.items | ForEach-Object name)

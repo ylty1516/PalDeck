@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.ue4ss_provider import Ue4ssProvider
+
 _REPORT_PATH = re.compile(r"^[Ff]:[\\/]")
 _HANDSHAKE = re.compile(r"^[0-9a-fA-F]{32}$")
 _THEMES = ("aurora-glass", "ivory-sakura", "starlit-night")
@@ -103,11 +105,17 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             index = response.read().decode("utf-8")
             if response.status != 200:
                 raise AssertionError(f"index: HTTP {response.status}")
-        markers = [f'id="view-{name}"' for name in ("mods", "import", "nexus", "settings")]
-        missing = [marker for marker in [*markers, 'id="petalCanvas"'] if marker not in index]
+        markers = [
+            *(f'id="view-{name}"' for name in ("mods", "import", "nexus", "settings", "credits")),
+            'id="petalCanvas"',
+            'id="ue4ssUpdatedAt"',
+            'id="ue4ssDigest"',
+            *(f'data-petal-style="{style}"' for style in ("natural", "watercolor", "minimal")),
+        ]
+        missing = [marker for marker in markers if marker not in index]
         if missing:
             raise AssertionError(f"index missing markers: {missing}")
-        passed("index_four_views_and_petal_canvas", {"markers": [*markers, 'id="petalCanvas"']})
+        passed("index_five_views_and_release_markers", {"markers": markers})
 
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:
@@ -119,6 +127,30 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             raise AssertionError(f"fresh data game status mismatch: {game}")
         passed("fresh_data_no_game_path", game)
 
+        mods = json_data("api/mods")
+        if mods != []:
+            raise AssertionError(f"fresh data Workshop state is not empty: {mods}")
+        passed("workshop_empty_state", {"mods": mods, "game_configured": False})
+
+        credit_entries = json_data("api/credits")
+        okaetsu = next((item for item in credit_entries if item.get("id") == "okaetsu"), None)
+        bundled = Ue4ssProvider().bundled_status()
+        asset = bundled.get("asset")
+        if (
+            not okaetsu
+            or okaetsu.get("source_url") != "https://github.com/Okaetsu/RE-UE4SS"
+            or okaetsu.get("license") != "MIT"
+            or bundled.get("available") is not True
+            or asset is None
+            or not re.fullmatch(r"[0-9a-f]{64}", asset.sha256)
+        ):
+            raise AssertionError(f"bundled UE4SS metadata mismatch: credit={okaetsu}, status={bundled}")
+        passed("bundled_ue4ss_metadata", {
+            "source_url": okaetsu["source_url"], "license": okaetsu["license"],
+            "asset": asset.name, "size": asset.size, "sha256": asset.sha256,
+            "updated_at": asset.updated_at,
+        })
+
         appearance = json_data("api/appearance")
         passed("appearance_get", appearance)
 
@@ -128,6 +160,16 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             if updated.get("theme") != theme or confirmed.get("theme") != theme:
                 raise AssertionError(f"theme did not persist: {theme}")
             passed(f"theme_{theme}", {"post": updated.get("theme"), "get": confirmed.get("theme")})
+
+        for petal_style in ("natural", "watercolor", "minimal"):
+            updated = json_data("api/appearance", method="POST", body={"petal_style": petal_style})
+            confirmed = json_data("api/appearance")
+            if updated.get("petal_style") != petal_style or confirmed.get("petal_style") != petal_style:
+                raise AssertionError(f"petal style did not persist: {petal_style}")
+            passed(
+                f"petal_style_{petal_style}",
+                {"post": updated.get("petal_style"), "get": confirmed.get("petal_style")},
+            )
 
         for petals in ("high", "off"):
             updated = json_data("api/appearance", method="POST", body={"petals": petals})

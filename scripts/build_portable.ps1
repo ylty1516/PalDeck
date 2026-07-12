@@ -16,6 +16,8 @@ $packagedSourcePaths = @(
     "launcher.py",
     "assets/",
     "bundled_mods/",
+    "third_party/",
+    "package.json",
     "requirements-lock*",
     "scripts/build_portable.ps1",
     "scripts/create_portable_zip.py",
@@ -100,6 +102,7 @@ if ($javascriptFiles.Count -eq 0) {
 foreach ($file in $javascriptFiles) {
     Invoke-Checked "Node 语法检查：$($file.Name)" "node" @("--check", $file.FullName)
 }
+Invoke-Checked "运行 Node 测试" "npm" @("test")
 
 Invoke-Checked "Python compileall" $venvPython @(
     "-m", "compileall", "-q",
@@ -132,6 +135,7 @@ Invoke-Checked "PyInstaller 单文件窗口版构建" $venvPython @(
     "--add-data", ((Join-Path $repoRoot "frontend") + $separator + "frontend"),
     "--add-data", ((Join-Path $repoRoot "assets") + $separator + "assets"),
     "--add-data", ((Join-Path $repoRoot "bundled_mods") + $separator + "bundled_mods"),
+    "--add-data", ((Join-Path $repoRoot "third_party") + $separator + "third_party"),
     "--hidden-import", "webview",
     "--hidden-import", "webview.platforms.edgechromium",
     "--hidden-import", "flask",
@@ -161,9 +165,12 @@ PalDeck v$version - Windows 便携版
 3. 支持 Windows 10/11 的 Steam 客户端版 Palworld。
 4. 修改或删除 Mod 前请备份存档和游戏文件；请勿在游戏运行时操作。
 5. Nexus 功能仅匿名只读浏览，不提供登录、下载或自动安装。
-6. 不支持 Xbox/Microsoft Store、专用服务器 Mod 管理或 Steam Workshop 订阅管理。
+6. 只管理 Steam 客户端已订阅并下载的 Workshop 模组启停；不提供 Workshop 订阅、取消订阅或删除。
+7. Workshop UE4SS 与手动或内置 UE4SS 互斥，请先禁用或移除另一来源再切换。
+8. 内置 Palworld 专用 UE4SS 来自 Okaetsu/RE-UE4SS（MIT）；许可证与致谢随程序分发，并可在“致谢”页查看。
+9. 不支持 Xbox/Microsoft Store 或专用服务器 Mod 管理。
 
-项目说明见：https://github.com/ylty1516/palworld-mod-manager
+项目说明见：https://github.com/ylty1516/PalDeck
 Source commit: $sourceCommit
 "@
 [System.IO.File]::WriteAllText(
