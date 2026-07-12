@@ -92,11 +92,11 @@ class SteamWorkshopService:
             self._record(manifest)
             manifest_fingerprint = _path_fingerprint(manifest)
             fingerprint.append((str(manifest), manifest_fingerprint))
+            self._record(content)
+            fingerprint.append((str(content), _path_safety_fingerprint(content)))
 
             if manifest_fingerprint is None:
-                self._record(content)
                 ids = self._fallback_ids(content)
-                fingerprint.append((str(content), _path_fingerprint(content)))
             else:
                 ids = self._manifest_ids(manifest)
 
@@ -104,6 +104,7 @@ class SteamWorkshopService:
                 item_dir = content / workshop_id
                 info_path = item_dir / "Info.json"
                 self._record(info_path)
+                fingerprint.append((str(item_dir), _path_safety_fingerprint(item_dir)))
                 fingerprint.append((str(info_path), _path_fingerprint(info_path)))
                 candidates.append((workshop_id, content, item_dir, info_path))
 
@@ -288,6 +289,11 @@ def _is_within(path: Path, root: Path) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+def _path_safety_fingerprint(path: Path) -> tuple[object, ...]:
+    """Revalidate directory type/reparse state before allowing a cache hit."""
+    return (_path_fingerprint(path), _is_real_directory(path), _is_reparse(path))
 
 
 def _path_fingerprint(path: Path) -> tuple[int, int, int] | None:

@@ -188,6 +188,32 @@ def test_cache_invalidates_on_info_change_and_force_bypasses(tmp_path):
     assert forced is not changed
 
 
+def test_cache_revalidates_item_path_reparse_state(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["8005"])
+    item = write_item(steam, "8005")
+    original = steam_workshop._is_reparse
+    replaced = False
+
+    def simulated_reparse(path):
+        return (replaced and path == item) or original(path)
+
+    monkeypatch.setattr(steam_workshop, "_is_reparse", simulated_reparse)
+    service = SteamWorkshopService(steam)
+    first = service.scan(force=True)
+    assert first[0].valid is True
+
+    replaced = True
+    rescanned = service.scan()
+
+    assert rescanned is not first
+    assert rescanned[0].valid is False
+    assert "reparse" in rescanned[0].error.casefold()
+
+
 def test_reparse_content_root_invalidates_manifest_items(tmp_path, monkeypatch):
     from backend import steam_workshop
 
