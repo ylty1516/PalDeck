@@ -13,7 +13,7 @@ import pytest
 
 from backend.app import create_app
 from backend.mod_service import GameRunningError
-from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopMod
+from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopMod, WorkshopNotFoundError
 from backend.ue4ss_provider import Ue4ssAsset
 
 
@@ -745,7 +745,9 @@ class FakeWorkshopService:
 
     def set_enabled(self, workshop_id, enabled, *, confirm_dependents=False, conflict_validator=None):
         self.calls.append(("toggle", workshop_id, enabled, confirm_dependents))
-        item = next(mod for mod in self.mods if mod["workshop_id"] == workshop_id)
+        item = next((mod for mod in self.mods if mod["workshop_id"] == workshop_id), None)
+        if item is None:
+            raise WorkshopNotFoundError(workshop_id)
         if conflict_validator is not None:
             conflict_validator(SimpleNamespace(install_types=tuple(item.get("install_types", []))))
         item["enabled"] = enabled
@@ -867,6 +869,21 @@ def test_workshop_toggle_rejects_non_boolean_and_extra_fields(app, auth_client, 
     assert response.status_code == 400
     assert response.json["error_code"] == "invalid_input"
     assert workshop.calls == []
+
+
+def test_unknown_valid_workshop_id_is_consistently_404(app, auth_client):
+    app.extensions["workshop_service"] = FakeWorkshopService([_workshop_mod()])
+    for suffix in ("enable", "disable"):
+        response = auth_client.post(f"/api/workshop/9999/{suffix}", json={})
+        assert response.status_code == 404
+        assert response.json["error_code"] == "workshop_mod_not_found"
+    for path, method in (
+        ("/api/workshop/9999/open-page", "post"),
+        ("/api/workshop/9999/open-folder", "get"),
+    ):
+        response = getattr(auth_client, method)(path, json={} if method == "post" else None)
+        assert response.status_code == 404
+        assert response.json["error_code"] == "workshop_mod_not_found"
 
 
 def test_workshop_errors_map_game_running_and_dependents_to_structured_responses(app, auth_client):

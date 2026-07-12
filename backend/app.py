@@ -25,7 +25,7 @@ from backend import game_detector, nexus_api, process_utils, self_updater, smoke
 from backend.appearance import AppearanceService
 from backend.game_lock import game_write_lock
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
-from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError
+from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
 from backend.storage import JsonStore
 from backend.ue4ss_provider import Ue4ssProvider
 from backend.version import APP_VERSION
@@ -192,6 +192,10 @@ def create_app(
     @app.errorhandler(ModConflictError)
     def handle_conflict(exc: ModConflictError):
         return failure("模组文件冲突", 409, "mod_conflict", exc.details)
+
+    @app.errorhandler(WorkshopNotFoundError)
+    def handle_workshop_not_found(_exc: WorkshopNotFoundError):
+        return failure("未找到该 Workshop 模组", 404, "workshop_mod_not_found")
 
     @app.errorhandler(WorkshopDependencyError)
     def handle_workshop_dependency(exc: WorkshopDependencyError):

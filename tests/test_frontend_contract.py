@@ -459,6 +459,22 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     assert ".source-workshop" in css
 
 
+def test_workshop_writes_are_globally_serialized_and_dependency_escape_clears_pending():
+    app = APP.read_text(encoding="utf-8")
+    assert "let workshopWriteQueue = Promise.resolve()" in app
+    queue = re.search(r"function queueWorkshopWrite\(operation\) \{(.*?)^\}", app, re.S | re.M)
+    assert queue
+    assert "workshopWriteQueue.then(operation, operation)" in queue.group(1)
+    assert 'case "toggleWorkshop": await run(target, () => queueWorkshopWrite(' in app
+    assert '$("#workshopDependencyModal").addEventListener("cancel"' in app
+    cancel_handler = re.search(r'\$\("#workshopDependencyModal"\)\.addEventListener\("cancel", \(event\) => \{(.*?)^\s{2}\}\);', app, re.S | re.M)
+    assert cancel_handler
+    assert "cancelWorkshopDependency()" in cancel_handler.group(1)
+    assert "event.preventDefault()" in cancel_handler.group(1)
+    cancel_function = re.search(r"function cancelWorkshopDependency\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert cancel_function and "state.pendingWorkshopDependency = null" in cancel_function.group(1)
+
+
 def test_workshop_filter_includes_server_metadata_fields():
     app = APP.read_text(encoding="utf-8")
     filter_body = re.search(r"function filterMods\(\) \{(.*?)^\}", app, re.S | re.M)

@@ -76,6 +76,14 @@ class WorkshopMod:
         return value
 
 
+class WorkshopNotFoundError(LookupError):
+    """A valid Workshop ID is absent from the authoritative scan."""
+
+    def __init__(self, workshop_id: str):
+        self.workshop_id = workshop_id
+        super().__init__(f"Workshop ID not found: {workshop_id}")
+
+
 class WorkshopDependencyError(RuntimeError):
     """A Workshop dependency graph prevents the requested state change."""
 
@@ -191,10 +199,12 @@ class SteamWorkshopService:
         mods = self.scan(force=force)
         active: set[str] = set()
         if self.game_root is not None and self.settings_path.exists():
-            active = {
-                package.casefold()
-                for package in _active_packages(_read_settings(self.settings_path).text)
-            }
+            document = _read_settings(self.settings_path)
+            if _global_enabled(document.text):
+                active = {
+                    package.casefold()
+                    for package in _active_packages(document.text)
+                }
         result: list[dict[str, object]] = []
         for mod in mods:
             item = mod.to_dict()
@@ -242,10 +252,23 @@ class SteamWorkshopService:
             if conflict_validator is not None:
                 for addition in additions:
                     conflict_validator(addition)
-            document = _read_settings(self.settings_path)
+            settings_existed = self.settings_path.exists()
+            if settings_existed:
+                document = _read_settings(self.settings_path)
+            else:
+                if _has_reparse_ancestor(self.settings_path) or not _is_real_directory(self.settings_path.parent):
+                    raise ValueError("PalModSettings.ini parent is unsafe or missing")
+                document = _SettingsDocument(
+                    self.settings_path, "utf-8", b"", "\n", "", (0, 0),
+                )
             original = document.bom + document.text.encode(document.encoding)
-            active = _active_packages(document.text)
+            active = _active_packages(document.text) if _global_enabled(document.text) else []
             affected: list[str] = []
+
+            if not settings_existed and not enabled:
+                result = target.to_dict()
+                result.update({"enabled": False, "needs_restart": True})
+                return result
 
             if enabled:
                 updated = _updated_settings(
@@ -268,13 +291,17 @@ class SteamWorkshopService:
                 )
 
             backup = None
+            created_identity = None
             if updated != original:
-                backup = _atomic_write(
-                    document.path,
-                    updated,
-                    original,
-                    document.identity,
-                )
+                if settings_existed:
+                    backup = _atomic_write(
+                        document.path,
+                        updated,
+                        original,
+                        document.identity,
+                    )
+                else:
+                    created_identity = _atomic_create(document.path, updated)
             try:
                 confirmed = _read_settings(document.path)
                 confirmed_raw = confirmed.bom + confirmed.text.encode(confirmed.encoding)
@@ -292,6 +319,9 @@ class SteamWorkshopService:
             except BaseException:
                 if backup is not None:
                     _restore_backup(document.path, backup)
+                elif created_identity is not None:
+                    _safe_file_identity(document.path, created_identity)
+                    document.path.unlink()
                 raise
             else:
                 if backup is not None:
@@ -309,7 +339,7 @@ class SteamWorkshopService:
     ) -> WorkshopMod:
         matches = [mod for mod in mods if mod.workshop_id == workshop_id]
         if len(matches) != 1:
-            raise ValueError("Workshop ID is not present in the latest scan")
+            raise WorkshopNotFoundError(workshop_id)
         if not matches[0].valid:
             raise ValueError("invalid Workshop records cannot be toggled")
         return matches[0]
@@ -748,6 +778,30 @@ def _safe_replace(
     _safe_file_identity(destination, destination_identity)
     os.replace(source, destination)
     return _safe_file_identity(destination, source_identity)
+
+
+def _atomic_create(path: Path, content: bytes) -> tuple[int, int]:
+    """Publish a new settings file without exposing partial content or replacing a race."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary_created = False
+    linked = False
+    try:
+        identity = _write_exclusive(temporary, content)
+        temporary_created = True
+        if path.exists() or _has_reparse_ancestor(path):
+            raise FileExistsError("PalModSettings.ini appeared during creation")
+        os.link(temporary, path)
+        linked = True
+        published = _safe_file_identity(path, identity)
+        temporary.unlink()
+        temporary_created = False
+        return published
+    except BaseException:
+        if linked:
+            path.unlink(missing_ok=True)
+        if temporary_created:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def _atomic_write(

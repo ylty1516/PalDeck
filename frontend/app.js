@@ -17,6 +17,7 @@ const state = {
 };
 const effects = createEffects();
 const inFlightDynamicActions = new Set();
+let workshopWriteQueue = Promise.resolve();
 const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
@@ -269,6 +270,18 @@ function replaceWorkshopMods(authoritative) {
   filterMods();
 }
 
+function queueWorkshopWrite(operation) {
+  const next = workshopWriteQueue.then(operation, operation);
+  workshopWriteQueue = next.catch(() => undefined);
+  return next;
+}
+
+function cancelWorkshopDependency() {
+  state.pendingWorkshopDependency = null;
+  $("#workshopDependencyDetails").replaceChildren();
+  if ($("#workshopDependencyModal").open) $("#workshopDependencyModal").close();
+}
+
 function renderWorkshopDependents(ids) {
   const list = document.createElement("ul");
   list.className = "stack";
@@ -478,12 +491,12 @@ export const ACTION_HANDLERS = Object.freeze({
   keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },
   cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteModal").close(); },
   approveDelete: async () => deletePendingMod(),
-  cancelWorkshopDependency: () => { state.pendingWorkshopDependency = null; $("#workshopDependencyModal").close(); },
+  cancelWorkshopDependency: () => cancelWorkshopDependency(),
   approveWorkshopDependency: async () => {
     const pending = state.pendingWorkshopDependency;
     if (!pending) return;
     $("#workshopDependencyModal").close();
-    await toggleWorkshop(pending.id, pending.enabled, true);
+    await queueWorkshopWrite(() => toggleWorkshop(pending.id, pending.enabled, true));
   },
 });
 
@@ -538,7 +551,7 @@ async function handleDynamicAction(event) {
   try {
     switch (target.dataset.dynamicAction) {
       case "toggleMod": await run(target, () => toggleMod(target, id), { disable: false }); break;
-      case "toggleWorkshop": await run(target, () => toggleWorkshop(id, target.dataset.enabled === "true"), { disable: false }); break;
+      case "toggleWorkshop": await run(target, () => queueWorkshopWrite(() => toggleWorkshop(id, target.dataset.enabled === "true")), { disable: false }); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
       case "openWorkshopFolder": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-folder`), { disable: false }); break;
       case "openSteamWorkshop": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-page`, { method: "POST", body: {} }), { disable: false }); break;
@@ -583,6 +596,10 @@ async function init() {
     state.pendingDeleteId = null;
     state.pendingDeleteForce = false;
     $("#deleteModal").close();
+  });
+  $("#workshopDependencyModal").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    cancelWorkshopDependency();
   });
   setupDropzone();
   try {

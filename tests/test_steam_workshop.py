@@ -10,6 +10,7 @@ from backend.steam_workshop import (
     SteamWorkshopService,
     WorkshopDependencyError,
     WorkshopMod,
+    WorkshopNotFoundError,
 )
 
 
@@ -582,7 +583,7 @@ def test_list_mods_reports_authoritative_active_state_and_ui_identity(tmp_path):
             "1002": {"ModName": "UE4SS Mod", "PackageName": "Framework", "Dependencies": [], "InstallRule": [{"Type": "UE4SS", "Target": "Pal/Binaries/Win64"}]},
         },
     )
-    settings.write_text("[PalModSettings]\nActiveModList=Core\n", encoding="utf-8")
+    settings.write_text("[PalModSettings]\nbGlobalEnableMod=True\nActiveModList=Core\n", encoding="utf-8")
 
     listed = service.list_mods(force=True)
 
@@ -591,14 +592,45 @@ def test_list_mods_reports_authoritative_active_state_and_ui_identity(tmp_path):
     ]
     assert listed[0]["name"] == "Core Mod"
     assert service.active_ue4ss_mods() == []
-    settings.write_text("[PalModSettings]\nActiveModList=Framework\n", encoding="utf-8")
+    settings.write_text("[PalModSettings]\nbGlobalEnableMod=True\nActiveModList=Framework\n", encoding="utf-8")
     assert [item["workshop_id"] for item in service.active_ue4ss_mods()] == ["1002"]
+
+
+def test_list_mods_requires_global_enable_for_active_state(tmp_path):
+    service, settings = workshop_service(tmp_path, {"1001": {"PackageName": "Core"}})
+    settings.write_text(
+        "[PalModSettings]\nbGlobalEnableMod=False\nActiveModList=Core\n",
+        encoding="utf-8",
+    )
+    assert service.list_mods(force=True)[0]["enabled"] is False
+    assert service.active_ue4ss_mods() == []
 
 
 def test_list_mods_treats_missing_settings_as_disabled(tmp_path):
     service, settings = workshop_service(tmp_path, {"1001": {"PackageName": "Core"}})
     settings.unlink(missing_ok=True)
     assert service.list_mods(force=True)[0]["enabled"] is False
+
+
+def test_first_enable_atomically_creates_missing_settings_and_disable_missing_is_idempotent(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {"1001": {"PackageName": "Core", "Dependencies": []}},
+    )
+    settings.unlink(missing_ok=True)
+
+    disabled = service.set_enabled("1001", False)
+    assert disabled["enabled"] is False
+    assert not settings.exists()
+
+    enabled = service.set_enabled("1001", True)
+    assert enabled["enabled"] is True
+    assert settings.read_text(encoding="utf-8") == (
+        "[PalModSettings]\n"
+        "bGlobalEnableMod=True\n"
+        "ActiveModList=Core\n"
+    )
+    assert list(settings.parent.glob(".PalModSettings.ini.*")) == []
 
 
 def test_enable_and_disable_are_deduplicated_idempotent_and_disable_only_target(tmp_path):
@@ -813,16 +845,18 @@ def test_set_enabled_rejects_unscanned_unknown_invalid_and_non_numeric_records(t
     steam = tmp_path / "Steam"
     game = tmp_path / "Game"
     service = SteamWorkshopService(steam, game, game_running=lambda: False)
-    for value in ("../1001", "steam-workshop:1001", "1001"):
+    for value in ("../1001", "steam-workshop:1001"):
         with pytest.raises(ValueError):
             service.set_enabled(value, True)
+    with pytest.raises(WorkshopNotFoundError):
+        service.set_enabled("1001", True)
 
     write_library_config(steam, [])
     write_acf(steam, ["1001", "1002"])
     write_item(steam, "1001")
     write_item(steam, "1002", valid_info(PackageName="../bad"))
     service.scan(force=True)
-    with pytest.raises(ValueError):
+    with pytest.raises(WorkshopNotFoundError):
         service.set_enabled("9999", True)
     with pytest.raises(ValueError):
         service.set_enabled("1002", True)
