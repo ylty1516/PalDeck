@@ -11,9 +11,11 @@ from typing import Any
 
 from .game_detector import (
     APP_ID,
+    UnsafeSteamFileError,
     find_steam_libraries,
     get_keyvalues_value,
     load_steam_keyvalues,
+    read_safe_file,
 )
 
 _WORKSHOP_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
@@ -22,6 +24,16 @@ _MAX_TEXT = {"ModName": 256, "PackageName": 128, "Author": 256, "Version": 64}
 _MAX_DEPENDENCIES = 128
 _MAX_RULES = 64
 _MAX_TARGET = 512
+_MAX_INFO_BYTES = 1024 * 1024
+_MAX_WORKSHOP_ITEMS = 4096
+_WINDOWS_DEVICES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -75,17 +87,19 @@ class SteamWorkshopService:
             roots = [Path(steam_root)]
         else:
             roots = None
-        self._libraries = find_steam_libraries(steam_roots=roots)
+        self._steam_roots = roots
         self._cache_fingerprint: tuple[object, ...] | None = None
-        self._cache: list[WorkshopMod] | None = None
+        self._cache: tuple[WorkshopMod, ...] | None = None
         self.last_scan_paths: list[str] = []
 
     def scan(self, *, force: bool = False) -> list[WorkshopMod]:
         self.last_scan_paths = []
         candidates: list[tuple[str, Path, Path, Path]] = []
         fingerprint: list[object] = []
+        libraries = find_steam_libraries(steam_roots=self._steam_roots)
+        fingerprint.append(tuple(str(library) for library in libraries))
 
-        for library in self._libraries:
+        for library in libraries:
             workshop = library / "steamapps" / "workshop"
             manifest = workshop / f"appworkshop_{APP_ID}.acf"
             content = workshop / "content" / APP_ID
@@ -105,12 +119,14 @@ class SteamWorkshopService:
                 info_path = item_dir / "Info.json"
                 self._record(info_path)
                 fingerprint.append((str(item_dir), _path_safety_fingerprint(item_dir)))
-                fingerprint.append((str(info_path), _path_fingerprint(info_path)))
+                fingerprint.append(
+                    (str(info_path), _path_safety_fingerprint(info_path))
+                )
                 candidates.append((workshop_id, content, item_dir, info_path))
 
         key = tuple(fingerprint)
         if not force and self._cache is not None and key == self._cache_fingerprint:
-            return self._cache
+            return list(self._cache)
 
         mods = [
             self._read_item(workshop_id, content, item_dir, info)
@@ -118,47 +134,51 @@ class SteamWorkshopService:
         ]
         mods.sort(key=lambda item: (int(item.workshop_id), str(item.source_dir).casefold()))
         self._cache_fingerprint = key
-        self._cache = mods
-        return mods
+        self._cache = tuple(mods)
+        return list(self._cache)
 
     def _record(self, path: Path) -> None:
         self.last_scan_paths.append(str(path))
 
     @staticmethod
     def _manifest_ids(manifest: Path) -> list[str]:
-        root = get_keyvalues_value(load_steam_keyvalues(manifest), "AppWorkshop")
+        root = get_keyvalues_value(
+            load_steam_keyvalues(manifest, reparse_checker=_is_reparse), "AppWorkshop"
+        )
         if not isinstance(root, dict) or get_keyvalues_value(root, "appid") != APP_ID:
             return []
         installed = get_keyvalues_value(root, "WorkshopItemsInstalled")
         if not isinstance(installed, dict):
             return []
-        return sorted(
-            (
-                key
-                for key, value in installed.items()
-                if _WORKSHOP_ID.fullmatch(key) and isinstance(value, dict)
-            ),
-            key=int,
-        )
+        ids = [
+            key
+            for key, value in installed.items()
+            if _WORKSHOP_ID.fullmatch(key) and isinstance(value, dict)
+        ]
+        if len(ids) > _MAX_WORKSHOP_ITEMS:
+            return []
+        return sorted(ids, key=int)
 
     @staticmethod
     def _fallback_ids(content: Path) -> list[str]:
-        if _is_reparse(content) or not _is_real_directory(content):
+        if _has_reparse_ancestor(content) or not _is_real_directory(content):
             return []
+        ids: list[str] = []
+        examined = 0
         try:
-            children = list(content.iterdir())
+            for child in content.iterdir():
+                examined += 1
+                if examined > _MAX_WORKSHOP_ITEMS:
+                    return []
+                if (
+                    _WORKSHOP_ID.fullmatch(child.name)
+                    and _is_real_directory(child)
+                    and not _has_reparse_ancestor(child)
+                ):
+                    ids.append(child.name)
         except OSError:
             return []
-        return sorted(
-            (
-                child.name
-                for child in children
-                if _WORKSHOP_ID.fullmatch(child.name)
-                and _is_real_directory(child)
-                and not _is_reparse(child)
-            ),
-            key=int,
-        )
+        return sorted(ids, key=int)
 
     @staticmethod
     def _read_item(
@@ -179,22 +199,31 @@ class SteamWorkshopService:
                 False,
                 message,
             )
-        if _is_reparse(content_root) or _is_reparse(item_dir):
-            return invalid("Workshop content or item is a symbolic link or reparse point")
-        if not _is_real_directory(item_dir):
-            return invalid("Workshop item directory is missing or invalid")
-        if not _is_within(info_path, item_dir):
-            return invalid("Info.json path escapes Workshop item directory")
-        if _is_reparse(info_path) or not _is_regular_file(info_path):
-            return invalid("Info.json is not a regular file")
+        if (
+            _has_reparse_ancestor(content_root)
+            or _has_reparse_ancestor(item_dir)
+            or _has_reparse_ancestor(info_path)
+            or not _is_real_directory(item_dir)
+            or not _is_within(info_path, item_dir)
+        ):
+            return invalid("unsafe_path: Workshop path is unsafe")
 
         try:
-            raw = info_path.read_text(encoding="utf-8")
-            value = json.loads(raw)
+            raw, opened = read_safe_file(
+                info_path,
+                max_bytes=_MAX_INFO_BYTES,
+                reparse_checker=_is_reparse,
+            )
+            value = json.loads(raw.decode("utf-8"))
             parsed = _validate_info(value)
-            updated_at = info_path.stat().st_mtime_ns
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-            return invalid(f"Invalid Info.json: {error}")
+            updated_at = opened.st_mtime_ns
+        except (
+            UnsafeSteamFileError,
+            UnicodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ):
+            return invalid("invalid_info: Workshop metadata is invalid")
 
         return WorkshopMod(
             workshop_id=workshop_id,
@@ -275,12 +304,26 @@ def _validate_info(value: Any) -> dict[str, Any]:
 
 
 def _safe_target(value: str) -> bool:
-    path = PureWindowsPath(value.replace("/", "\\"))
-    return (
-        not path.is_absolute()
-        and not path.drive
-        and all(part not in ("", ".", "..") for part in path.parts)
-    )
+    normalized = value.replace("/", "\\")
+    raw_parts = normalized.split("\\")
+    if (
+        ":" in normalized
+        or any(part in ("", ".", "..") for part in raw_parts)
+        or any(part.endswith((".", " ")) for part in raw_parts)
+    ):
+        return False
+    path = PureWindowsPath(normalized)
+    if path.is_absolute() or path.drive:
+        return False
+    for part in path.parts:
+        stem = part.split(".", 1)[0].upper()
+        if (
+            part in ("", ".", "..")
+            or part.endswith((".", " "))
+            or stem in _WINDOWS_DEVICES
+        ):
+            return False
+    return True
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -291,9 +334,17 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _has_reparse_ancestor(path: Path) -> bool:
+    return any(_is_reparse(candidate) for candidate in (path, *path.parents))
+
+
 def _path_safety_fingerprint(path: Path) -> tuple[object, ...]:
-    """Revalidate directory type/reparse state before allowing a cache hit."""
-    return (_path_fingerprint(path), _is_real_directory(path), _is_reparse(path))
+    """Revalidate the complete ancestor chain before allowing a cache hit."""
+    chain = tuple(
+        (str(candidate), _path_fingerprint(candidate), _is_reparse(candidate))
+        for candidate in (path, *path.parents)
+    )
+    return (chain, _is_real_directory(path))
 
 
 def _path_fingerprint(path: Path) -> tuple[int, int, int] | None:

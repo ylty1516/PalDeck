@@ -132,7 +132,7 @@ def test_invalid_info_fields_return_disabled_invalid_record(tmp_path, change, me
 
     assert mod.workshop_id == "4004"
     assert mod.valid is False
-    assert message in mod.error
+    assert mod.error == "invalid_info: Workshop metadata is invalid"
     assert mod.to_dict()["can_toggle"] is False
 
 
@@ -175,7 +175,8 @@ def test_cache_invalidates_on_info_change_and_force_bypasses(tmp_path):
     service = SteamWorkshopService(steam)
 
     first = service.scan(force=True)
-    assert service.scan() is first
+    assert service.scan() == first
+    assert service.scan() is not first
 
     info_path.write_text(json.dumps(valid_info(ModName="Changed Mod")), encoding="utf-8")
     stat = info_path.stat()
@@ -211,7 +212,32 @@ def test_cache_revalidates_item_path_reparse_state(tmp_path, monkeypatch):
 
     assert rescanned is not first
     assert rescanned[0].valid is False
-    assert "reparse" in rescanned[0].error.casefold()
+    assert rescanned[0].error == "unsafe_path: Workshop path is unsafe"
+
+
+def test_cache_revalidates_info_file_reparse_state(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["8004"])
+    info = write_item(steam, "8004") / "Info.json"
+    original = steam_workshop._is_reparse
+    replaced = False
+
+    monkeypatch.setattr(
+        steam_workshop,
+        "_is_reparse",
+        lambda path: (replaced and path == info) or original(path),
+    )
+    service = SteamWorkshopService(steam)
+    assert service.scan(force=True)[0].valid is True
+
+    replaced = True
+    rescanned = service.scan()
+
+    assert rescanned[0].valid is False
+    assert rescanned[0].error == "unsafe_path: Workshop path is unsafe"
 
 
 def test_reparse_content_root_invalidates_manifest_items(tmp_path, monkeypatch):
@@ -232,7 +258,7 @@ def test_reparse_content_root_invalidates_manifest_items(tmp_path, monkeypatch):
     mod = SteamWorkshopService(steam).scan(force=True)[0]
 
     assert mod.valid is False
-    assert "reparse" in mod.error.casefold()
+    assert mod.error == "unsafe_path: Workshop path is unsafe"
 
 
 def test_content_root_symlink_is_rejected_when_supported(tmp_path):
@@ -253,7 +279,183 @@ def test_content_root_symlink_is_rejected_when_supported(tmp_path):
     mod = SteamWorkshopService(steam).scan(force=True)[0]
 
     assert mod.valid is False
-    assert "reparse" in mod.error.casefold() or "symbolic" in mod.error.casefold()
+    assert mod.error == "unsafe_path: Workshop path is unsafe"
+
+
+def test_force_scan_refreshes_library_configuration(tmp_path):
+    steam = tmp_path / "Steam"
+    second = tmp_path / "AddedLibrary"
+    write_library_config(steam, [])
+    service = SteamWorkshopService(steam)
+    assert service.scan(force=True) == []
+
+    write_library_config(steam, [second])
+    write_acf(second, ["9001"])
+    write_item(second, "9001")
+
+    assert [mod.workshop_id for mod in service.scan(force=True)] == ["9001"]
+
+
+def test_cached_results_are_not_mutable_by_caller(tmp_path):
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9002"])
+    write_item(steam, "9002")
+    service = SteamWorkshopService(steam)
+
+    returned = service.scan(force=True)
+    returned.clear()
+
+    assert [mod.workshop_id for mod in service.scan()] == ["9002"]
+
+
+def test_oversized_info_is_invalid_with_sanitized_error(tmp_path):
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9003"])
+    info = write_item(steam, "9003") / "Info.json"
+    info.write_bytes(b"{" + b" " * (1024 * 1024))
+
+    mod = SteamWorkshopService(steam).scan(force=True)[0]
+
+    assert mod.valid is False
+    assert mod.error == "invalid_info: Workshop metadata is invalid"
+    assert str(info) not in mod.error
+
+
+def test_manifest_with_more_than_4096_items_fails_closed(tmp_path):
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, [str(index) for index in range(1, 4098)])
+
+    assert SteamWorkshopService(steam).scan(force=True) == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "CON/file.pak",
+        "mods/NUL.txt",
+        "mods/file.pak:stream",
+        "mods/folder. /file.pak",
+        "mods/file.pak.",
+        "mods//file.pak",
+        "mods/./file.pak",
+    ],
+)
+def test_install_target_rejects_windows_ambiguous_paths(tmp_path, target):
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9004"])
+    write_item(
+        steam,
+        "9004",
+        valid_info(InstallRule=[{"Type": "Paks", "Target": target}]),
+    )
+
+    mod = SteamWorkshopService(steam).scan(force=True)[0]
+
+    assert mod.valid is False
+    assert mod.error == "invalid_info: Workshop metadata is invalid"
+
+
+def test_info_descriptor_identity_change_fails_closed(tmp_path, monkeypatch):
+    import os
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9008"])
+    info = write_item(steam, "9008") / "Info.json"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(json.dumps(valid_info()), encoding="utf-8")
+    real_open = os.open
+
+    def replaced_open(path, flags, *args, **kwargs):
+        if Path(path) == info:
+            return real_open(replacement, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replaced_open)
+
+    mod = SteamWorkshopService(steam).scan(force=True)[0]
+
+    assert mod.valid is False
+    assert mod.error == "invalid_info: Workshop metadata is invalid"
+
+
+def test_simulated_reparse_ancestor_is_rejected_without_symlink_permission(
+    tmp_path, monkeypatch
+):
+    from backend import steam_workshop
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9005"])
+    write_item(steam, "9005")
+    unsafe = steam / "steamapps" / "workshop" / "content"
+    original = steam_workshop._is_reparse
+    monkeypatch.setattr(
+        steam_workshop,
+        "_is_reparse",
+        lambda path: path == unsafe or original(path),
+    )
+
+    mod = SteamWorkshopService(steam).scan(force=True)[0]
+
+    assert mod.valid is False
+    assert mod.error == "unsafe_path: Workshop path is unsafe"
+
+
+def test_simulated_reparse_acf_is_not_opened(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    manifest = write_acf(steam, ["9006"])
+    write_item(steam, "9006")
+    original = steam_workshop._is_reparse
+    monkeypatch.setattr(
+        steam_workshop,
+        "_is_reparse",
+        lambda path: path == manifest or original(path),
+    )
+
+    assert SteamWorkshopService(steam).scan(force=True) == []
+
+
+def test_scan_never_opens_or_iterates_other_appids_or_common(tmp_path, monkeypatch):
+    import os
+
+    steam = tmp_path / "Steam"
+    write_library_config(steam, [])
+    write_acf(steam, ["9007"])
+    write_item(steam, "9007")
+    forbidden = [
+        steam / "steamapps" / "common",
+        steam / "steamapps" / "workshop" / "content" / "999999",
+    ]
+    for path in forbidden:
+        path.mkdir(parents=True)
+
+    real_open = os.open
+    real_iterdir = Path.iterdir
+
+    def guarded_open(path, *args, **kwargs):
+        text = str(path).replace("\\", "/").casefold()
+        assert "/common" not in text
+        assert "/content/999999" not in text
+        return real_open(path, *args, **kwargs)
+
+    def guarded_iterdir(path):
+        assert path not in forbidden
+        return real_iterdir(path)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+
+    assert [mod.workshop_id for mod in SteamWorkshopService(steam).scan(force=True)] == [
+        "9007"
+    ]
 
 
 def test_item_symlink_is_rejected_when_supported(tmp_path):
@@ -275,4 +477,4 @@ def test_item_symlink_is_rejected_when_supported(tmp_path):
     mod = SteamWorkshopService(steam).scan(force=True)[0]
 
     assert mod.valid is False
-    assert "reparse" in mod.error.casefold() or "symbolic" in mod.error.casefold()
+    assert mod.error == "unsafe_path: Workshop path is unsafe"

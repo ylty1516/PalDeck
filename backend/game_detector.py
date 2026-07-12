@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import string
 import winreg
 from pathlib import Path, PureWindowsPath
+from typing import Callable
 
 
 APP_ID = "1623730"
+MAX_KEYVALUES_BYTES = 4 * 1024 * 1024
+MAX_KEYVALUES_TOKENS = 200_000
+MAX_KEYVALUES_DEPTH = 64
 UE4SS_FRAMEWORK_MODS = frozenset({
     "bpmodloadermod",
     "cheatmanagermod",
@@ -40,11 +46,67 @@ def _read_steam_path_from_registry() -> Path | None:
     return None
 
 
-def _read_vdf(path: Path) -> str:
+class UnsafeSteamFileError(ValueError):
+    """A Steam metadata file could not be read within the safety boundary."""
+
+
+def _path_is_reparse(path: Path) -> bool:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
-    except (OSError, UnicodeError):
-        return ""
+        info = path.lstat()
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def read_safe_file(
+    path: Path,
+    *,
+    max_bytes: int,
+    reparse_checker: Callable[[Path], bool] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    """Read a bounded regular file through a verified, non-following descriptor."""
+    path = Path(path)
+    checker = reparse_checker or _path_is_reparse
+    if any(checker(candidate) for candidate in (path, *path.parents)):
+        raise UnsafeSteamFileError("unsafe file")
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise UnsafeSteamFileError("unavailable file") from error
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise UnsafeSteamFileError("invalid file")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            any(checker(candidate) for candidate in (path, *path.parents))
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > max_bytes
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise UnsafeSteamFileError("file changed")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, min(64 * 1024, max_bytes + 1 - total)):
+            total += len(chunk)
+            if total > max_bytes:
+                raise UnsafeSteamFileError("file too large")
+            chunks.append(chunk)
+        if any(checker(candidate) for candidate in (path, *path.parents)):
+            raise UnsafeSteamFileError("file changed")
+        return b"".join(chunks), opened
+    except OSError as error:
+        raise UnsafeSteamFileError("unavailable file") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _tokenize_keyvalues(text: str) -> list[str]:
@@ -61,6 +123,8 @@ def _tokenize_keyvalues(text: str) -> list[str]:
             continue
         if char in "{}":
             tokens.append(char)
+            if len(tokens) > MAX_KEYVALUES_TOKENS:
+                raise ValueError("too many KeyValues tokens")
             index += 1
             continue
         if char != '"':
@@ -80,6 +144,8 @@ def _tokenize_keyvalues(text: str) -> list[str]:
         if index >= len(text):
             raise ValueError("unterminated KeyValues string")
         tokens.append("".join(value))
+        if len(tokens) > MAX_KEYVALUES_TOKENS:
+            raise ValueError("too many KeyValues tokens")
         index += 1
     return tokens
 
@@ -88,7 +154,7 @@ def _parse_keyvalues(text: str) -> dict[str, object]:
     tokens = _tokenize_keyvalues(text)
     index = 0
 
-    def parse_object(*, nested: bool) -> dict[str, object]:
+    def parse_object(*, nested: bool, depth: int = 0) -> dict[str, object]:
         nonlocal index
         parsed: dict[str, object] = {}
         while index < len(tokens):
@@ -105,7 +171,9 @@ def _parse_keyvalues(text: str) -> dict[str, object]:
             value = tokens[index]
             index += 1
             if value == "{":
-                parsed[key] = parse_object(nested=True)
+                if depth >= MAX_KEYVALUES_DEPTH:
+                    raise ValueError("KeyValues nesting is too deep")
+                parsed[key] = parse_object(nested=True, depth=depth + 1)
             elif value == "}":
                 raise ValueError("missing KeyValues value")
             else:
@@ -117,11 +185,16 @@ def _parse_keyvalues(text: str) -> dict[str, object]:
     return parse_object(nested=False)
 
 
-def load_steam_keyvalues(path: Path) -> dict[str, object]:
-    """Strictly parse a Steam KeyValues file, returning empty data on failure."""
+def load_steam_keyvalues(
+    path: Path, *, reparse_checker: Callable[[Path], bool] | None = None
+) -> dict[str, object]:
+    """Strictly parse a bounded Steam KeyValues file, failing closed."""
     try:
-        return _parse_keyvalues(_read_vdf(path))
-    except ValueError:
+        raw, _ = read_safe_file(
+            path, max_bytes=MAX_KEYVALUES_BYTES, reparse_checker=reparse_checker
+        )
+        return _parse_keyvalues(raw.decode("utf-8-sig"))
+    except (UnsafeSteamFileError, UnicodeError, ValueError, RecursionError):
         return {}
 
 

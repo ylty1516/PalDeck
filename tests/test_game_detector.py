@@ -27,6 +27,43 @@ def write_manifest(library: Path, installdir: str) -> None:
     )
 
 
+def test_keyvalues_file_over_4mib_fails_closed(tmp_path):
+    path = tmp_path / "oversized.vdf"
+    path.write_bytes(b'"root" "' + b"x" * (4 * 1024 * 1024) + b'"')
+
+    assert game_detector.load_steam_keyvalues(path) == {}
+
+
+def test_keyvalues_over_64_levels_and_token_limit_fail_closed(tmp_path):
+    deep = tmp_path / "deep.vdf"
+    deep.write_text('"x" {' * 65 + '"value" "1"' + "}" * 65, encoding="utf-8")
+    tokens = tmp_path / "tokens.vdf"
+    tokens.write_text('"x" "1" ' * 100_001, encoding="utf-8")
+
+    assert game_detector.load_steam_keyvalues(deep) == {}
+    assert game_detector.load_steam_keyvalues(tokens) == {}
+
+
+def test_libraryfolders_reparse_is_rejected(tmp_path, monkeypatch):
+    steam = tmp_path / "Steam"
+    secondary = tmp_path / "Secondary"
+    steamapps = steam / "steamapps"
+    steamapps.mkdir(parents=True)
+    config = steamapps / "libraryfolders.vdf"
+    config.write_text(
+        f'"libraryfolders" {{ "1" {{ "path" "{secondary.as_posix()}" }} }}',
+        encoding="utf-8",
+    )
+    original = game_detector._path_is_reparse
+    monkeypatch.setattr(
+        game_detector,
+        "_path_is_reparse",
+        lambda path: path == config or original(path),
+    )
+
+    assert game_detector.find_steam_libraries(steam_roots=[steam]) == [steam]
+
+
 def test_xinput_proxy_is_recognized_as_existing_ue4ss(tmp_path):
     game = make_shipping_game(tmp_path / "Palworld")
     (game / "Pal" / "Binaries" / "Win64" / "xinput1_3.dll").write_bytes(b"proxy")
