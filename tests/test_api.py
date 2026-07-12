@@ -593,6 +593,47 @@ def test_update_apply_exits_after_response(app, auth_client, monkeypatch):
     assert exited == [0]
 
 
+def test_credits_endpoint_returns_source_bundled_catalog(auth_client):
+    response = auth_client.get("/api/credits")
+
+    assert response.status_code == 200
+    items = response.json["data"]
+    assert {item["id"] for item in items} >= {
+        "okaetsu", "ue4ss", "flask", "pywebview", "pillow", "pyinstaller",
+        "palworld-modding-docs",
+    }
+    assert all(item["source_url"].startswith("https://") for item in items)
+
+
+def test_open_trusted_link_uses_only_fixed_id_and_system_browser(app, auth_client):
+    opened = []
+    app.config["OPEN_URL"] = opened.append
+
+    response = auth_client.post("/api/system/open-trusted-link", json={"id": "okaetsu"})
+
+    assert response.status_code == 200
+    assert response.json["data"] == {"opened": True, "id": "okaetsu"}
+    assert opened == ["https://github.com/Okaetsu/RE-UE4SS"]
+
+
+@pytest.mark.parametrize("body", [
+    {"url": "https://github.com/Okaetsu/RE-UE4SS"},
+    {"id": "okaetsu", "url": "https://evil.example"},
+    {"id": "unknown"}, {"id": 1}, {}, None,
+    {"id": "http://github.com/Okaetsu/RE-UE4SS"},
+    {"id": "https://github.com.evil.example/Okaetsu/RE-UE4SS"},
+])
+def test_open_trusted_link_rejects_url_extra_non_https_and_unknown(app, auth_client, body):
+    opened = []
+    app.config["OPEN_URL"] = opened.append
+
+    response = auth_client.post("/api/system/open-trusted-link", json=body)
+
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+    assert opened == []
+
+
 def test_update_apply_rejects_arbitrary_download_url(auth_client, monkeypatch):
     called = []
     monkeypatch.setattr("backend.app.self_updater.prepare_update", lambda: called.append(True))

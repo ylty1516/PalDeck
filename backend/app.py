@@ -16,12 +16,13 @@ import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from backend import game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
+from backend import credits, game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
 from backend.appearance import AppearanceService
 from backend.game_lock import game_write_lock
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
@@ -790,6 +791,25 @@ def create_app(
     @app.get("/api/nexus/mod/<int:mod_id>")
     def nexus_mod(mod_id: int):
         return nexus_result(lambda: app.extensions["nexus_catalog"].get(mod_id, force=nexus_force()))
+
+    @app.get("/api/credits")
+    def get_credits():
+        return success(credits.catalog_payload())
+
+    @app.post("/api/system/open-trusted-link")
+    def open_trusted_link():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {"id"} or not isinstance(body["id"], str):
+            raise ApiError("可信外链请求仅接受固定 id", 400, "invalid_input")
+        link_id = body["id"]
+        url = credits.TRUSTED_LINKS.get(link_id)
+        if url is None or urlsplit(url).scheme != "https":
+            raise ApiError("未知或不安全的可信外链", 400, "invalid_input")
+        opener = app.config.get("OPEN_URL")
+        if not callable(opener):
+            raise ApiError("当前系统不支持打开网页", 500, "open_url_unavailable")
+        opener(url)
+        return success({"opened": True, "id": link_id})
 
     @app.post("/api/system/restart-admin")
     def restart_admin():

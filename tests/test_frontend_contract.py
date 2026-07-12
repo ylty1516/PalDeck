@@ -55,11 +55,29 @@ def parsed_html() -> ContractParser:
     return parser
 
 
-def test_html_has_exactly_four_pages_and_required_layers():
+def test_html_has_exactly_five_pages_and_required_layers():
     parser = parsed_html()
-    assert parser.views == ["view-mods", "view-import", "view-nexus", "view-settings"]
+    assert parser.views == ["view-mods", "view-import", "view-nexus", "view-settings", "view-credits"]
     assert {"backgroundLayer", "petalCanvas", "toastHost", "busyOverlay", "conflictModal", "deleteModal", "modConflictNotice"} <= set(parser.ids)
     assert parser.scripts == [{"type": "module", "src": "app.js"}]
+
+
+def test_credits_view_uses_fixed_ids_real_buttons_and_native_details():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    assert 'data-view="credits"' in html
+    assert 'id="view-credits"' in html
+    assert "开源项目致谢" in html and "开放源代码" in html
+    assert '<details class="credits-dependencies' in html
+    assert 'id="creditsCore"' in html and 'id="creditsDependencies"' in html
+    assert 'request("/api/credits")' in app
+    assert 'request("/api/system/open-trusted-link", { method: "POST", body: { id } })' in app
+    assert 'case "openTrustedLink":' in app
+    assert "source_url" not in app
+    loader = re.search(r"async function loadCredits\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert loader and "window.open" not in loader.group(1)
+    assert ".credits-grid" in css and ".credit-card" in css
 
 
 def test_every_static_control_has_one_unique_registered_action():

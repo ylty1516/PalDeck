@@ -17,6 +17,7 @@
         <button type="button" class="nav-item" data-action="showImport" data-view="import">导入安装</button>
         <button type="button" class="nav-item" data-action="showNexus" data-view="nexus">N网热门</button>
         <button type="button" class="nav-item" data-action="showSettings" data-view="settings">设置与外观</button>
+        <button type="button" class="nav-item" data-action="showCredits" data-view="credits">开源致谢</button>
       </nav>
       <div class="sidebar-foot">
         <span id="healthStatus" class="status-dot">正在连接…</span>
@@ -110,6 +111,18 @@
             <button type="button" class="btn primary" data-action="saveAppearance">保存外观</button>
           </article>
         </div>
+      </section>
+
+      <section id="view-credits" class="view" aria-labelledby="viewTitle">
+        <div class="credits-intro glass-panel">
+          <h2>开源项目致谢</h2>
+          <p>PalDeck 的实现离不开以下开放源代码项目与社区资料。致谢数据随源码提供，查看页面不会联网。</p>
+        </div>
+        <div id="creditsCore" class="credits-grid" aria-live="polite"></div>
+        <details class="credits-dependencies glass-panel">
+          <summary>完整直接运行与构建依赖及许可证</summary>
+          <div id="creditsDependencies" class="credits-dependency-list"></div>
+        </details>
       </section>
     </main>
   </div>

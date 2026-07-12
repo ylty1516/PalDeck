@@ -8,7 +8,7 @@ import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderN
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
-  mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
+  mods: [], nexus: [], credits: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
@@ -23,6 +23,7 @@ let workshopWriteQueue = Promise.resolve();
 const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
+  credits: ["开源致谢", "感谢开放源代码项目与社区资料"],
 });
 const UE4SS_WRITE_ACTIONS = new Set([
   "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip",
@@ -71,6 +72,60 @@ async function switchView(name) {
   if (name === "mods") await loadMods();
   if (name === "nexus") await loadNexus(state.nexusMode, true);
   if (name === "settings") await loadSettings();
+  if (name === "credits") await loadCredits();
+}
+
+function creditText(label, value) {
+  const line = document.createElement("p");
+  const heading = document.createElement("strong");
+  heading.textContent = `${label}：`;
+  line.append(heading, document.createTextNode(String(value || "未标注")));
+  return line;
+}
+
+function trustedLinkButton(item) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn";
+  button.dataset.dynamicAction = "openTrustedLink";
+  button.dataset.id = item.id;
+  button.setAttribute("aria-label", `在系统浏览器打开 ${item.name} 来源页面`);
+  button.textContent = "打开项目来源";
+  return button;
+}
+
+function renderCredits(items) {
+  const core = document.createDocumentFragment();
+  const dependencies = document.createDocumentFragment();
+  for (const item of items) {
+    if (item.core) {
+      const card = document.createElement("article");
+      card.className = "credit-card glass-panel";
+      const title = document.createElement("h2");
+      title.textContent = item.name;
+      const purpose = document.createElement("p");
+      purpose.className = "credit-purpose";
+      purpose.textContent = item.purpose;
+      card.append(title, purpose, creditText("作者/组织", item.author), creditText("许可证", item.license), creditText("版本/来源", item.version), trustedLinkButton(item));
+      core.append(card);
+    }
+    if (item.direct_dependency) {
+      const row = document.createElement("article");
+      row.className = "credit-dependency";
+      const title = document.createElement("h3");
+      title.textContent = `${item.name} ${item.version}`;
+      row.append(title, creditText("用途", item.purpose), creditText("作者/组织", item.author), creditText("许可证", item.license), creditText("许可说明", item.license_text), trustedLinkButton(item));
+      dependencies.append(row);
+    }
+  }
+  $("#creditsCore").replaceChildren(core);
+  $("#creditsDependencies").replaceChildren(dependencies);
+}
+
+async function loadCredits() {
+  const items = await request("/api/credits");
+  state.credits = Array.isArray(items) ? items : [];
+  renderCredits(state.credits);
 }
 
 function applyAppearance(settings) {
@@ -463,6 +518,7 @@ export const ACTION_HANDLERS = Object.freeze({
   showImport: async () => switchView("import"),
   showNexus: async () => switchView("nexus"),
   showSettings: async () => switchView("settings"),
+  showCredits: async () => switchView("credits"),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
   refreshMods: async () => loadMods(),
   openModsFolder: async () => request("/api/mods/open-folder"),
@@ -616,9 +672,10 @@ async function handleDynamicAction(event) {
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
       case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;
       case "revealAdult": revealAdultCard(target.closest(".nexus-card"), target); break;
+      case "openTrustedLink": await run(target, () => request("/api/system/open-trusted-link", { method: "POST", body: { id } }), { disable: false }); break;
       default: return;
     }
-  } catch (error) { if (!["toggleMod", "openModFolder", "openNexus", "copyNexusId"].includes(target.dataset.dynamicAction)) toast(actionableErrorMessage(error), "error"); }
+  } catch (error) { if (!["toggleMod", "openModFolder", "openNexus", "copyNexusId", "openTrustedLink"].includes(target.dataset.dynamicAction)) toast(actionableErrorMessage(error), "error"); }
   finally {
     inFlightDynamicActions.delete(actionKey);
     target.disabled = false;
@@ -642,6 +699,8 @@ async function init() {
   $("#modList").addEventListener("change", handleDynamicAction);
   $("#detectList").addEventListener("click", handleDynamicAction);
   $("#nexusGrid").addEventListener("click", handleDynamicAction);
+  $("#creditsCore").addEventListener("click", handleDynamicAction);
+  $("#creditsDependencies").addEventListener("click", handleDynamicAction);
   $("#conflictModal").addEventListener("cancel", async (event) => {
     event.preventDefault();
     try { await run(null, cancelImportConflict); } catch { /* run displayed the error */ }
