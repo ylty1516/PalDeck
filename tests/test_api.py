@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 from backend.app import create_app
+from backend.ue4ss_provider import Ue4ssAsset
 
 
 def _pak_zip(name: str = "Example.pak", content: bytes = b"pak-data") -> io.BytesIO:
@@ -17,6 +18,40 @@ def _pak_zip(name: str = "Example.pak", content: bytes = b"pak-data") -> io.Byte
         archive.writestr(name, content)
     payload.seek(0)
     return payload
+
+
+def _ue4ss_zip_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("dwmapi.dll", b"proxy")
+        archive.writestr("ue4ss/UE4SS.dll", b"dll")
+        archive.writestr("ue4ss/UE4SS-settings.ini", b"[General]\n")
+        archive.writestr("ue4ss/MemberVariableLayout.ini", b"layout")
+    return payload.getvalue()
+
+
+class FakeUe4ssProvider:
+    def __init__(self, archive: bytes):
+        self.archive = archive
+        self.calls = []
+        self.asset = Ue4ssAsset("UE4SS-Palworld.zip", len(archive), "a" * 64, "2026-01-02T03:04:05Z", "https://github.com/Okaetsu/RE-UE4SS/releases/download/experimental-palworld/UE4SS-Palworld.zip")
+        self.update_available = True
+
+    def bundled_archive(self):
+        self.calls.append("bundled")
+        return self.archive
+
+    def bundled_status(self):
+        return {"available": True, "asset": self.asset}
+
+    def check_upstream(self):
+        self.calls.append("check")
+        return {"asset": self.asset, "update_available": self.update_available}
+
+    def download_verified(self, asset, destination):
+        self.calls.append(("download", asset))
+        Path(destination).write_bytes(self.archive)
+        return Path(destination)
 
 
 def test_static_assets_are_public(app):
@@ -65,6 +100,88 @@ def test_mods_success_uses_standard_envelope(auth_client):
     response = auth_client.get("/api/mods")
     assert response.status_code == 200
     assert response.json == {"ok": True, "data": []}
+
+
+def test_ue4ss_endpoints_require_authentication(app):
+    for path in ("/api/ue4ss/install-bundled", "/api/ue4ss/check-upstream", "/api/ue4ss/install-upstream"):
+        response = app.test_client().post(path, json={})
+        assert response.status_code == 403
+        assert response.json["error_code"] == "invalid_session"
+
+
+def test_ue4ss_install_rejects_extra_fields_without_calling_provider(app, auth_client):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+
+    for path in ("/api/ue4ss/install-bundled", "/api/ue4ss/install-upstream"):
+        for field in ("url", "path", "repo", "asset"):
+            response = auth_client.post(path, json={field: "attacker-controlled"})
+            assert response.status_code == 400
+            assert response.json["error_code"] == "invalid_input"
+    assert provider.calls == []
+
+
+def test_ue4ss_bundled_install_maps_running_and_existing_conflict(app, auth_client, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: True)
+    running = auth_client.post("/api/ue4ss/install-bundled", json={})
+    assert running.status_code == 423
+    assert running.json["error_code"] == "game_running"
+
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+    win64 = Path(app.extensions["mod_service"].game_root) / "Pal" / "Binaries" / "Win64"
+    (win64 / "dwmapi.dll").write_bytes(b"manual")
+    conflict = auth_client.post("/api/ue4ss/install-bundled", json={})
+    assert conflict.status_code == 409
+    assert conflict.json["error_code"] == "ue4ss_conflict"
+    assert conflict.json["details"]["markers"]["dwmapi"] is True
+    confirmed = auth_client.post("/api/ue4ss/install-bundled", json={"confirm_replace": True})
+    assert confirmed.status_code == 200
+
+
+def test_ue4ss_check_tracks_server_asset_and_reports_same_or_new_digest(app, auth_client):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    provider.update_available = False
+    same = auth_client.post("/api/ue4ss/check-upstream", json={})
+    assert same.status_code == 200
+    assert same.json["data"]["update_available"] is False
+    assert same.json["data"]["asset"]["sha256"] == "a" * 64
+    assert app.extensions["ue4ss_pending_asset"]["asset"] is provider.asset
+
+    provider.update_available = True
+    newer = auth_client.post("/api/ue4ss/check-upstream", json={})
+    assert newer.json["data"]["update_available"] is True
+
+
+def test_ue4ss_upstream_install_requires_unexpired_server_check(app, auth_client):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    no_check = auth_client.post("/api/ue4ss/install-upstream", json={})
+    assert no_check.status_code == 409
+    assert no_check.json["error_code"] == "ue4ss_check_required"
+    assert not any(isinstance(call, tuple) for call in provider.calls)
+
+    assert auth_client.post("/api/ue4ss/check-upstream", json={}).status_code == 200
+    app.extensions["ue4ss_pending_asset"]["expires"] = time.time() - 1
+    expired = auth_client.post("/api/ue4ss/install-upstream", json={})
+    assert expired.status_code == 410
+    assert expired.json["error_code"] == "ue4ss_check_expired"
+    assert not any(isinstance(call, tuple) for call in provider.calls)
+
+
+def test_ue4ss_upstream_install_uses_server_asset_and_revalidates_zip(app, auth_client, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+    assert auth_client.post("/api/ue4ss/check-upstream", json={}).status_code == 200
+
+    installed = auth_client.post("/api/ue4ss/install-upstream", json={})
+
+    assert installed.status_code == 200
+    assert provider.calls[-1] == ("download", provider.asset)
+    assert "ue4ss_pending_asset" not in app.extensions
 
 
 def test_open_mod_folder_requires_authentication(app):

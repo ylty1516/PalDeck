@@ -21,6 +21,22 @@ from .process_utils import check_directory_writable, is_palworld_running
 
 GITHUB_API = "https://api.github.com/repos/UE4SS-RE/RE-UE4SS/releases/latest"
 USER_AGENT = "PalworldModManager/1.1 (UE4SS installer)"
+PALWORLD_REQUIRED_FILES = {
+    "dwmapi.dll",
+    "ue4ss/UE4SS.dll",
+    "ue4ss/UE4SS-settings.ini",
+    "ue4ss/MemberVariableLayout.ini",
+}
+
+
+class Ue4ssConflictError(Exception):
+    def __init__(self, markers: dict[str, bool]):
+        super().__init__("检测到已有 UE4SS 安装")
+        self.details = {"markers": markers}
+
+
+class Ue4ssGameRunningError(RuntimeError):
+    pass
 
 
 def _win64(game_root: Path | str) -> Path:
@@ -144,16 +160,51 @@ def install_from_zip(
     game_root: Path | str,
     zip_path: Path | str,
     policy: ArchivePolicy | None = None,
+    *,
+    confirm_replace: bool = False,
+    require_palworld_layout: bool = False,
 ) -> dict[str, Any]:
-    """Transactionally install a validated UE4SS framework package into Win64."""
-    root = Path(game_root)
-    zip_path = Path(zip_path)
-    if not zip_path.is_file():
-        raise FileNotFoundError(f"找不到文件: {zip_path}")
-    if zip_path.suffix.lower() != ".zip":
+    """Transactionally install a local UE4SS ZIP (including legacy layouts)."""
+    archive = Path(zip_path)
+    if not archive.is_file():
+        raise FileNotFoundError(f"找不到文件: {archive}")
+    if archive.suffix.lower() != ".zip":
         raise ValueError("UE4SS 安装仅支持 .zip（可直接拖入 zip，无需手动解压）")
+    return _install_archive(
+        game_root, archive, policy=policy, confirm_replace=confirm_replace,
+        require_palworld_layout=require_palworld_layout,
+    )
+
+
+def install_from_bytes(
+    game_root: Path | str,
+    archive_bytes: bytes,
+    policy: ArchivePolicy | None = None,
+    *,
+    confirm_replace: bool = False,
+    require_palworld_layout: bool = False,
+) -> dict[str, Any]:
+    """Install an immutable verified snapshot without reopening its source path."""
+    if not isinstance(archive_bytes, bytes):
+        raise TypeError("archive_bytes must be immutable bytes")
+    return _install_archive(
+        game_root, None, archive_bytes=archive_bytes, policy=policy,
+        confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
+    )
+
+
+def _install_archive(
+    game_root: Path | str,
+    archive_path: Path | None,
+    *,
+    archive_bytes: bytes | None = None,
+    policy: ArchivePolicy | None = None,
+    confirm_replace: bool = False,
+    require_palworld_layout: bool = False,
+) -> dict[str, Any]:
+    root = Path(game_root)
     if is_palworld_running():
-        raise RuntimeError("幻兽帕鲁正在运行，无法安装 UE4SS")
+        raise Ue4ssGameRunningError("幻兽帕鲁正在运行，无法安装 UE4SS")
 
     win64 = _win64(root)
     if not win64.is_dir():
@@ -161,6 +212,9 @@ def install_from_zip(
     validate_no_reparse_ancestors(win64)
     if not check_directory_writable(win64):
         raise PermissionError(f"目录不可写：{win64}")
+    current_status = status(root)
+    if current_status["installed"] and not confirm_replace:
+        raise Ue4ssConflictError(current_status["markers"])
 
     temp = Path(tempfile.mkdtemp(prefix="ue4ss_install_"))
     backups = temp / "backups"
@@ -170,7 +224,21 @@ def install_from_zip(
     removed_legacy = False
     try:
         extract = temp / "extract"
-        extract_archive_safely(zip_path, extract, policy=policy)
+        source_archive = archive_path
+        if archive_bytes is not None:
+            source_archive = temp / "archive.zip"
+            source_archive.write_bytes(archive_bytes)
+        if source_archive is None:
+            raise ValueError("缺少 UE4SS 压缩包")
+        extract_archive_safely(source_archive, extract, policy=policy)
+        if require_palworld_layout:
+            extracted_names = {
+                str(path.relative_to(extract)).replace("\\", "/")
+                for path in extract.rglob("*") if path.is_file()
+            }
+            missing = PALWORLD_REQUIRED_FILES - extracted_names
+            if missing:
+                raise ValueError(f"Palworld 专用 UE4SS 布局缺少文件: {sorted(missing)}")
         pkg = _find_package_root(extract)
         if not looks_like_ue4ss_framework(pkg) and not looks_like_ue4ss_framework(extract):
             raise ValueError(

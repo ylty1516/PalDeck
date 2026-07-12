@@ -81,10 +81,14 @@
             <label>游戏目录<input id="gamePathInput" type="text" data-action="editGamePath" placeholder="含 Palworld.exe 的目录"></label>
             <div class="button-row"><button type="button" class="btn" data-action="autoDetectGame">自动检测</button><button type="button" class="btn primary" data-action="saveGamePath">保存路径</button><button type="button" class="btn" data-action="repairFolders">修复目录</button></div>
             <div id="detectList" class="stack"></div><div id="pathInfo" class="result"></div>
-            <hr><p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
-            <div class="button-row"><button type="button" class="btn primary" data-action="installUe4ss">在线安装 UE4SS</button><button type="button" class="btn" data-action="refreshUe4ss">刷新状态</button><button type="button" class="btn" data-action="chooseUe4ssZip">本地 ZIP</button></div>
-            <input id="ue4ssZipInput" type="file" data-action="selectUe4ssZip" accept=".zip,application/zip">
-            <div id="ue4ssResult" class="result"></div>
+            <hr><section class="ue4ss-card" aria-label="Palworld 专用 UE4SS">
+              <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
+              <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
+              <p id="ue4ssUpdatedAt" class="ue4ss-meta">正在读取内置版本…</p><p id="ue4ssDigest" class="ue4ss-meta"></p>
+              <div class="button-row"><button type="button" class="btn primary" data-action="installUe4ss">安装内置</button><button type="button" class="btn" data-action="checkUe4ss">检查 GitHub</button><button type="button" class="btn" data-action="chooseUe4ssZip">本地 ZIP</button><button id="installUe4ssUpdate" type="button" class="btn primary" data-action="installUe4ssUpdate" hidden>下载并安装新版</button></div>
+              <input id="ue4ssZipInput" type="file" data-action="selectUe4ssZip" accept=".zip,application/zip">
+              <div id="ue4ssResult" class="result" aria-live="polite"></div>
+            </section>
             <hr><p id="updateStatus" class="muted">尚未检查更新</p>
             <div class="button-row"><button type="button" class="btn" data-action="checkUpdate">检查更新</button><button type="button" class="btn primary" data-action="applyUpdate">安装更新</button></div>
           </article>

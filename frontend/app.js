@@ -10,6 +10,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
+  ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
@@ -317,6 +318,9 @@ async function loadUe4ssStatus() {
   if (!state.gamePath) { $("#ue4ssStatus").textContent = "请先配置游戏目录"; return; }
   const status = await request("/api/ue4ss/status");
   $("#ue4ssStatus").textContent = status.installed ? "UE4SS 已安装" : "UE4SS 未安装";
+  const asset = status.bundled?.asset;
+  $("#ue4ssUpdatedAt").textContent = asset?.updated_at ? `内置更新：${asset.updated_at}` : "内置资源不可用";
+  $("#ue4ssDigest").textContent = asset?.sha256 ? `SHA-256：${asset.sha256.slice(0, 10)}` : "";
 }
 
 async function loadSettings() {
@@ -325,12 +329,44 @@ async function loadSettings() {
   await loadUe4ssStatus();
 }
 
-async function installZip(file) {
-  if (!file) return;
-  const form = new FormData(); form.append("file", file);
-  const result = await request("/api/ue4ss/install-zip", { method: "POST", body: form, timeout: 120000 });
+async function installWithUe4ssConfirmation(operation) {
+  try {
+    return await operation(false);
+  } catch (error) {
+    if (error.code === "ue4ss_conflict" && window.confirm("检测到已有 UE4SS 安装。是否确认替换？")) {
+      return operation(true);
+    }
+    throw error;
+  }
+}
+
+async function installFixedUe4ss(endpoint) {
+  const result = await installWithUe4ssConfirmation((confirmReplace) => request(endpoint, {
+    method: "POST", body: confirmReplace ? { confirm_replace: true } : {}, timeout: 120000,
+  }));
   $("#ue4ssResult").textContent = result.message || "UE4SS 安装完成";
   await loadUe4ssStatus();
+}
+
+async function installZip(file) {
+  if (!file) return;
+  const result = await installWithUe4ssConfirmation((confirmReplace) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (confirmReplace) form.append("confirm_replace", "true");
+    return request("/api/ue4ss/install-zip", { method: "POST", body: form, timeout: 120000 });
+  });
+  $("#ue4ssResult").textContent = result.message || "UE4SS 安装完成";
+  await loadUe4ssStatus();
+}
+
+async function checkUe4ssUpstream() {
+  const result = await request("/api/ue4ss/check-upstream", { method: "POST", body: {}, timeout: 30000 });
+  state.ue4ssUpdateAvailable = result.update_available === true;
+  $("#installUe4ssUpdate").hidden = !state.ue4ssUpdateAvailable;
+  $("#ue4ssResult").textContent = state.ue4ssUpdateAvailable
+    ? `发现新版 ${result.asset.updated_at} · ${result.asset.sha256.slice(0, 10)}`
+    : "GitHub 版本与内置版本相同";
 }
 
 function chooseTheme(event) { applyAppearance({ theme: event.currentTarget.dataset.themeValue }); }
@@ -362,8 +398,9 @@ export const ACTION_HANDLERS = Object.freeze({
   autoDetectGame: async () => { const data = await request("/api/game/detect"); renderDetectedGames($("#detectList"), data.installs || []); },
   saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); toast("游戏路径已保存", "success"); },
   repairFolders: async () => { await request("/api/game/ensure-folders", { method: "POST", body: {} }); toast("模组目录已修复", "success"); },
-  installUe4ss: async () => { const result = await request("/api/ue4ss/install-latest", { method: "POST", body: {}, timeout: 120000 }); $("#ue4ssResult").textContent = result.message || "安装完成"; await loadUe4ssStatus(); },
-  refreshUe4ss: async () => loadUe4ssStatus(),
+  installUe4ss: async () => installFixedUe4ss("/api/ue4ss/install-bundled"),
+  checkUe4ss: async () => checkUe4ssUpstream(),
+  installUe4ssUpdate: async () => installFixedUe4ss("/api/ue4ss/install-upstream"),
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
   selectUe4ssZip: async (event) => executeFileOperation(() => installZip(event.currentTarget.files?.[0])),
   checkUpdate: async () => { state.updateInfo = await request("/api/update/check", { timeout: 30000 }); $("#updateStatus").textContent = state.updateInfo.update_available ? `发现新版本 ${state.updateInfo.remote_version}` : `已是最新版 ${state.updateInfo.local_version}`; },

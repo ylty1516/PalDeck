@@ -395,6 +395,29 @@ def test_import_lifecycle_and_mod_generation_contract():
     assert "externalSignal" in api
 
 
+def test_ue4ss_card_uses_fixed_palworld_sources_and_real_actions():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    for label in ("Palworld 专用", "Okaetsu", "安装内置", "检查 GitHub", "本地 ZIP"):
+        assert label in html
+    for endpoint in (
+        "/api/ue4ss/install-bundled", "/api/ue4ss/check-upstream",
+        "/api/ue4ss/install-upstream",
+    ):
+        assert endpoint in app
+    assert "/api/ue4ss/install-latest" not in app
+    assert "在线安装 UE4SS" not in html
+    assert "ue4ssUpdatedAt" in html and "ue4ssDigest" in html
+    assert 'update_available' in app
+    assert 'confirm_replace: true' in app
+    assert 'error.code === "ue4ss_conflict"' in app
+    assert 'hidden = !state.ue4ssUpdateAvailable' in app
+    assert ".ue4ss-card" in css
+    for forbidden in ("browser_download_url", "download_url", "ue4ssUrl", "asset_url"):
+        assert forbidden not in app
+
+
 def test_all_javascript_modules_pass_node_syntax_check():
     for path in (APP, API, EFFECTS, RENDER, INTERACTION):
         result = subprocess.run(

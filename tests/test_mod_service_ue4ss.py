@@ -1,3 +1,4 @@
+import io
 import json
 import zipfile
 from pathlib import Path
@@ -346,7 +347,7 @@ def test_installer_rolls_back_partial_publish_and_does_not_fake_logicmods_enable
     monkeypatch.setattr(ue4ss_installer.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="publish failed"):
-        ue4ss_installer.install_from_zip(fake_game_root, package)
+        ue4ss_installer.install_from_zip(fake_game_root, package, confirm_replace=True)
 
     assert (win64 / "UE4SS.dll").read_bytes() == b"old"
     assert not (win64 / "dwmapi.dll").exists()
@@ -391,6 +392,95 @@ def test_installer_rejects_traversal_in_otherwise_valid_package(
 
     assert not (tmp_path / "escape.txt").exists()
     assert not (fake_game_root / "Pal" / "Binaries" / "Win64" / "UE4SS.dll").exists()
+
+
+def _palworld_archive_bytes(*, missing: str | None = None) -> bytes:
+    payload = io.BytesIO()
+    files = {
+        "dwmapi.dll": b"proxy",
+        "ue4ss/UE4SS.dll": b"dll",
+        "ue4ss/UE4SS-settings.ini": b"[General]\n",
+        "ue4ss/MemberVariableLayout.ini": b"layout",
+    }
+    with zipfile.ZipFile(payload, "w") as archive:
+        for name, content in files.items():
+            if name != missing:
+                archive.writestr(name, content)
+    return payload.getvalue()
+
+
+@pytest.mark.parametrize("missing", [
+    "dwmapi.dll", "ue4ss/UE4SS.dll", "ue4ss/UE4SS-settings.ini",
+    "ue4ss/MemberVariableLayout.ini",
+])
+def test_bundled_bytes_require_complete_palworld_layout(fake_game_root, monkeypatch, missing):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+
+    with pytest.raises(ValueError, match="Palworld"):
+        ue4ss_installer.install_from_bytes(
+            fake_game_root, _palworld_archive_bytes(missing=missing),
+            require_palworld_layout=True,
+        )
+
+
+def test_bundled_bytes_are_written_only_to_private_temp_and_not_reloaded_from_vendor(
+    fake_game_root, monkeypatch
+):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    observed = []
+    original_extract = ue4ss_installer.extract_archive_safely
+
+    def observing_extract(path, *args, **kwargs):
+        observed.append(Path(path))
+        assert Path(path).name == "archive.zip"
+        assert "ue4ss_install_" in str(path.parent)
+        return original_extract(path, *args, **kwargs)
+
+    monkeypatch.setattr(ue4ss_installer, "extract_archive_safely", observing_extract)
+    result = ue4ss_installer.install_from_bytes(
+        fake_game_root, _palworld_archive_bytes(), require_palworld_layout=True
+    )
+
+    assert result["ok"] is True
+    assert len(observed) == 1
+
+
+def test_existing_ue4ss_requires_confirmation_and_reports_markers(fake_game_root, monkeypatch):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    (win64 / "dwmapi.dll").write_bytes(b"manual")
+    (win64 / "UE4SS.dll").write_bytes(b"manual-dll")
+
+    with pytest.raises(ue4ss_installer.Ue4ssConflictError) as conflict:
+        ue4ss_installer.install_from_bytes(fake_game_root, _palworld_archive_bytes())
+
+    assert conflict.value.details["markers"]["dwmapi"] is True
+    assert (win64 / "dwmapi.dll").read_bytes() == b"manual"
+    result = ue4ss_installer.install_from_bytes(
+        fake_game_root, _palworld_archive_bytes(), confirm_replace=True
+    )
+    assert result["ok"] is True
+    assert (win64 / "dwmapi.dll").read_bytes() == b"proxy"
+
+
+def test_confirmed_existing_install_rolls_back_on_publish_failure(fake_game_root, monkeypatch):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    (win64 / "dwmapi.dll").write_bytes(b"old-proxy")
+    original_replace = ue4ss_installer.os.replace
+
+    def fail_new_dll(source, destination):
+        if Path(destination) == win64 / "ue4ss" / "UE4SS.dll":
+            raise OSError("publish failed")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(ue4ss_installer.os, "replace", fail_new_dll)
+    with pytest.raises(OSError, match="publish failed"):
+        ue4ss_installer.install_from_bytes(
+            fake_game_root, _palworld_archive_bytes(), confirm_replace=True
+        )
+    assert (win64 / "dwmapi.dll").read_bytes() == b"old-proxy"
+    assert not (win64 / "ue4ss" / "UE4SS.dll").exists()
 
 
 def test_download_rejects_non_official_asset_url(tmp_path, monkeypatch):
