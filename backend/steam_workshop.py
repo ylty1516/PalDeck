@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
@@ -31,6 +32,7 @@ _MAX_DEPENDENCIES = 128
 _MAX_RULES = 64
 _MAX_TARGET = 512
 _MAX_INFO_BYTES = 1024 * 1024
+_MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 _MAX_WORKSHOP_ITEMS = 4096
 _WINDOWS_DEVICES = {
     "CON",
@@ -89,6 +91,15 @@ class _SettingsDocument:
     bom: bytes
     newline: str
     text: str
+    identity: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _DependencyGraph:
+    mods_by_id: dict[str, WorkshopMod]
+    forward: dict[str, tuple[str, ...]]
+    reverse: dict[str, tuple[str, ...]]
+    missing: dict[str, tuple[str, ...]]
 
 
 class SteamWorkshopService:
@@ -117,6 +128,7 @@ class SteamWorkshopService:
         self._steam_roots = roots
         self._cache_fingerprint: tuple[object, ...] | None = None
         self._cache: tuple[WorkshopMod, ...] | None = None
+        self._scan_lock = threading.RLock()
         self.last_scan_paths: list[str] = []
 
     @property
@@ -126,6 +138,10 @@ class SteamWorkshopService:
         return self.game_root / "Palworld" / "Mods" / "PalModSettings.ini"
 
     def scan(self, *, force: bool = False) -> list[WorkshopMod]:
+        with self._scan_lock:
+            return self._scan_locked(force=force)
+
+    def _scan_locked(self, *, force: bool) -> list[WorkshopMod]:
         self.last_scan_paths = []
         candidates: list[tuple[str, Path, Path, Path]] = []
         fingerprint: list[object] = []
@@ -180,7 +196,8 @@ class SteamWorkshopService:
         """Atomically update ActiveModList using only the latest trusted scan."""
         if type(enabled) is not bool or type(confirm_dependents) is not bool:
             raise ValueError("enabled and confirm_dependents must be boolean")
-        target, mods = self._trusted_mod(workshop_id)
+        if not isinstance(workshop_id, str) or _WORKSHOP_ID.fullmatch(workshop_id) is None:
+            raise ValueError("workshop_id must be a positive decimal ID")
         if self.game_root is None:
             raise ValueError("game_root is required for Workshop state changes")
 
@@ -189,20 +206,23 @@ class SteamWorkshopService:
         with game_write_lock(self.lock_root):
             if self.game_running():
                 raise GameRunningError("Palworld 正在运行，无法修改 Workshop 模组")
+            mods = tuple(self.scan(force=True))
+            target = self._trusted_mod(workshop_id, mods)
+            graph = _build_dependency_graph(mods)
             document = _read_settings(self.settings_path)
             original = document.bom + document.text.encode(document.encoding)
             active = _active_packages(document.text)
             affected: list[str] = []
 
             if enabled:
-                additions = _dependency_order(target, mods)
+                additions = _dependency_order(target, graph)
                 updated = _updated_settings(
                     document,
                     enable_packages=[mod.package_name for mod in additions],
                     enable_global=True,
                 )
             else:
-                affected = _enabled_dependents(target, mods, active)
+                affected = _enabled_dependents(target, graph, active)
                 if affected and not confirm_dependents:
                     raise WorkshopDependencyError(
                         {
@@ -217,7 +237,12 @@ class SteamWorkshopService:
 
             backup = None
             if updated != original:
-                backup = _atomic_write(document.path, updated, original)
+                backup = _atomic_write(
+                    document.path,
+                    updated,
+                    original,
+                    document.identity,
+                )
             try:
                 confirmed = _read_settings(document.path)
                 confirmed_raw = confirmed.bom + confirmed.text.encode(confirmed.encoding)
@@ -246,19 +271,16 @@ class SteamWorkshopService:
                 result["affected_dependents"] = affected
             return result
 
+    @staticmethod
     def _trusted_mod(
-        self, workshop_id: str
-    ) -> tuple[WorkshopMod, tuple[WorkshopMod, ...]]:
-        if not isinstance(workshop_id, str) or _WORKSHOP_ID.fullmatch(workshop_id) is None:
-            raise ValueError("workshop_id must be a positive decimal ID")
-        if self._cache is None:
-            raise ValueError("a trusted Workshop scan is required")
-        matches = [mod for mod in self._cache if mod.workshop_id == workshop_id]
+        workshop_id: str, mods: tuple[WorkshopMod, ...]
+    ) -> WorkshopMod:
+        matches = [mod for mod in mods if mod.workshop_id == workshop_id]
         if len(matches) != 1:
             raise ValueError("Workshop ID is not present in the latest scan")
         if not matches[0].valid:
             raise ValueError("invalid Workshop records cannot be toggled")
-        return matches[0], self._cache
+        return matches[0]
 
     def _record(self, path: Path) -> None:
         self.last_scan_paths.append(str(path))
@@ -367,7 +389,11 @@ class SteamWorkshopService:
 
 
 def _read_settings(path: Path) -> _SettingsDocument:
-    raw = path.read_bytes()
+    raw, opened = read_safe_file(
+        path,
+        max_bytes=_MAX_SETTINGS_BYTES,
+        reparse_checker=_is_reparse,
+    )
     if raw.startswith(b"\xef\xbb\xbf"):
         bom, encoding, payload = b"\xef\xbb\xbf", "utf-8", raw[3:]
     elif raw.startswith(b"\xff\xfe"):
@@ -376,7 +402,14 @@ def _read_settings(path: Path) -> _SettingsDocument:
         bom, encoding, payload = b"", "utf-8", raw
     text = payload.decode(encoding)
     newline = "\r\n" if "\r\n" in text else "\n"
-    return _SettingsDocument(path, encoding, bom, newline, text)
+    return _SettingsDocument(
+        path,
+        encoding,
+        bom,
+        newline,
+        text,
+        (opened.st_dev, opened.st_ino),
+    )
 
 
 def _settings_range(lines: list[str]) -> tuple[int, int] | None:
@@ -519,15 +552,11 @@ def _updated_settings(
     return document.bom + "".join(before + body + after).encode(document.encoding)
 
 
-def _mod_indexes(
-    mods: tuple[WorkshopMod, ...],
-) -> tuple[dict[str, WorkshopMod], dict[str, WorkshopMod]]:
+def _build_dependency_graph(mods: tuple[WorkshopMod, ...]) -> _DependencyGraph:
     by_id = {mod.workshop_id: mod for mod in mods if mod.valid}
     by_package: dict[str, WorkshopMod] = {}
     ambiguous: set[str] = set()
-    for mod in mods:
-        if not mod.valid:
-            continue
+    for mod in by_id.values():
         key = mod.package_name.casefold()
         if key in by_package:
             ambiguous.add(key)
@@ -535,103 +564,128 @@ def _mod_indexes(
             by_package[key] = mod
     for key in ambiguous:
         by_package.pop(key, None)
-    return by_id, by_package
 
-
-def _resolve_dependency(
-    dependency: str,
-    by_id: dict[str, WorkshopMod],
-    by_package: dict[str, WorkshopMod],
-) -> WorkshopMod | None:
-    if _WORKSHOP_ID.fullmatch(dependency):
-        return by_id.get(dependency)
-    return by_package.get(dependency.casefold())
+    forward: dict[str, tuple[str, ...]] = {}
+    reverse_lists: dict[str, list[str]] = {workshop_id: [] for workshop_id in by_id}
+    missing: dict[str, tuple[str, ...]] = {}
+    for mod in by_id.values():
+        resolved_ids: list[str] = []
+        unresolved: list[str] = []
+        for dependency in mod.dependencies:
+            resolved = (
+                by_id.get(dependency)
+                if _WORKSHOP_ID.fullmatch(dependency)
+                else by_package.get(dependency.casefold())
+            )
+            if resolved is None:
+                unresolved.append(dependency)
+            else:
+                resolved_ids.append(resolved.workshop_id)
+                reverse_lists[resolved.workshop_id].append(mod.workshop_id)
+        forward[mod.workshop_id] = tuple(dict.fromkeys(resolved_ids))
+        if unresolved:
+            missing[mod.workshop_id] = tuple(unresolved)
+    return _DependencyGraph(
+        by_id,
+        forward,
+        {key: tuple(values) for key, values in reverse_lists.items()},
+        missing,
+    )
 
 
 def _dependency_order(
-    target: WorkshopMod, mods: tuple[WorkshopMod, ...]
+    target: WorkshopMod, graph: _DependencyGraph
 ) -> list[WorkshopMod]:
-    by_id, by_package = _mod_indexes(mods)
-    visiting: list[str] = []
-    visited: set[str] = set()
+    colors: dict[str, int] = {}
+    positions: dict[str, int] = {target.workshop_id: 0}
+    stack: list[tuple[str, int]] = [(target.workshop_id, 0)]
     ordered: list[WorkshopMod] = []
-
-    def visit(mod: WorkshopMod) -> None:
-        if mod.workshop_id in visiting:
-            first = visiting.index(mod.workshop_id)
-            raise WorkshopDependencyError(
-                {
-                    "reason": "dependency_cycle",
-                    "cycle": visiting[first:] + [mod.workshop_id],
-                }
-            )
-        if mod.workshop_id in visited:
-            return
-        visiting.append(mod.workshop_id)
-        missing: list[str] = []
-        dependencies: list[WorkshopMod] = []
-        for dependency in mod.dependencies:
-            resolved = _resolve_dependency(dependency, by_id, by_package)
-            if resolved is None:
-                missing.append(dependency)
-            else:
-                dependencies.append(resolved)
-        if missing:
+    colors[target.workshop_id] = 1
+    while stack:
+        workshop_id, dependency_index = stack[-1]
+        unresolved = graph.missing.get(workshop_id)
+        if unresolved:
             raise WorkshopDependencyError(
                 {
                     "reason": "missing_dependencies",
-                    "workshop_id": mod.workshop_id,
-                    "missing": missing,
+                    "workshop_id": workshop_id,
+                    "missing": list(unresolved),
                 }
             )
-        for dependency in dependencies:
-            visit(dependency)
-        visiting.pop()
-        visited.add(mod.workshop_id)
-        ordered.append(mod)
-
-    visit(target)
+        dependencies = graph.forward[workshop_id]
+        if dependency_index >= len(dependencies):
+            stack.pop()
+            positions.pop(workshop_id, None)
+            colors[workshop_id] = 2
+            ordered.append(graph.mods_by_id[workshop_id])
+            continue
+        dependency_id = dependencies[dependency_index]
+        stack[-1] = (workshop_id, dependency_index + 1)
+        color = colors.get(dependency_id, 0)
+        if color == 2:
+            continue
+        if color == 1:
+            first = positions[dependency_id]
+            cycle = [item[0] for item in stack[first:]] + [dependency_id]
+            raise WorkshopDependencyError(
+                {"reason": "dependency_cycle", "cycle": cycle}
+            )
+        colors[dependency_id] = 1
+        positions[dependency_id] = len(stack)
+        stack.append((dependency_id, 0))
     return ordered
 
 
 def _enabled_dependents(
     target: WorkshopMod,
-    mods: tuple[WorkshopMod, ...],
+    graph: _DependencyGraph,
     active: list[str],
 ) -> list[str]:
     active_keys = {package.casefold() for package in active}
-    by_id, by_package = _mod_indexes(mods)
-
-    def depends_on(mod: WorkshopMod, examined: set[str]) -> bool:
-        if mod.workshop_id in examined:
-            return False
-        examined.add(mod.workshop_id)
-        for dependency in mod.dependencies:
-            resolved = _resolve_dependency(dependency, by_id, by_package)
-            if resolved is None:
-                continue
-            if resolved.workshop_id == target.workshop_id or depends_on(resolved, examined):
-                return True
-        return False
-
-    dependents = [
-        mod.workshop_id
-        for mod in mods
-        if mod.valid
-        and mod.workshop_id != target.workshop_id
-        and mod.package_name.casefold() in active_keys
-        and depends_on(mod, set())
-    ]
-    return sorted(dependents, key=int)
+    reached: set[str] = set()
+    pending = list(graph.reverse.get(target.workshop_id, ()))
+    while pending:
+        workshop_id = pending.pop()
+        if workshop_id in reached:
+            continue
+        reached.add(workshop_id)
+        pending.extend(graph.reverse.get(workshop_id, ()))
+    return sorted(
+        (
+            workshop_id
+            for workshop_id in reached
+            if graph.mods_by_id[workshop_id].package_name.casefold() in active_keys
+        ),
+        key=int,
+    )
 
 
-def _write_exclusive(path: Path, content: bytes) -> None:
+def _safe_file_identity(
+    path: Path, expected: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    if any(_is_reparse(candidate) for candidate in (path, *path.parents)):
+        raise UnsafeSteamFileError("unsafe settings path")
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise UnsafeSteamFileError("unavailable settings path") from error
+    identity = (metadata.st_dev, metadata.st_ino)
+    if not stat.S_ISREG(metadata.st_mode) or (expected is not None and identity != expected):
+        raise UnsafeSteamFileError("settings file changed")
+    return identity
+
+
+def _write_exclusive(path: Path, content: bytes) -> tuple[int, int]:
     descriptor: int | None = None
     created = False
     try:
+        if any(_is_reparse(candidate) for candidate in path.parents):
+            raise UnsafeSteamFileError("unsafe settings directory")
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags, 0o600)
         created = True
+        opened = os.fstat(descriptor)
         offset = 0
         while offset < len(content):
             written = os.write(descriptor, content[offset:])
@@ -639,8 +693,10 @@ def _write_exclusive(path: Path, content: bytes) -> None:
                 raise OSError("failed to write PalModSettings.ini transaction file")
             offset += written
         os.fsync(descriptor)
+        identity = _safe_file_identity(path, (opened.st_dev, opened.st_ino))
         os.close(descriptor)
         descriptor = None
+        return identity
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
@@ -649,17 +705,40 @@ def _write_exclusive(path: Path, content: bytes) -> None:
         raise
 
 
-def _atomic_write(path: Path, content: bytes, original: bytes) -> Path:
+def _safe_replace(
+    source: Path,
+    destination: Path,
+    *,
+    source_identity: tuple[int, int],
+    destination_identity: tuple[int, int],
+) -> tuple[int, int]:
+    _safe_file_identity(source, source_identity)
+    _safe_file_identity(destination, destination_identity)
+    os.replace(source, destination)
+    return _safe_file_identity(destination, source_identity)
+
+
+def _atomic_write(
+    path: Path,
+    content: bytes,
+    original: bytes,
+    original_identity: tuple[int, int],
+) -> Path:
     backup = path.with_name(f".{path.name}.{uuid.uuid4().hex}.backup")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     backup_created = False
     temporary_created = False
     try:
-        _write_exclusive(backup, original)
+        backup_identity = _write_exclusive(backup, original)
         backup_created = True
-        _write_exclusive(temporary, content)
+        temporary_identity = _write_exclusive(temporary, content)
         temporary_created = True
-        os.replace(temporary, path)
+        _safe_replace(
+            temporary,
+            path,
+            source_identity=temporary_identity,
+            destination_identity=original_identity,
+        )
         temporary_created = False
         return backup
     except BaseException:
@@ -671,7 +750,12 @@ def _atomic_write(path: Path, content: bytes, original: bytes) -> Path:
 
 
 def _restore_backup(path: Path, backup: Path) -> None:
-    os.replace(backup, path)
+    _safe_replace(
+        backup,
+        path,
+        source_identity=_safe_file_identity(backup),
+        destination_identity=_safe_file_identity(path),
+    )
 
 
 def _validate_info(value: Any) -> dict[str, Any]:

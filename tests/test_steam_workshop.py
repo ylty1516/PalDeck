@@ -4,8 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from backend.game_detector import UnsafeSteamFileError
 from backend.mod_service import GameRunningError, ModService
-from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError
+from backend.steam_workshop import (
+    SteamWorkshopService,
+    WorkshopDependencyError,
+    WorkshopMod,
+)
 
 
 def write_library_config(steam_root: Path, libraries: list[Path]) -> None:
@@ -756,7 +761,7 @@ def test_disable_still_detects_target_when_dependent_has_another_missing_depende
 def test_set_enabled_rejects_unscanned_unknown_invalid_and_non_numeric_records(tmp_path):
     steam = tmp_path / "Steam"
     game = tmp_path / "Game"
-    service = SteamWorkshopService(steam, game)
+    service = SteamWorkshopService(steam, game, game_running=lambda: False)
     for value in ("../1001", "steam-workshop:1001", "1001"):
         with pytest.raises(ValueError):
             service.set_enabled(value, True)
@@ -770,6 +775,179 @@ def test_set_enabled_rejects_unscanned_unknown_invalid_and_non_numeric_records(t
         service.set_enabled("9999", True)
     with pytest.raises(ValueError):
         service.set_enabled("1002", True)
+
+
+@pytest.mark.parametrize("unsafe_part", ["Mods", "PalModSettings.ini"])
+def test_settings_reparse_or_junction_is_rejected_without_external_write(
+    tmp_path, monkeypatch, unsafe_part
+):
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    external_settings = settings
+    if unsafe_part == "Mods":
+        import subprocess
+
+        external = tmp_path / "ExternalMods"
+        external.mkdir()
+        external_settings = external / settings.name
+        external_settings.write_bytes(original)
+        settings.unlink()
+        settings.parent.rmdir()
+        if os.name == "nt":
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(settings.parent), str(external)],
+                capture_output=True,
+                check=False,
+            )
+            if created.returncode:
+                pytest.skip("junction creation is unavailable")
+        else:
+            settings.parent.symlink_to(external, target_is_directory=True)
+    else:
+        real_reparse = steam_workshop._is_reparse
+        monkeypatch.setattr(
+            steam_workshop,
+            "_is_reparse",
+            lambda path: Path(path) == settings or real_reparse(Path(path)),
+        )
+
+    with pytest.raises((UnsafeSteamFileError, ValueError)):
+        service.set_enabled("1001", True)
+
+    assert external_settings.read_bytes() == original
+
+
+def test_settings_descriptor_identity_swap_is_rejected(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    external = tmp_path / "external.ini"
+    external.write_bytes(original)
+    real_open = steam_workshop.os.open
+
+    def swapped_open(path, flags, *args, **kwargs):
+        if Path(path) == settings and not flags & os.O_WRONLY:
+            return real_open(external, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(steam_workshop.os, "open", swapped_open)
+
+    with pytest.raises(UnsafeSteamFileError):
+        service.set_enabled("1001", True)
+
+    assert settings.read_bytes() == original
+    assert external.read_bytes() == original
+
+
+def test_set_enabled_refreshes_deleted_and_changed_metadata_under_lock(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Base", "Dependencies": []},
+            "1002": {"PackageName": "OldFeature", "Dependencies": []},
+        },
+    )
+    settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
+    info = service._cache[1].source_dir / "Info.json"
+    info.write_text(
+        json.dumps(valid_info(PackageName="NewFeature", Dependencies=["Base"])),
+        encoding="utf-8",
+    )
+
+    result = service.set_enabled("1002", True)
+
+    assert result["package_name"] == "NewFeature"
+    assert active_values(settings) == ["Base", "NewFeature"]
+
+    info.unlink()
+    with pytest.raises(ValueError):
+        service.set_enabled("1002", False)
+
+
+def test_scan_and_set_enabled_share_one_cache_snapshot(tmp_path, monkeypatch):
+    import threading
+    import time
+    from backend import steam_workshop
+
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Feature", "Dependencies": []}}
+    )
+    settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
+    original_read = steam_workshop.SteamWorkshopService._read_item
+
+    def slow_read(*args):
+        time.sleep(0.02)
+        return original_read(*args)
+
+    monkeypatch.setattr(
+        steam_workshop.SteamWorkshopService,
+        "_read_item",
+        staticmethod(slow_read),
+    )
+    errors = []
+    rescanner = threading.Thread(
+        target=lambda: service.scan(force=True),
+    )
+    rescanner.start()
+    try:
+        service.set_enabled("1001", True)
+    except BaseException as error:
+        errors.append(error)
+    rescanner.join()
+
+    assert errors == []
+    assert service._cache is not None
+    assert active_values(settings) == ["Feature"]
+
+
+def test_iterative_dependency_graph_supports_1200_mod_chain(tmp_path, monkeypatch):
+    count = 1200
+    game = tmp_path / "Game"
+    settings = game / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(b"[PalModSettings]\nbGlobalEnableMod=False\n")
+    mods = tuple(
+        WorkshopMod(
+            workshop_id=str(10000 + index),
+            mod_name=f"Chain {index}",
+            package_name=f"Chain{index}",
+            author="Author",
+            version="1",
+            dependencies=() if index == 0 else (f"Chain{index - 1}",),
+            install_types=("Paks",),
+            install_targets=("Pal/Content/Paks/~mods",),
+            source_dir=tmp_path / "Workshop" / str(10000 + index),
+            updated_at=index,
+            valid=True,
+            error=None,
+        )
+        for index in range(count)
+    )
+    service = SteamWorkshopService(
+        tmp_path / "Steam",
+        game,
+        game_running=lambda: False,
+        lock_root=tmp_path / "Data",
+    )
+    monkeypatch.setattr(service, "scan", lambda *, force=False: list(mods))
+
+    service.set_enabled(str(10000 + count - 1), True)
+    assert active_values(settings) == [f"Chain{index}" for index in range(count)]
+
+    with pytest.raises(WorkshopDependencyError) as caught:
+        service.set_enabled("10000", False)
+    assert len(caught.value.details["dependents"]) == count - 1
+    result = service.set_enabled("10000", False, confirm_dependents=True)
+    assert result["enabled"] is False
 
 
 def test_game_running_rejects_change_without_touching_settings(tmp_path):
