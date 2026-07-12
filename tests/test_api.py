@@ -830,12 +830,14 @@ def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation
     )
 
     assert rescanned.status_code == 200
-    assert enabled.json["data"]["enabled"] is True
-    assert disabled.json["data"]["enabled"] is False
+    assert enabled.json["data"][0]["enabled"] is True
+    assert disabled.json["data"][0]["enabled"] is False
     assert workshop.calls == [
         ("list", True),
         ("toggle", "3625223587", True, False),
+        ("list", False),
         ("toggle", "3625223587", False, True),
+        ("list", False),
     ]
 
 
@@ -882,6 +884,34 @@ def test_workshop_errors_map_game_running_and_dependents_to_structured_responses
     assert conflict.status_code == 409
     assert conflict.json["error_code"] == "workshop_dependency_conflict"
     assert conflict.json["details"]["dependents"] == ["1001"]
+
+
+def test_enabling_mod_with_workshop_ue4ss_dependency_is_blocked_by_manual_ue4ss(
+    app, auth_client, tmp_path, monkeypatch
+):
+    game_root = Path(app.extensions["mod_service"].game_root)
+    settings = game_root / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    original = "[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_text(original, encoding="utf-8")
+    workshop = SteamWorkshopService(
+        tmp_path / "Steam", game_root, game_running=lambda: False,
+        lock_root=app.config["DATA_DIR"],
+    )
+    mods = [
+        WorkshopMod("1001", "Framework", "Framework", "Author", "1", (), ("UE4SS",), ("Pal/Binaries/Win64",), tmp_path / "1001", 1, True, None),
+        WorkshopMod("1002", "Feature", "Feature", "Author", "1", ("1001",), ("Paks",), ("Pal/Content/Paks/~mods",), tmp_path / "1002", 1, True, None),
+    ]
+    monkeypatch.setattr(workshop, "scan", lambda *, force=False: mods)
+    app.extensions["workshop_service"] = workshop
+    win64 = game_root / "Pal" / "Binaries" / "Win64"
+    (win64 / "dwmapi.dll").write_bytes(b"manual")
+
+    response = auth_client.post("/api/workshop/1002/enable", json={})
+
+    assert response.status_code == 409
+    assert response.json["error_code"] == "ue4ss_conflict"
+    assert settings.read_text(encoding="utf-8") == original
 
 
 def test_workshop_ue4ss_and_manual_ue4ss_are_mutually_exclusive(app, auth_client, monkeypatch):

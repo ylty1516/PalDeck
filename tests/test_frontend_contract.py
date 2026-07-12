@@ -450,7 +450,12 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     assert 'data-action="approveWorkshopDependency"' in html
     assert "confirm_dependents: true" in app
     assert "workshop_dependency_conflict" in app
-    assert "replaceWorkshopMod" in app
+    assert "replaceWorkshopMods" in app
+    updater = re.search(r"function replaceWorkshopMods\(authoritative\) \{(.*?)^\}", app, re.S | re.M)
+    assert updater
+    assert "authoritative.map" in updater.group(1)
+    assert 'mod.source !== "steam_workshop"' in updater.group(1)
+    assert "state.mods = [...localMods, ...workshopMods]" in updater.group(1)
     assert ".source-workshop" in css
 
 

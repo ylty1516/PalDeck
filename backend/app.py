@@ -364,10 +364,12 @@ def create_app(
                     409, "ue4ss_conflict", {"reason": "manual_ue4ss_installed"},
                 )
 
-        return success(workshop_service().set_enabled(
+        workshop = workshop_service()
+        workshop.set_enabled(
             workshop_id, enabled, confirm_dependents=confirm,
             conflict_validator=reject_manual_ue4ss,
-        ))
+        )
+        return success(workshop.list_mods())
 
     @app.post("/api/workshop/<workshop_id>/open-page")
     def open_workshop_page(workshop_id: str):

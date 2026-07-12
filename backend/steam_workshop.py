@@ -237,16 +237,17 @@ class SteamWorkshopService:
                 raise GameRunningError("Palworld 正在运行，无法修改 Workshop 模组")
             mods = tuple(self.scan(force=True))
             target = self._trusted_mod(workshop_id, mods)
-            if conflict_validator is not None:
-                conflict_validator(target)
             graph = _build_dependency_graph(mods)
+            additions = _dependency_order(target, graph) if enabled else []
+            if conflict_validator is not None:
+                for addition in additions:
+                    conflict_validator(addition)
             document = _read_settings(self.settings_path)
             original = document.bom + document.text.encode(document.encoding)
             active = _active_packages(document.text)
             affected: list[str] = []
 
             if enabled:
-                additions = _dependency_order(target, graph)
                 updated = _updated_settings(
                     document,
                     enable_packages=[mod.package_name for mod in additions],

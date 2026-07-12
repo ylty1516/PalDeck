@@ -262,9 +262,10 @@ async function deletePendingMod() {
   }
 }
 
-function replaceWorkshopMod(authoritative) {
-  const identity = `steam-workshop:${authoritative.workshop_id}`;
-  state.mods = state.mods.map((mod) => String(mod.id) === identity ? authoritative : mod);
+function replaceWorkshopMods(authoritative) {
+  const localMods = state.mods.filter((mod) => mod.source !== "steam_workshop");
+  const workshopMods = authoritative.map((mod) => ({ ...mod }));
+  state.mods = [...localMods, ...workshopMods];
   filterMods();
 }
 
@@ -286,7 +287,7 @@ async function toggleWorkshop(id, enabled, confirmDependents = false) {
       method: "POST", body: confirmDependents ? { confirm_dependents: true } : {},
     });
     state.pendingWorkshopDependency = null;
-    replaceWorkshopMod(authoritative);
+    replaceWorkshopMods(authoritative);
     toast(enabled ? "Workshop 模组已启用" : "Workshop 模组已禁用", "success");
   } catch (error) {
     if (error instanceof ApiError && error.status === 409 && error.code === "workshop_dependency_conflict") {

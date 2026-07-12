@@ -690,6 +690,30 @@ def test_enable_reorders_existing_feature_after_missing_dependency_only(tmp_path
     )
 
 
+def test_enable_validates_every_dependency_before_writing(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"PackageName": "Framework", "Dependencies": [], "InstallRule": [{"Type": "UE4SS", "Target": "Pal/Binaries/Win64"}]},
+            "1002": {"PackageName": "Feature", "Dependencies": ["1001"], "InstallRule": [{"Type": "Paks", "Target": "Pal/Content/Paks/~mods"}]},
+        },
+    )
+    original = b"[PalModSettings]\nbGlobalEnableMod=False\n"
+    settings.write_bytes(original)
+    visited = []
+
+    def reject_ue4ss(mod):
+        visited.append(mod.workshop_id)
+        if "UE4SS" in mod.install_types:
+            raise RuntimeError("manual UE4SS installed")
+
+    with pytest.raises(RuntimeError, match="manual UE4SS"):
+        service.set_enabled("1002", True, conflict_validator=reject_ue4ss)
+
+    assert visited == ["1001"]
+    assert settings.read_bytes() == original
+
+
 def test_enable_adds_transitive_dependencies_in_topological_order_by_name_or_id(tmp_path):
     service, settings = workshop_service(
         tmp_path,
