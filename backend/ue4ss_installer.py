@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 import tempfile
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -19,8 +16,6 @@ from .game_detector import get_mod_directories, has_ue4ss
 from .manifest_store import validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
 
-GITHUB_API = "https://api.github.com/repos/UE4SS-RE/RE-UE4SS/releases/latest"
-USER_AGENT = "PalworldModManager/1.1 (UE4SS installer)"
 PALWORLD_REQUIRED_FILES = {
     "dwmapi.dll",
     "ue4ss/UE4SS.dll",
@@ -315,87 +310,3 @@ def _install_archive(
         raise
     finally:
         shutil.rmtree(temp, ignore_errors=True)
-
-
-def download_latest_zip(dest_dir: Path | str) -> Path:
-    """Download latest non-DEV UE4SS release zip from GitHub."""
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    req = urllib.request.Request(
-        GITHUB_API,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"无法获取 UE4SS 版本信息 HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"无法连接 GitHub: {e.reason}") from e
-
-    assets = data.get("assets") or []
-    # Prefer UE4SS_vX.Y.Z.zip, skip zDEV / zCustom / source
-    candidates: list[dict[str, Any]] = []
-    for a in assets:
-        name = (a.get("name") or "").strip()
-        lower = name.lower()
-        if not lower.endswith(".zip"):
-            continue
-        if lower.startswith("zdev") or "zdev-" in lower:
-            continue
-        if lower.startswith("zcustom") or lower.startswith("zmap"):
-            continue
-        if "source" in lower:
-            continue
-        if lower.startswith("ue4ss") or re.match(r"ue4ss_v?\d", lower):
-            candidates.append(a)
-
-    if not candidates:
-        # fallback: any zip not zDEV
-        for a in assets:
-            name = (a.get("name") or "").lower()
-            if name.endswith(".zip") and "zdev" not in name and "source" not in name:
-                candidates.append(a)
-
-    if not candidates:
-        raise RuntimeError("GitHub Release 中未找到可下载的 UE4SS zip")
-
-    # Prefer exact UE4SS_v*.zip over others
-    def score(a: dict) -> tuple:
-        n = (a.get("name") or "").lower()
-        return (0 if re.match(r"ue4ss_v?\d", n) else 1, len(n))
-
-    asset = sorted(candidates, key=score)[0]
-    url = asset.get("browser_download_url")
-    name = asset.get("name") or "UE4SS.zip"
-    if not url:
-        raise RuntimeError("资源缺少下载链接")
-    official_prefix = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/"
-    if not isinstance(url, str) or not url.startswith(official_prefix):
-        raise RuntimeError("GitHub API 返回了非 UE4SS 官方下载地址，已拒绝下载")
-
-    out = dest_dir / name
-    temporary = out.with_name(f".{out.name}.download.tmp")
-    req2 = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req2, timeout=300) as resp, open(temporary, "wb") as f:
-            shutil.copyfileobj(resp, f)
-        os.replace(temporary, out)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return out
-
-
-def install_latest(game_root: Path | str, cache_dir: Path | str | None = None) -> dict[str, Any]:
-    root = Path(game_root)
-    cache = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir()) / "palmod_ue4ss_cache"
-    cache.mkdir(parents=True, exist_ok=True)
-    zip_path = download_latest_zip(cache)
-    result = install_from_zip(root, zip_path)
-    result["downloaded"] = str(zip_path)
-    result["download_name"] = zip_path.name
-    return result

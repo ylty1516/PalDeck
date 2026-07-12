@@ -483,16 +483,9 @@ def test_confirmed_existing_install_rolls_back_on_publish_failure(fake_game_root
     assert not (win64 / "ue4ss" / "UE4SS.dll").exists()
 
 
-def test_download_rejects_non_official_asset_url(tmp_path, monkeypatch):
-    payload = json.dumps({"assets": [{
-        "name": "UE4SS_v3.0.0.zip",
-        "browser_download_url": "https://evil.example/UE4SS.zip",
-    }]}).encode()
-    class Response:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def read(self): return payload
-    monkeypatch.setattr(ue4ss_installer.urllib.request, "urlopen", lambda *args, **kwargs: Response())
-
-    with pytest.raises(RuntimeError, match="官方"):
-        ue4ss_installer.download_latest_zip(tmp_path)
+def test_installer_exposes_no_generic_online_release_path():
+    for name in ("download_latest_zip", "install_latest", "GITHUB_API", "USER_AGENT"):
+        assert not hasattr(ue4ss_installer, name)
+    source = Path(ue4ss_installer.__file__).read_text(encoding="utf-8")
+    assert "UE4SS-RE/RE-UE4SS/releases/latest" not in source
+    assert "urllib" not in source
