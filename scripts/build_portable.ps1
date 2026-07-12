@@ -10,6 +10,36 @@ if (-not $repoRoot.StartsWith("F:\", [System.StringComparison]::OrdinalIgnoreCas
 }
 Set-Location $repoRoot
 
+$packagedSourcePaths = @(
+    "backend/",
+    "frontend/",
+    "launcher.py",
+    "assets/",
+    "bundled_mods/",
+    "requirements-lock*",
+    "scripts/build_portable.ps1",
+    "scripts/create_portable_zip.py",
+    "build_exe.bat"
+)
+$dirtyPackagedSources = @(& git status --porcelain=v1 -- @packagedSourcePaths)
+if ($LASTEXITCODE -ne 0) {
+    throw "无法检查 packaged source paths 的 Git 状态"
+}
+if ($dirtyPackagedSources.Count -ne 0) {
+    throw "packaged source paths 存在未提交修改，拒绝构建：`n$($dirtyPackagedSources -join "`n")"
+}
+$sourceCommit = (& git log -1 --format=%H -- @packagedSourcePaths).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch "^[0-9a-f]{40}$") {
+    throw "无法读取 packaged source commit"
+}
+$sourceEpoch = (& git show -s --format=%ct $sourceCommit).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceEpoch -notmatch "^\d+$") {
+    throw "无法从 packaged source commit 读取 SOURCE_DATE_EPOCH"
+}
+if (Test-Path "Env:PALMOD_VERSION") {
+    throw "检测到 PALMOD_VERSION；发布构建拒绝环境变量覆盖版本"
+}
+
 $cacheRoot = Join-Path $repoRoot ".build-cache"
 $env:TMP = Join-Path $cacheRoot "tmp"
 $env:TEMP = Join-Path $cacheRoot "temp"
@@ -17,10 +47,9 @@ $env:PIP_CACHE_DIR = Join-Path $cacheRoot "pip"
 $env:PYTHONPYCACHEPREFIX = Join-Path $cacheRoot "pycache"
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $cacheRoot "pyinstaller-config"
 $env:PYTHONHASHSEED = "0"
-$env:SOURCE_DATE_EPOCH = (& git log -1 --format=%ct).Trim()
-if ($LASTEXITCODE -ne 0 -or $env:SOURCE_DATE_EPOCH -notmatch "^\d+$") {
-    throw "无法从 Git commit 读取 SOURCE_DATE_EPOCH"
-}
+$env:SOURCE_DATE_EPOCH = $sourceEpoch
+Write-Host "SOURCE_COMMIT: $sourceCommit"
+Write-Host "SOURCE_DATE_EPOCH: $($env:SOURCE_DATE_EPOCH)"
 @($cacheRoot, $env:TMP, $env:TEMP, $env:PIP_CACHE_DIR, $env:PYTHONPYCACHEPREFIX, $env:PYINSTALLER_CONFIG_DIR) |
     ForEach-Object { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
 
@@ -135,6 +164,7 @@ PalDeck v$version - Windows 便携版
 6. 不支持 Xbox/Microsoft Store、专用服务器 Mod 管理或 Steam Workshop 订阅管理。
 
 项目说明见：https://github.com/ylty1516/palworld-mod-manager
+Source commit: $sourceCommit
 "@
 [System.IO.File]::WriteAllText(
     (Join-Path $portableDir "README.txt"), $portableReadme + "`n", (New-Object System.Text.UTF8Encoding($false))

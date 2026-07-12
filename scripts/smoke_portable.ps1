@@ -51,6 +51,7 @@ $env:TEMP = $runtimeTemp
 $env:PYTHONPYCACHEPREFIX = Join-Path $runtimeTemp "pycache"
 $env:PALMOD_DATA_DIR = $freshData
 Remove-Item Env:PALMOD_GAME_PATH -ErrorAction SilentlyContinue
+Remove-Item Env:PALMOD_VERSION -ErrorAction SilentlyContinue
 
 if (-not $ZipPath) {
     $version = (& py -3.13 -c "from backend.version import APP_VERSION; print(APP_VERSION)").Trim()
