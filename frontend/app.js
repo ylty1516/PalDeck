@@ -13,7 +13,7 @@ const state = {
   ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
-  appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", background: "default" },
+  appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", petal_style: "natural", background: "default" },
 };
 const effects = createEffects();
 const inFlightDynamicActions = new Set();
@@ -92,7 +92,12 @@ function applyAppearance(settings) {
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
-  effects.update(state.appearance.petals);
+  document.querySelectorAll("[data-petal-style]").forEach((button) => {
+    const selected = button.dataset.petalStyle === state.appearance.petal_style;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  effects.update({ level: state.appearance.petals, style: state.appearance.petal_style });
 }
 
 function refreshBackground() {
@@ -437,6 +442,7 @@ async function checkUe4ssUpstream() {
 
 function chooseTheme(event) { applyAppearance({ theme: event.currentTarget.dataset.themeValue }); }
 function choosePosition(event) { applyAppearance({ position: event.currentTarget.dataset.position }); }
+function choosePetalStyle(event) { applyAppearance({ petal_style: event.currentTarget.dataset.petalStyle }); }
 function noop() { /* Text and select controls keep their native editable behavior. */ }
 
 export const ACTION_HANDLERS = Object.freeze({
@@ -489,7 +495,24 @@ export const ACTION_HANDLERS = Object.freeze({
   positionBottomCenter: choosePosition,
   positionBottomRight: choosePosition,
   changePetals: (event) => applyAppearance({ petals: event.currentTarget.value }),
-  saveAppearance: async () => { const { theme, mask, blur, position, petals } = state.appearance; const saved = await request("/api/appearance", { method: "POST", body: { theme, mask, blur, position, petals } }); applyAppearance(saved); toast("外观已保存", "success"); },
+  petalStyleNatural: choosePetalStyle,
+  petalStyleWatercolor: choosePetalStyle,
+  petalStyleMinimal: choosePetalStyle,
+  saveAppearance: async () => {
+    const { theme, mask, blur, position, petals, petal_style } = state.appearance;
+    try {
+      const saved = await request("/api/appearance", { method: "POST", body: { theme, mask, blur, position, petals, petal_style } });
+      applyAppearance(saved);
+      toast("外观已保存", "success");
+    } catch (error) {
+      try {
+        const recovered = await request("/api/appearance");
+        applyAppearance(recovered);
+      } finally {
+        throw error;
+      }
+    }
+  },
   cancelConflict: async () => cancelImportConflict(),
   replaceConflict: async () => { $("#conflictModal").close(); await importSelected("replace"); },
   keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },

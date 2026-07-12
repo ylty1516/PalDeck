@@ -261,6 +261,45 @@ def test_resize_is_single_raf_throttled_and_destroy_cancels_pending_resize():
     assert 'window.removeEventListener("resize", scheduleResize)' in effects
 
 
+def test_three_petal_styles_share_engine_lifecycle_and_old_ellipse_is_gone():
+    effects = EFFECTS.read_text(encoding="utf-8")
+    engine = (FRONTEND / "petal-engine.js").read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    html = HTML.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    assert 'from "./petal-engine.js"' in effects
+    assert "createParticles" in effects and "stepParticles" in effects
+    for renderer in ("renderNaturalPetal", "renderWatercolorPetal", "renderMinimalPetal"):
+        assert f"export function {renderer}" in effects
+    assert "context.ellipse" not in effects
+    assert 'fillStyle = "rgba(255, 190, 210, .72)"' not in effects
+    assert "Math.min(window.devicePixelRatio || 1, 2)" in effects
+    assert "document.hidden" in effects
+    assert "previous = performance.now()" in effects
+    assert "clearRect" in effects
+    assert "createWatercolorSpriteSet" in effects
+    assert "querySelector" not in engine
+    assert "effects.update({ level:" in app
+    assert "petal_style" in app
+    for style in ("natural", "watercolor", "minimal"):
+        assert f'data-petal-style="{style}"' in html
+    assert html.count('class="petal-style-card"') == 3
+    assert html.count('aria-pressed="false"') >= 3
+    assert ".petal-style-card" in css and ".petal-preview" in css
+
+
+def test_petal_style_preview_persists_only_on_save_and_recovers_after_failure():
+    app = APP.read_text(encoding="utf-8")
+    assert "function choosePetalStyle" in app
+    assert "applyAppearance({ petal_style:" in app
+    save = re.search(r"saveAppearance: async \(\) => \{(.*?)\},$", app, re.S | re.M)
+    assert save
+    assert "petal_style" in save.group(1)
+    assert 'request("/api/appearance", { method: "POST"' in save.group(1)
+    assert 'request("/api/appearance")' in save.group(1)
+    assert "applyAppearance(recovered)" in save.group(1)
+
+
 def test_switch_view_awaits_page_loaders_and_handlers_reference_functions():
     app = APP.read_text(encoding="utf-8")
     assert "async function switchView" in app
