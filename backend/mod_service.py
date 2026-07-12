@@ -8,10 +8,7 @@ import os
 import re
 import shutil
 import stat
-import threading
-import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from functools import wraps
@@ -21,15 +18,13 @@ from typing import Iterable
 from .archive_utils import inspect_and_extract
 from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
 from .game_detector import ensure_mod_folders, get_mod_directories, is_ue4ss_framework_mod
+from .game_lock import game_write_lock
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
 
 _SIDECARS = (".pak", ".utoc", ".ucas")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_LOCKS_GUARD = threading.Lock()
-_THREAD_LOCKS: dict[str, threading.RLock] = {}
-_LOCK_DEPTHS = threading.local()
 
 
 def _locked_write(method):
@@ -96,48 +91,8 @@ class ModService:
         self.game_running = game_running
         self._migrate_legacy_once()
 
-    @contextmanager
     def _transaction_lock(self, timeout: float = 10.0):
-        validate_no_reparse_ancestors(self.data_dir)
-        key = str(Path(os.path.abspath(self.data_dir))).casefold()
-        with _LOCKS_GUARD:
-            thread_lock = _THREAD_LOCKS.setdefault(key, threading.RLock())
-        if not thread_lock.acquire(timeout=timeout):
-            raise TimeoutError("等待 Mod 事务锁超时")
-        depths = getattr(_LOCK_DEPTHS, "values", None)
-        if depths is None:
-            depths = {}
-            _LOCK_DEPTHS.values = depths
-        if depths.get(key, 0):
-            depths[key] += 1
-            try:
-                yield
-            finally:
-                depths[key] -= 1
-                thread_lock.release()
-            return
-        lock_path = self.data_dir / ".mod-service.lock"
-        acquired_file = False
-        deadline = time.monotonic() + timeout
-        try:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            while True:
-                try:
-                    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    os.close(descriptor)
-                    acquired_file = True
-                    depths[key] = 1
-                    break
-                except FileExistsError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("等待 Mod 跨进程事务锁超时")
-                    time.sleep(0.02)
-            yield
-        finally:
-            if acquired_file:
-                depths.pop(key, None)
-                lock_path.unlink(missing_ok=True)
-            thread_lock.release()
+        return game_write_lock(self.data_dir, timeout=timeout)
 
     def _migrate_legacy_once(self) -> None:
         legacy_path = self.data_dir / "mods_registry.json"

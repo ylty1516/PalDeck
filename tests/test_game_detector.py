@@ -27,6 +27,14 @@ def write_manifest(library: Path, installdir: str) -> None:
     )
 
 
+def test_xinput_proxy_is_recognized_as_existing_ue4ss(tmp_path):
+    game = make_shipping_game(tmp_path / "Palworld")
+    (game / "Pal" / "Binaries" / "Win64" / "xinput1_3.dll").write_bytes(b"proxy")
+
+    assert game_detector.has_ue4ss(game) is True
+    assert validate_game_path(game)["has_ue4ss"] is True
+
+
 def test_find_install_uses_library_vdf_and_manifest_installdir(tmp_path):
     steam_root = tmp_path / "Steam"
     library = tmp_path / "Games" / "SteamLibrary"

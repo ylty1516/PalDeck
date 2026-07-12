@@ -21,6 +21,7 @@ from werkzeug.utils import secure_filename
 
 from backend import game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
 from backend.appearance import AppearanceService
+from backend.game_lock import game_write_lock
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.storage import JsonStore
 from backend.ue4ss_provider import Ue4ssProvider
@@ -447,8 +448,8 @@ def create_app(
     def serialized_asset(asset):
         return asdict(asset) if asset is not None else None
 
-    def ue4ss_game_lock(game_root: Path | str) -> threading.RLock:
-        return ue4ss_installer.install_lock(game_root)
+    def ue4ss_game_lock(_game_root: Path | str):
+        return game_write_lock(writable)
 
     @app.get("/api/ue4ss/status")
     def ue4ss_status():

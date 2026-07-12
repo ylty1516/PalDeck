@@ -7,7 +7,6 @@ import re
 from io import BytesIO
 import shutil
 import tempfile
-import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -24,9 +23,6 @@ UE4SS_ARCHIVE_POLICY = ArchivePolicy(
     max_total_bytes=128 * 1024**2,
     max_compression_ratio=200,
 )
-_INSTALL_LOCKS: dict[str, threading.RLock] = {}
-_INSTALL_LOCKS_GUARD = threading.Lock()
-
 PALWORLD_REQUIRED_FILES = {
     "dwmapi.dll",
     "ue4ss/UE4SS.dll",
@@ -43,13 +39,6 @@ class Ue4ssConflictError(Exception):
 
 class Ue4ssGameRunningError(RuntimeError):
     pass
-
-
-def install_lock(game_root: Path | str) -> threading.RLock:
-    """Return the process-wide transaction lock for one canonical game root."""
-    key = os.path.normcase(str(Path(game_root).resolve()))
-    with _INSTALL_LOCKS_GUARD:
-        return _INSTALL_LOCKS.setdefault(key, threading.RLock())
 
 
 def _win64(game_root: Path | str) -> Path:
@@ -184,11 +173,10 @@ def install_from_zip(
         raise FileNotFoundError(f"找不到文件: {archive}")
     if archive.suffix.lower() != ".zip":
         raise ValueError("UE4SS 安装仅支持 .zip（可直接拖入 zip，无需手动解压）")
-    with install_lock(game_root):
-        return _install_archive(
-            game_root, archive, policy=policy, confirm_replace=confirm_replace,
-            require_palworld_layout=require_palworld_layout,
-        )
+    return _install_archive(
+        game_root, archive, policy=policy, confirm_replace=confirm_replace,
+        require_palworld_layout=require_palworld_layout,
+    )
 
 
 def install_from_bytes(
@@ -202,11 +190,10 @@ def install_from_bytes(
     """Install an immutable verified snapshot without reopening its source path."""
     if not isinstance(archive_bytes, bytes):
         raise TypeError("archive_bytes must be immutable bytes")
-    with install_lock(game_root):
-        return _install_archive(
-            game_root, None, archive_bytes=archive_bytes, policy=policy,
-            confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
-        )
+    return _install_archive(
+        game_root, None, archive_bytes=archive_bytes, policy=policy,
+        confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
+    )
 
 
 def _ue4ss_policy(requested: ArchivePolicy | None) -> ArchivePolicy:

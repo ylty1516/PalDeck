@@ -258,6 +258,7 @@ def has_ue4ss(game_root: Path | str) -> bool:
     markers = (
         win64 / "UE4SS.dll",
         win64 / "dwmapi.dll",
+        win64 / "xinput1_3.dll",
         win64 / "UE4SS-settings.ini",
         win64 / "ue4ss" / "UE4SS.dll",
         win64 / "ue4ss" / "dwmapi.dll",

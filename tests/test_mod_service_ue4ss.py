@@ -450,10 +450,9 @@ def test_bundled_bytes_use_same_in_memory_snapshot_and_strict_policy(
     assert len(observed) == 1
 
 
-def test_ue4ss_install_lock_is_process_wide_per_game_root(fake_game_root):
-    assert ue4ss_installer.install_lock(fake_game_root) is ue4ss_installer.install_lock(
-        fake_game_root / "."
-    )
+def test_ue4ss_installer_has_no_independent_write_lock():
+    assert not hasattr(ue4ss_installer, "install_lock")
+    assert not hasattr(ue4ss_installer, "_INSTALL_LOCKS")
 
 
 def test_xinput_marker_requires_confirmation_before_legacy_removal(fake_game_root, monkeypatch):

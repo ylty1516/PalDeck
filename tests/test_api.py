@@ -8,6 +8,8 @@ import types
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from backend.app import create_app
 from backend.ue4ss_provider import Ue4ssAsset
 
@@ -107,6 +109,61 @@ def test_ue4ss_endpoints_require_authentication(app):
         response = app.test_client().post(path, json={})
         assert response.status_code == 403
         assert response.json["error_code"] == "invalid_session"
+
+
+@pytest.mark.parametrize("mod_operation", ["install", "set_enabled"])
+def test_mod_service_and_ue4ss_install_share_game_write_lock(
+    app, tmp_path, monkeypatch, mod_operation
+):
+    service = app.extensions["mod_service"]
+    source = tmp_path / f"{mod_operation}.pak"
+    source.write_bytes(b"pak")
+    entered_mod = threading.Event()
+    release_mod = threading.Event()
+    entered_ue4ss = threading.Event()
+    errors = []
+
+    item = service.install(source) if mod_operation == "set_enabled" else None
+    original_stopped = service._assert_stopped
+
+    def blocking_stopped():
+        entered_mod.set()
+        assert release_mod.wait(5)
+        return original_stopped()
+
+    monkeypatch.setattr(service, "_assert_stopped", blocking_stopped)
+    operation = (
+        (lambda: service.install(source)) if mod_operation == "install"
+        else (lambda: service.set_enabled(item["id"], False))
+    )
+
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr(
+        "backend.ue4ss_installer.install_from_bytes",
+        lambda *_a, **_k: entered_ue4ss.set() or {"ok": True},
+    )
+
+    def run_mod():
+        try: operation()
+        except Exception as error: errors.append(error)
+
+    def run_ue4ss():
+        try:
+            client = app.test_client(); client.get("/?token=test-token")
+            response = client.post("/api/ue4ss/install-bundled", json={})
+            assert response.status_code == 200
+        except Exception as error: errors.append(error)
+
+    mod_thread = threading.Thread(target=run_mod)
+    ue4ss_thread = threading.Thread(target=run_ue4ss)
+    mod_thread.start(); assert entered_mod.wait(5)
+    ue4ss_thread.start()
+    assert not entered_ue4ss.wait(0.2)
+    release_mod.set(); mod_thread.join(5); ue4ss_thread.join(5)
+
+    assert entered_ue4ss.is_set()
+    assert errors == []
 
 
 def test_all_ue4ss_write_routes_share_one_game_lock(app, monkeypatch):
