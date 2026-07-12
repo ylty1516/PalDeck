@@ -186,6 +186,34 @@ class SteamWorkshopService:
         self._cache = tuple(mods)
         return list(self._cache)
 
+    def list_mods(self, *, force: bool = False) -> list[dict[str, object]]:
+        """Return scanned records with state derived from the current settings file."""
+        mods = self.scan(force=force)
+        active: set[str] = set()
+        if self.game_root is not None and self.settings_path.exists():
+            active = {
+                package.casefold()
+                for package in _active_packages(_read_settings(self.settings_path).text)
+            }
+        result: list[dict[str, object]] = []
+        for mod in mods:
+            item = mod.to_dict()
+            enabled = mod.package_name.casefold() in active if mod.package_name else False
+            item.update({
+                "name": mod.mod_name or f"Workshop {mod.workshop_id}",
+                "enabled": enabled,
+                "status": "enabled" if enabled else ("disabled" if mod.valid else "conflict"),
+            })
+            result.append(item)
+        return result
+
+    def active_ue4ss_mods(self) -> list[dict[str, object]]:
+        return [
+            item for item in self.list_mods()
+            if item["enabled"] is True
+            and any(str(kind).casefold() == "ue4ss" for kind in item["install_types"])
+        ]
+
     def set_enabled(
         self,
         workshop_id: str,

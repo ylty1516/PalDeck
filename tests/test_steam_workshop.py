@@ -574,6 +574,33 @@ def test_enable_preserves_encoding_newlines_comments_unknown_fields_and_order(
     assert result["needs_restart"] is True
 
 
+def test_list_mods_reports_authoritative_active_state_and_ui_identity(tmp_path):
+    service, settings = workshop_service(
+        tmp_path,
+        {
+            "1001": {"ModName": "Core Mod", "PackageName": "Core", "Dependencies": [], "InstallRule": [{"Type": "Paks", "Target": "Pal/Content/Paks/~mods"}]},
+            "1002": {"ModName": "UE4SS Mod", "PackageName": "Framework", "Dependencies": [], "InstallRule": [{"Type": "UE4SS", "Target": "Pal/Binaries/Win64"}]},
+        },
+    )
+    settings.write_text("[PalModSettings]\nActiveModList=Core\n", encoding="utf-8")
+
+    listed = service.list_mods(force=True)
+
+    assert [(item["workshop_id"], item["enabled"], item["status"]) for item in listed] == [
+        ("1001", True, "enabled"), ("1002", False, "disabled")
+    ]
+    assert listed[0]["name"] == "Core Mod"
+    assert service.active_ue4ss_mods() == []
+    settings.write_text("[PalModSettings]\nActiveModList=Framework\n", encoding="utf-8")
+    assert [item["workshop_id"] for item in service.active_ue4ss_mods()] == ["1002"]
+
+
+def test_list_mods_treats_missing_settings_as_disabled(tmp_path):
+    service, settings = workshop_service(tmp_path, {"1001": {"PackageName": "Core"}})
+    settings.unlink(missing_ok=True)
+    assert service.list_mods(force=True)[0]["enabled"] is False
+
+
 def test_enable_and_disable_are_deduplicated_idempotent_and_disable_only_target(tmp_path):
     service, settings = workshop_service(
         tmp_path,

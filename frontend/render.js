@@ -1,5 +1,11 @@
 const text = (value) => document.createTextNode(String(value ?? ""));
 
+export function validatedSteamWorkshopUrl(value) {
+  const id = String(value ?? "");
+  if (!/^[1-9][0-9]{0,19}$/.test(id)) return null;
+  return new URL(`https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`);
+}
+
 export function validatedNexusUrl(value) {
   let url;
   try { url = new URL(value); } catch { return null; }
@@ -54,6 +60,35 @@ export function renderMods(container, mods) {
   if (!mods.length) return renderMessage(container, "暂无模组，请从“导入安装”添加。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
+    if (mod.source === "steam_workshop") {
+      const status = mod.enabled === true ? "enabled" : (mod.valid === false ? "conflict" : "disabled");
+      const card = el("article", `mod-card glass-panel source-workshop status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
+      card.dataset.id = String(mod.workshop_id);
+      const main = el("div", "mod-main");
+      const title = el("h3", "mod-title", mod.name || mod.mod_name || `Workshop ${mod.workshop_id}`);
+      title.append(" ", el("span", "badge source-badge", "Steam Workshop"));
+      const types = Array.isArray(mod.install_types) && mod.install_types.length ? mod.install_types.join(" / ") : "未知";
+      const dependencies = Array.isArray(mod.dependencies) && mod.dependencies.length ? mod.dependencies.join(", ") : "无";
+      main.append(
+        title,
+        el("p", "mod-meta", `${mod.enabled ? "已启用" : "已禁用"} · Workshop ID ${mod.workshop_id} · 作者 ${mod.author || "未知"} · 版本 ${mod.version || "未知"}`),
+        el("p", "mod-meta workshop-details", `类型 ${types} · 依赖 ${dependencies}`),
+        el("p", "mod-path", mod.source_dir || ""),
+      );
+      const actions = el("div", "button-row");
+      const toggle = actionButton(mod.enabled ? "禁用" : "启用", "toggleWorkshop", "btn");
+      toggle.dataset.id = String(mod.workshop_id);
+      toggle.dataset.enabled = String(!mod.enabled);
+      toggle.disabled = mod.can_toggle === false;
+      const open = actionButton("文件夹", "openWorkshopFolder", "btn");
+      open.dataset.id = String(mod.workshop_id);
+      const steam = actionButton("Steam 页面", "openSteamWorkshop", "btn");
+      steam.dataset.id = String(mod.workshop_id);
+      actions.append(toggle, open, steam);
+      card.append(main, actions);
+      fragment.append(card);
+      continue;
+    }
     const status = MOD_STATUS[mod.status || mod.audit?.status] ? (mod.status || mod.audit.status) : (mod.enabled ? "enabled" : "disabled");
     const statusInfo = MOD_STATUS[status];
     const toggleAllowed = status === "enabled" || status === "disabled";

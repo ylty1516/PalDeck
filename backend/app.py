@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -23,6 +24,7 @@ from backend import game_detector, nexus_api, process_utils, self_updater, smoke
 from backend.appearance import AppearanceService
 from backend.game_lock import game_write_lock
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
+from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError
 from backend.storage import JsonStore
 from backend.ue4ss_provider import Ue4ssProvider
 from backend.version import APP_VERSION
@@ -32,6 +34,7 @@ UPLOAD_TTL_SECONDS = 15 * 60
 MAX_UPLOAD_BYTES = 2 * 1024**3
 MAX_PENDING_ITEMS = 8
 MAX_PENDING_BYTES = 4 * 1024**3
+WORKSHOP_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 
 
 def _resolve_root() -> Path:
@@ -105,6 +108,9 @@ def create_app(
                 pass
     if game_path:
         app.extensions["mod_service"] = ModService(game_path, writable)
+        app.extensions["workshop_service"] = SteamWorkshopService(
+            game_root=game_path, lock_root=writable,
+        )
     pending: dict[str, dict[str, Any]] = {}
     pending_lock = threading.Lock()
     app.extensions["pending_uploads"] = pending
@@ -161,6 +167,12 @@ def create_app(
             raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
         return current
 
+    def workshop_service(required: bool = True) -> SteamWorkshopService | None:
+        current = app.extensions.get("workshop_service")
+        if current is None and required:
+            raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
+        return current
+
     @app.before_request
     def require_session():
         cleanup_pending_uploads()
@@ -178,6 +190,13 @@ def create_app(
     @app.errorhandler(ModConflictError)
     def handle_conflict(exc: ModConflictError):
         return failure("模组文件冲突", 409, "mod_conflict", exc.details)
+
+    @app.errorhandler(WorkshopDependencyError)
+    def handle_workshop_dependency(exc: WorkshopDependencyError):
+        return failure(
+            "Workshop 模组依赖冲突", 409,
+            "workshop_dependency_conflict", exc.details,
+        )
 
     @app.errorhandler(ModifiedFilesError)
     def handle_modified_files(exc: ModifiedFilesError):
@@ -287,7 +306,75 @@ def create_app(
     @app.get("/api/mods")
     def list_mods():
         current = service(required=False)
-        return success(current.list_mods() if current else [])
+        workshop = workshop_service(required=False)
+        local_mods = current.list_mods() if current else []
+        workshop_mods = workshop.list_mods() if workshop else []
+        return success([*local_mods, *workshop_mods])
+
+    @app.get("/api/workshop/mods")
+    def list_workshop_mods():
+        return success(workshop_service().list_mods())
+
+    @app.post("/api/workshop/rescan")
+    def rescan_workshop_mods():
+        if request.get_json(silent=True) != {}:
+            raise ApiError("Workshop 重扫请求不接受参数", 400, "invalid_input")
+        return success(workshop_service().list_mods(force=True))
+
+    def workshop_toggle_body() -> bool:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not set(body) <= {"confirm_dependents"}:
+            raise ApiError("Workshop 启停仅接受 confirm_dependents", 400, "invalid_input")
+        confirm = body.get("confirm_dependents", False)
+        if type(confirm) is not bool:
+            raise ApiError("confirm_dependents 必须是布尔值", 400, "invalid_input")
+        return confirm
+
+    def validate_workshop_id(workshop_id: str) -> str:
+        if WORKSHOP_ID.fullmatch(workshop_id) is None:
+            raise ApiError("Workshop ID 必须是正十进制字符串", 400, "invalid_input")
+        return workshop_id
+
+    def workshop_record(workshop_id: str) -> dict[str, object]:
+        validated = validate_workshop_id(workshop_id)
+        matches = [
+            item for item in workshop_service().list_mods()
+            if item.get("workshop_id") == validated
+        ]
+        if len(matches) != 1:
+            raise ApiError("未找到该 Workshop 模组", 404, "workshop_mod_not_found")
+        return matches[0]
+
+    @app.post("/api/workshop/<workshop_id>/enable")
+    @app.post("/api/workshop/<workshop_id>/disable")
+    def toggle_workshop_mod(workshop_id: str):
+        confirm = workshop_toggle_body()
+        validate_workshop_id(workshop_id)
+        enabled = request.path.endswith("/enable")
+        if enabled:
+            item = workshop_record(workshop_id)
+            is_ue4ss = any(
+                str(kind).casefold() == "ue4ss"
+                for kind in item.get("install_types", [])
+            )
+            if is_ue4ss and ue4ss_installer.status(service().game_root)["installed"]:
+                raise ApiError(
+                    "请先移除手动或内置 UE4SS，再启用 Workshop UE4SS",
+                    409, "ue4ss_conflict", {"reason": "manual_ue4ss_installed"},
+                )
+        return success(workshop_service().set_enabled(
+            workshop_id, enabled, confirm_dependents=confirm,
+        ))
+
+    @app.get("/api/workshop/<workshop_id>/open-folder")
+    def open_workshop_folder(workshop_id: str):
+        item = workshop_record(workshop_id)
+        opener = app.config.get("OPEN_FOLDER")
+        if not callable(opener):
+            raise ApiError("当前系统不支持打开目录", 500, "open_folder_unavailable")
+        path = str(item["source_dir"])
+        opener(path)
+        return success({"path": path})
 
     @app.post("/api/mods/import")
     def import_mod():
@@ -423,6 +510,9 @@ def create_app(
 
         config_store.update(save_game_path)
         app.extensions["mod_service"] = ModService(path, writable)
+        app.extensions["workshop_service"] = SteamWorkshopService(
+            game_root=path, lock_root=writable,
+        )
         return success(info)
 
     @app.get("/api/game/status")
@@ -451,6 +541,19 @@ def create_app(
     def ue4ss_game_lock(_game_root: Path | str):
         return game_write_lock(writable)
 
+    def reject_active_workshop_ue4ss() -> None:
+        workshop = workshop_service(required=False)
+        active = workshop.active_ue4ss_mods() if workshop else []
+        if active:
+            raise ApiError(
+                "请先禁用 Workshop UE4SS，再安装手动或内置 UE4SS",
+                409, "ue4ss_conflict",
+                {
+                    "reason": "workshop_ue4ss_active",
+                    "workshop_ids": [item["workshop_id"] for item in active],
+                },
+            )
+
     @app.get("/api/ue4ss/status")
     def ue4ss_status():
         result = ue4ss_installer.status(service().game_root)
@@ -465,6 +568,7 @@ def create_app(
     def ue4ss_bundled():
         confirm = ue4ss_install_body()
         current = service()
+        reject_active_workshop_ue4ss()
         provider = app.extensions["ue4ss_provider"]
         with ue4ss_game_lock(current.game_root):
             try:
@@ -503,6 +607,7 @@ def create_app(
     def ue4ss_install_upstream():
         confirm = ue4ss_install_body()
         current = service()
+        reject_active_workshop_ue4ss()
         with ue4ss_game_lock(current.game_root):
             with app.extensions["ue4ss_pending_lock"]:
                 pending_asset = app.extensions.pop("ue4ss_pending_asset", None)
@@ -557,6 +662,7 @@ def create_app(
         confirm_raw = request.form.get("confirm_replace", "false").casefold()
         if confirm_raw not in {"true", "false"}:
             raise ApiError("confirm_replace 必须是布尔值", 400, "invalid_input")
+        reject_active_workshop_ue4ss()
         upload_dir = writable / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         dest = upload_dir / f"{uuid.uuid4().hex}-{name}"

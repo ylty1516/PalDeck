@@ -21,7 +21,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "useGamePath", "openNexus", "copyNexusId", "revealAdult"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "useGamePath", "openNexus", "copyNexusId", "revealAdult"}
 
 
 class ContractParser(HTMLParser):
@@ -422,6 +422,49 @@ def test_ue4ss_card_uses_fixed_palworld_sources_and_real_actions():
     assert ".ue4ss-card" in css
     for forbidden in ("browser_download_url", "download_url", "ue4ssUrl", "asset_url"):
         assert forbidden not in app
+
+
+def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    for token in ("Steam Workshop", "Workshop ID", "author", "version", "install_types", "dependencies"):
+        assert token in render
+    for action in ("toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop"):
+        assert f'"{action}"' in render
+        assert f'case "{action}":' in app
+    assert 'if (mod.source === "steam_workshop")' in render
+    workshop_branch = re.search(r'if \(mod\.source === "steam_workshop"\) \{(.*?)^\s{4}\}', render, re.S | re.M)
+    assert workshop_branch
+    assert '"deleteMod"' not in workshop_branch.group(1)
+    assert 'https://steamcommunity.com/sharedfiles/filedetails/?id=${id}' in render
+    assert "validatedSteamWorkshopUrl" in app
+    assert 'request(`/api/workshop/${encodeURIComponent(id)}/open-folder`)' in app
+    assert 'request(`/api/workshop/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`' in app
+    assert 'id="workshopDependencyModal"' in html
+    assert 'data-action="cancelWorkshopDependency"' in html
+    assert 'data-action="approveWorkshopDependency"' in html
+    assert "confirm_dependents: true" in app
+    assert "workshop_dependency_conflict" in app
+    assert "replaceWorkshopMod" in app
+    assert ".source-workshop" in css
+
+
+def test_steam_workshop_url_validator_executable_contract():
+    script = """
+      import { validatedSteamWorkshopUrl } from './frontend/render.js';
+      const valid = validatedSteamWorkshopUrl('3625223587');
+      if (valid?.href !== 'https://steamcommunity.com/sharedfiles/filedetails/?id=3625223587') process.exit(1);
+      for (const value of ['0', '01', '../1', '1.5', '1'.repeat(21)]) {
+        if (validatedSteamWorkshopUrl(value) !== null) process.exit(2);
+      }
+    """
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script], cwd=ROOT,
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

@@ -113,6 +113,7 @@
   <div id="busyOverlay" class="busy-overlay" hidden><div class="spinner"></div><span id="busyText">处理中…</span></div>
   <dialog id="conflictModal" aria-labelledby="conflictTitle"><form method="dialog" class="modal-card"><h2 id="conflictTitle">发现文件冲突</h2><div id="conflictDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelConflict" autofocus>取消</button><button type="button" class="btn" data-action="keepBothConflict">保留两者</button><button type="button" class="btn primary" data-action="replaceConflict">替换原文件</button></div></form></dialog>
   <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">删除模组</h2><p id="deleteMessage">此操作不可撤销。</p><div id="deleteDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">确认删除</button></div></form></dialog>
+  <dialog id="workshopDependencyModal" aria-labelledby="workshopDependencyTitle"><form method="dialog" class="modal-card"><h2 id="workshopDependencyTitle">仍有模组依赖此项目</h2><p class="muted">禁用后以下 Workshop 模组可能无法正常工作：</p><div id="workshopDependencyDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelWorkshopDependency" autofocus>取消</button><button type="button" class="btn danger" data-action="approveWorkshopDependency">仍要禁用</button></div></form></dialog>
   <script type="module" src="app.js"></script>
 </body>
 </html>

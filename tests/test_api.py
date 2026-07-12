@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from backend.app import create_app
+from backend.mod_service import GameRunningError
+from backend.steam_workshop import WorkshopDependencyError
 from backend.ue4ss_provider import Ue4ssAsset
 
 
@@ -729,6 +731,190 @@ def test_launcher_passes_runtime_paths_to_factory_main(tmp_path, monkeypatch):
     launcher.main()
 
     assert calls == [{"root": tmp_path / "root", "data_dir": tmp_path / "data"}]
+
+
+class FakeWorkshopService:
+    def __init__(self, mods=None):
+        self.mods = list(mods or [])
+        self.calls = []
+
+    def list_mods(self, *, force=False):
+        self.calls.append(("list", force))
+        return [dict(mod) for mod in self.mods]
+
+    def set_enabled(self, workshop_id, enabled, *, confirm_dependents=False):
+        self.calls.append(("toggle", workshop_id, enabled, confirm_dependents))
+        item = next(mod for mod in self.mods if mod["workshop_id"] == workshop_id)
+        item["enabled"] = enabled
+        item["status"] = "enabled" if enabled else "disabled"
+        return dict(item)
+
+    def active_ue4ss_mods(self):
+        return [
+            dict(mod) for mod in self.mods
+            if mod.get("enabled") is True and "UE4SS" in mod.get("install_types", [])
+        ]
+
+
+def _workshop_mod(**changes):
+    value = {
+        "id": "steam-workshop:3625223587",
+        "workshop_id": "3625223587",
+        "name": "Workshop Example",
+        "mod_name": "Workshop Example",
+        "package_name": "WorkshopExample",
+        "source": "steam_workshop",
+        "source_dir": "F:/Steam/workshop/content/1623730/3625223587",
+        "author": "Workshop Author",
+        "version": "1.2.3",
+        "dependencies": ["3625000000"],
+        "install_types": ["Paks"],
+        "enabled": False,
+        "status": "disabled",
+        "valid": True,
+        "can_delete": False,
+        "can_toggle": True,
+    }
+    value.update(changes)
+    return value
+
+
+def test_create_app_configures_workshop_with_discovery_game_and_shared_lock(app):
+    workshop = app.extensions["workshop_service"]
+    assert workshop._steam_roots is None
+    assert workshop.game_root == app.extensions["mod_service"].game_root
+    assert workshop.lock_root == Path(app.config["DATA_DIR"])
+
+
+def test_workshop_routes_require_authentication(app):
+    client = app.test_client()
+    for path, method in (
+        ("/api/workshop/mods", "get"),
+        ("/api/workshop/rescan", "post"),
+        ("/api/workshop/3625223587/enable", "post"),
+        ("/api/workshop/3625223587/disable", "post"),
+    ):
+        response = getattr(client, method)(path, json={} if method == "post" else None)
+        assert response.status_code == 403
+        assert response.json["error_code"] == "invalid_session"
+
+
+def test_unified_and_workshop_lists_include_authoritative_workshop_items(app, auth_client):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    app.extensions["workshop_service"] = workshop
+
+    dedicated = auth_client.get("/api/workshop/mods")
+    unified = auth_client.get("/api/mods")
+
+    assert dedicated.status_code == 200
+    item = dedicated.json["data"][0]
+    assert item["id"] == "steam-workshop:3625223587"
+    assert item["source"] == "steam_workshop"
+    assert item["can_delete"] is False
+    assert item["can_toggle"] is True
+    assert unified.json["data"] == [item]
+
+
+def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation(app, auth_client):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    app.extensions["workshop_service"] = workshop
+
+    rescanned = auth_client.post("/api/workshop/rescan", json={})
+    enabled = auth_client.post("/api/workshop/3625223587/enable", json={})
+    disabled = auth_client.post(
+        "/api/workshop/3625223587/disable", json={"confirm_dependents": True}
+    )
+
+    assert rescanned.status_code == 200
+    assert enabled.json["data"]["enabled"] is True
+    assert disabled.json["data"]["enabled"] is False
+    assert workshop.calls == [
+        ("list", True),
+        ("list", False),
+        ("toggle", "3625223587", True, False),
+        ("toggle", "3625223587", False, True),
+    ]
+
+
+@pytest.mark.parametrize("workshop_id", ["0", "01", "-1", "1.5", "steam-workshop:1", "1" * 21])
+def test_workshop_toggle_rejects_non_positive_decimal_id(app, auth_client, workshop_id):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    app.extensions["workshop_service"] = workshop
+
+    response = auth_client.post(f"/api/workshop/{workshop_id}/enable", json={})
+
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+    assert workshop.calls == []
+
+
+@pytest.mark.parametrize("body", [
+    {"confirm_dependents": "true"}, {"path": "F:/evil"},
+    {"package": "Injected"}, {"package_name": "Injected"},
+    {"url": "https://evil.example"}, {"confirm_dependents": False, "path": "F:/evil"},
+])
+def test_workshop_toggle_rejects_non_boolean_and_extra_fields(app, auth_client, body):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    app.extensions["workshop_service"] = workshop
+
+    response = auth_client.post("/api/workshop/3625223587/disable", json=body)
+
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+    assert workshop.calls == []
+
+
+def test_workshop_errors_map_game_running_and_dependents_to_structured_responses(app, auth_client):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    app.extensions["workshop_service"] = workshop
+    workshop.set_enabled = lambda *_a, **_k: (_ for _ in ()).throw(GameRunningError("running"))
+    running = auth_client.post("/api/workshop/3625223587/enable", json={})
+    assert running.status_code == 423
+    assert running.json["error_code"] == "game_running"
+
+    workshop.set_enabled = lambda *_a, **_k: (_ for _ in ()).throw(
+        WorkshopDependencyError({"reason": "enabled_dependents", "dependents": ["1001"]})
+    )
+    conflict = auth_client.post("/api/workshop/3625223587/disable", json={})
+    assert conflict.status_code == 409
+    assert conflict.json["error_code"] == "workshop_dependency_conflict"
+    assert conflict.json["details"]["dependents"] == ["1001"]
+
+
+def test_workshop_ue4ss_and_manual_ue4ss_are_mutually_exclusive(app, auth_client, monkeypatch):
+    workshop = FakeWorkshopService([_workshop_mod(install_types=["UE4SS"])])
+    app.extensions["workshop_service"] = workshop
+    win64 = Path(app.extensions["mod_service"].game_root) / "Pal" / "Binaries" / "Win64"
+    (win64 / "dwmapi.dll").write_bytes(b"manual")
+
+    blocked_enable = auth_client.post("/api/workshop/3625223587/enable", json={})
+    assert blocked_enable.status_code == 409
+    assert blocked_enable.json["error_code"] == "ue4ss_conflict"
+    assert not any(call[0] == "toggle" for call in workshop.calls)
+
+    (win64 / "dwmapi.dll").unlink()
+    workshop.mods[0].update(enabled=True, status="enabled")
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    blocked_install = auth_client.post("/api/ue4ss/install-bundled", json={})
+    assert blocked_install.status_code == 409
+    assert blocked_install.json["error_code"] == "ue4ss_conflict"
+    assert blocked_install.json["details"]["reason"] == "workshop_ue4ss_active"
+    assert provider.calls == []
+
+
+def test_workshop_open_folder_uses_scanned_path_only(app, auth_client):
+    opened = []
+    app.config["OPEN_FOLDER"] = opened.append
+    app.extensions["workshop_service"] = FakeWorkshopService([_workshop_mod()])
+
+    response = auth_client.get("/api/workshop/3625223587/open-folder")
+
+    assert response.status_code == 200
+    assert opened == ["F:/Steam/workshop/content/1623730/3625223587"]
+    rejected = auth_client.get("/api/workshop/9999/open-folder?path=F:/evil")
+    assert rejected.status_code == 404
+    assert opened == ["F:/Steam/workshop/content/1623730/3625223587"]
 
 
 def test_internal_errors_do_not_leak_exception_text(app, auth_client, monkeypatch):

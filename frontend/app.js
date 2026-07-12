@@ -4,12 +4,12 @@ import {
   actionableErrorMessage, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
-import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl, validatedSteamWorkshopUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
   mods: [], nexus: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
-  pendingDeleteId: null, pendingDeleteForce: false, updateInfo: null,
+  pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
@@ -259,6 +259,50 @@ async function deletePendingMod() {
   }
 }
 
+function replaceWorkshopMod(authoritative) {
+  const identity = `steam-workshop:${authoritative.workshop_id}`;
+  state.mods = state.mods.map((mod) => String(mod.id) === identity ? authoritative : mod);
+  filterMods();
+}
+
+function renderWorkshopDependents(ids) {
+  const list = document.createElement("ul");
+  list.className = "stack";
+  for (const id of ids) {
+    const item = document.createElement("li");
+    item.textContent = `Workshop ${id}`;
+    list.append(item);
+  }
+  $("#workshopDependencyDetails").replaceChildren(list);
+}
+
+async function toggleWorkshop(id, enabled, confirmDependents = false) {
+  beginModsWrite();
+  try {
+    const authoritative = await request(`/api/workshop/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`, {
+      method: "POST", body: confirmDependents ? { confirm_dependents: true } : {},
+    });
+    state.pendingWorkshopDependency = null;
+    replaceWorkshopMod(authoritative);
+    toast(enabled ? "Workshop 模组已启用" : "Workshop 模组已禁用", "success");
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "workshop_dependency_conflict") {
+      state.pendingWorkshopDependency = { id, enabled };
+      renderWorkshopDependents(Array.isArray(error.details?.dependents) ? error.details.dependents : []);
+      openModal($("#workshopDependencyModal"));
+      return;
+    }
+    await loadMods();
+    throw error;
+  }
+}
+
+function openSteamWorkshop(id) {
+  const url = validatedSteamWorkshopUrl(id);
+  if (!url) throw new ApiError("Workshop ID 无效");
+  window.open(url, "_blank", "noopener");
+}
+
 function openValidatedNexus(target) {
   const url = validatedNexusUrl(target.dataset.url);
   if (!url) throw new ApiError("仅允许打开 Nexus Mods 的帕鲁模组详情页");
@@ -436,6 +480,13 @@ export const ACTION_HANDLERS = Object.freeze({
   keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },
   cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteModal").close(); },
   approveDelete: async () => deletePendingMod(),
+  cancelWorkshopDependency: () => { state.pendingWorkshopDependency = null; $("#workshopDependencyModal").close(); },
+  approveWorkshopDependency: async () => {
+    const pending = state.pendingWorkshopDependency;
+    if (!pending) return;
+    $("#workshopDependencyModal").close();
+    await toggleWorkshop(pending.id, pending.enabled, true);
+  },
 });
 
 async function dispatchStatic(event) {
@@ -489,7 +540,10 @@ async function handleDynamicAction(event) {
   try {
     switch (target.dataset.dynamicAction) {
       case "toggleMod": await run(target, () => toggleMod(target, id), { disable: false }); break;
+      case "toggleWorkshop": await run(target, () => toggleWorkshop(id, target.dataset.enabled === "true"), { disable: false }); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
+      case "openWorkshopFolder": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-folder`), { disable: false }); break;
+      case "openSteamWorkshop": await run(target, () => openSteamWorkshop(id), { disable: false }); break;
       case "rescanMods": beginModsWrite(); await request("/api/mods/resync", { method: "POST", body: {} }); await loadMods(); toast("重扫完成", "success"); break;
       case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
