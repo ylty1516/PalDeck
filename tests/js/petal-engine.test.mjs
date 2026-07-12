@@ -51,6 +51,10 @@ test("density counts are fixed per style and minimal high stays at most 24", () 
     );
   }
   assert.ok(desiredCount("minimal", "high") <= 24);
+  for (const inheritedKey of ["constructor", "toString", "__proto__", "length"]) {
+    assert.throws(() => desiredCount(inheritedKey, "high"), /style/i);
+    assert.throws(() => desiredCount("natural", inheritedKey), /level/i);
+  }
   assert.throws(() => desiredCount("unknown", "high"), /style/i);
   assert.throws(() => desiredCount("natural", "many"), /level/i);
 });
@@ -73,7 +77,7 @@ test("long frame delta is clamped to 0.04 seconds without mutating input", () =>
   longFrame.forEach(assertFiniteParticle);
 });
 
-test("wind, gust, rotation flip and lifetime evolve over a step", () => {
+test("wind, rotation and flip evolve over a step", () => {
   const [particle] = createParticles({
     style: "watercolor", level: "low", ...viewport, random: () => 0.5,
   });
@@ -87,13 +91,62 @@ test("wind, gust, rotation flip and lifetime evolve over a step", () => {
   assert.ok(next.age > particle.age);
 });
 
-test("particles outside viewport or past lifetime are recycled with injected random", () => {
+test("eligible particles receive a real gust contribution", () => {
+  const [particle] = createParticles({
+    style: "natural", level: "low", ...viewport, random: () => 0.5,
+  });
+  const windTime = Math.PI / (2 * 1.7);
+  const options = { style: "natural", delta: 0.04, windTime, ...viewport, random: () => 0.5 };
+
+  const [gusted] = stepParticles([{ ...particle, gustFactor: 0 }], options);
+  const [notGusted] = stepParticles([{ ...particle, gustFactor: 0.5 }], options);
+
+  assert.ok(gusted.x > notGusted.x);
+});
+
+test("every non-finite particle field triggers safe deterministic respawn", () => {
+  const [particle] = createParticles({
+    style: "natural", level: "low", ...viewport, random: () => 0.5,
+  });
+  const numericFields = [
+    "x", "y", "depth", "size", "opacity", "blur", "vx", "vy", "drift",
+    "driftPhase", "driftRate", "rotation", "rotationSpeed", "flipPhase",
+    "flipSpeed", "flip", "gustFactor", "age", "lifetime",
+  ];
+
+  for (const [index, field] of numericFields.entries()) {
+    const invalid = { ...particle, [field]: index % 2 ? Infinity : Number.NaN };
+    const [recycled] = stepParticles([invalid], {
+      style: "natural", delta: 0.04, windTime: 2, ...viewport, random: () => 0.25,
+    });
+    assert.equal(recycled.age, 0, `${field} should cause respawn`);
+    assert.ok(recycled.y < 0, `${field} should respawn above viewport`);
+    assertFiniteParticle(recycled);
+  }
+});
+
+test("particle past lifetime recycles while still inside viewport", () => {
   const [particle] = createParticles({
     style: "minimal", level: "low", ...viewport, random: () => 0.5,
   });
-  const expired = { ...particle, y: viewport.height + 200, age: particle.lifetime + 1 };
+  const expired = { ...particle, age: particle.lifetime };
 
   const [recycled] = stepParticles([expired], {
+    style: "minimal", delta: 0.04, windTime: 2, ...viewport, random: () => 0.25,
+  });
+
+  assert.ok(recycled.y < 0);
+  assert.equal(recycled.age, 0);
+  assertFiniteParticle(recycled);
+});
+
+test("particle outside viewport recycles before its lifetime expires", () => {
+  const [particle] = createParticles({
+    style: "minimal", level: "low", ...viewport, random: () => 0.5,
+  });
+  const outside = { ...particle, y: viewport.height + 200, age: 0 };
+
+  const [recycled] = stepParticles([outside], {
     style: "minimal", delta: 0.04, windTime: 2, ...viewport, random: () => 0.25,
   });
 

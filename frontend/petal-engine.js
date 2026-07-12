@@ -17,16 +17,18 @@ const COUNTS = Object.freeze({
 });
 
 function profileFor(style) {
-  const profile = STYLE_PROFILES[style];
-  if (!profile) throw new RangeError(`Unknown petal style: ${style}`);
-  return profile;
+  if (!Object.hasOwn(STYLE_PROFILES, style)) {
+    throw new RangeError(`Unknown petal style: ${String(style)}`);
+  }
+  return STYLE_PROFILES[style];
 }
 
 export function desiredCount(style, level) {
   profileFor(style);
-  const count = COUNTS[style][level];
-  if (count === undefined) throw new RangeError(`Unknown petal level: ${level}`);
-  return count;
+  if (!Object.hasOwn(COUNTS[style], level)) {
+    throw new RangeError(`Unknown petal level: ${String(level)}`);
+  }
+  return COUNTS[style][level];
 }
 
 function dimension(value, name) {
@@ -38,6 +40,19 @@ function sample(random) {
   const value = Number(random());
   if (!Number.isFinite(value)) return 0.5;
   return Math.min(0.999999, Math.max(0, value));
+}
+
+const PARTICLE_NUMERIC_FIELDS = Object.freeze([
+  "x", "y", "depth", "size", "opacity", "blur", "vx", "vy", "drift",
+  "driftPhase", "driftRate", "rotation", "rotationSpeed", "flipPhase",
+  "flipSpeed", "flip", "gustFactor", "age", "lifetime",
+]);
+
+function isParticleFinite(particle) {
+  return particle !== null && typeof particle === "object" &&
+    PARTICLE_NUMERIC_FIELDS.every((field) => Number.isFinite(particle[field])) &&
+    Number.isInteger(particle.depth) && particle.depth >= 0 && particle.depth < DEPTH_LAYERS.length &&
+    Object.values(particle).every((value) => typeof value !== "number" || Number.isFinite(value));
 }
 
 function makeParticle({ profile, depth, width, height, random, entering = false }) {
@@ -102,29 +117,28 @@ export function stepParticles(particles, {
   const lowFrequencyWind = Math.sin(time * 0.35) * profile.wind;
 
   return particles.map((particle, index) => {
-    const margin = Math.max(40, Number.isFinite(particle.size) ? particle.size * 4 : 40);
+    const respawn = () => makeParticle({
+      profile,
+      depth: Number.isInteger(particle?.depth) && particle.depth >= 0 && particle.depth < DEPTH_LAYERS.length
+        ? particle.depth : index % DEPTH_LAYERS.length,
+      width: viewportWidth,
+      height: viewportHeight,
+      random,
+      entering: true,
+    });
+    if (!isParticleFinite(particle)) return respawn();
+
+    const margin = Math.max(40, particle.size * 4);
     if (
-      !Number.isFinite(particle.x) || !Number.isFinite(particle.y) ||
-      !Number.isFinite(particle.age) || !Number.isFinite(particle.lifetime) ||
       particle.age >= particle.lifetime || particle.y > viewportHeight + margin ||
       particle.x < -margin || particle.x > viewportWidth + margin
-    ) {
-      return makeParticle({
-        profile,
-        depth: Number.isInteger(particle.depth) && particle.depth >= 0 && particle.depth < 3
-          ? particle.depth : index % 3,
-        width: viewportWidth,
-        height: viewportHeight,
-        random,
-        entering: true,
-      });
-    }
+    ) return respawn();
 
     const driftPhase = particle.driftPhase + particle.driftRate * dt;
     const gustWave = Math.max(0, Math.sin(time * 1.7 + particle.gustFactor * Math.PI * 2));
     const gust = particle.gustFactor < 0.35 ? gustWave * profile.gust * profile.wind : 0;
     const flipPhase = particle.flipPhase + particle.flipSpeed * dt;
-    return {
+    const next = {
       ...particle,
       x: particle.x + (particle.vx + lowFrequencyWind + gust + Math.sin(driftPhase) * particle.drift) * dt,
       y: particle.y + particle.vy * dt,
@@ -134,5 +148,6 @@ export function stepParticles(particles, {
       flip: Math.cos(flipPhase),
       age: particle.age + dt,
     };
+    return isParticleFinite(next) ? next : respawn();
   });
 }
