@@ -691,6 +691,7 @@ def test_successful_first_create_never_uses_path_unlink_and_reports_cleanup_pend
     result = service.set_enabled("1001", True)
 
     assert result["enabled"] is True
+    assert result["changed_ids"] == ["1001"]
     assert result["cleanup_pending"]
     assert settings.is_file()
     assert list(settings.parent.glob("*.quarantine"))

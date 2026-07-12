@@ -300,8 +300,12 @@ async function toggleWorkshop(id, enabled, confirmDependents = false) {
       method: "POST", body: confirmDependents ? { confirm_dependents: true } : {},
     });
     state.pendingWorkshopDependency = null;
-    replaceWorkshopMods(authoritative);
-    toast(enabled ? "Workshop 模组已启用" : "Workshop 模组已禁用", "success");
+    replaceWorkshopMods(Array.isArray(authoritative.mods) ? authoritative.mods : []);
+    if (Array.isArray(authoritative.cleanup_pending) && authoritative.cleanup_pending.length) {
+      toast("检测到无法安全自动清理的 Workshop 事务文件；已隔离保留，请勿手动删除游戏文件。", "warning");
+    } else {
+      toast(enabled ? "Workshop 模组已启用" : "Workshop 模组已禁用", "success");
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 409 && error.code === "workshop_dependency_conflict") {
       state.pendingWorkshopDependency = { id, enabled };

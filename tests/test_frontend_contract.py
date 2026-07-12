@@ -451,6 +451,9 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     assert "confirm_dependents: true" in app
     assert "workshop_dependency_conflict" in app
     assert "replaceWorkshopMods" in app
+    assert "authoritative.mods" in app
+    assert "authoritative.cleanup_pending" in app
+    assert "检测到无法安全自动清理的 Workshop 事务文件" in app
     updater = re.search(r"function replaceWorkshopMods\(authoritative\) \{(.*?)^\}", app, re.S | re.M)
     assert updater
     assert "authoritative.map" in updater.group(1)

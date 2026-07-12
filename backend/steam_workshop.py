@@ -267,7 +267,10 @@ class SteamWorkshopService:
 
             if not settings_existed and not enabled:
                 result = target.to_dict()
-                result.update({"enabled": False, "needs_restart": True})
+                result.update({
+                    "enabled": False, "needs_restart": True,
+                    "changed_ids": [target.workshop_id], "cleanup_pending": [],
+                })
                 return result
 
             if enabled:
@@ -292,6 +295,7 @@ class SteamWorkshopService:
 
             backup: tuple[Path, tuple[int, int], tuple[int, int]] | None = None
             created_identity = None
+            cleanup_pending: list[Path] = []
             if updated != original:
                 if settings_existed:
                     backup = _atomic_write(
@@ -301,7 +305,8 @@ class SteamWorkshopService:
                         document.identity,
                     )
                 else:
-                    created_identity = _atomic_create(document.path, updated)
+                    created_identity, created_cleanup = _atomic_create(document.path, updated)
+                    cleanup_pending.extend(created_cleanup)
             try:
                 confirmed = _read_settings(document.path)
                 confirmed_raw = confirmed.bom + confirmed.text.encode(confirmed.encoding)
@@ -324,13 +329,18 @@ class SteamWorkshopService:
                 raise
             else:
                 if backup is not None:
-                    _quarantine_transaction_file(backup[0], backup[1])
+                    isolated = _quarantine_transaction_file(backup[0], backup[1])
+                    if isolated is not None:
+                        cleanup_pending.append(isolated)
 
             result = target.to_dict()
-            result.update({"enabled": authoritative_enabled, "needs_restart": True})
-            quarantined = sorted(document.path.parent.glob("*.quarantine"))
-            if quarantined:
-                result["cleanup_pending"] = [str(path) for path in quarantined]
+            changed = additions if enabled else [target]
+            result.update({
+                "enabled": authoritative_enabled,
+                "needs_restart": True,
+                "changed_ids": [mod.workshop_id for mod in changed],
+                "cleanup_pending": [str(path) for path in cleanup_pending],
+            })
             if affected and confirm_dependents:
                 result["affected_dependents"] = affected
             return result
@@ -817,7 +827,9 @@ def _safe_replace(
     return _safe_file_identity(destination, source_identity)
 
 
-def _atomic_create(path: Path, content: bytes) -> tuple[int, int]:
+def _atomic_create(
+    path: Path, content: bytes
+) -> tuple[tuple[int, int], list[Path]]:
     """Publish a new settings file without exposing partial content or replacing a race."""
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary_created = False
@@ -830,10 +842,10 @@ def _atomic_create(path: Path, content: bytes) -> tuple[int, int]:
         os.link(temporary, path)
         linked = True
         published = _safe_file_identity(path, identity)
-        _quarantine_transaction_file(temporary, identity)
+        isolated = _quarantine_transaction_file(temporary, identity)
         temporary_created = False
         _safe_file_identity(path, published)
-        return published
+        return published, [isolated] if isolated is not None else []
     except BaseException:
         if linked:
             _quarantine_transaction_file(path, identity)

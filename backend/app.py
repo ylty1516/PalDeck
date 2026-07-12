@@ -369,11 +369,27 @@ def create_app(
                 )
 
         workshop = workshop_service()
-        workshop.set_enabled(
+        operation = workshop.set_enabled(
             workshop_id, enabled, confirm_dependents=confirm,
             conflict_validator=reject_manual_ue4ss,
         )
-        return success(workshop.list_mods())
+        settings_parent = Path(workshop.settings_path).parent
+        safe_cleanup: list[str] = []
+        for value in operation.get("cleanup_pending", []):
+            candidate = Path(str(value))
+            name = candidate.name
+            if (
+                candidate.parent == settings_parent
+                and name.startswith(".")
+                and "PalModSettings.ini" in name
+                and name.endswith(".quarantine")
+            ):
+                safe_cleanup.append(str(candidate))
+        return success({
+            "mods": workshop.list_mods(),
+            "changed_ids": list(operation.get("changed_ids", [workshop_id])),
+            "cleanup_pending": safe_cleanup,
+        })
 
     @app.post("/api/workshop/<workshop_id>/open-page")
     def open_workshop_page(workshop_id: str):

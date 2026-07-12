@@ -735,9 +735,11 @@ def test_launcher_passes_runtime_paths_to_factory_main(tmp_path, monkeypatch):
 
 
 class FakeWorkshopService:
-    def __init__(self, mods=None):
+    def __init__(self, mods=None, *, cleanup_pending=None):
         self.mods = list(mods or [])
         self.calls = []
+        self.cleanup_pending = list(cleanup_pending or [])
+        self.settings_path = Path("F:/trusted/Palworld/Mods/PalModSettings.ini")
 
     def list_mods(self, *, force=False):
         self.calls.append(("list", force))
@@ -752,7 +754,11 @@ class FakeWorkshopService:
             conflict_validator(SimpleNamespace(install_types=tuple(item.get("install_types", []))))
         item["enabled"] = enabled
         item["status"] = "enabled" if enabled else "disabled"
-        return dict(item)
+        result = dict(item)
+        result["changed_ids"] = [workshop_id]
+        if self.cleanup_pending:
+            result["cleanup_pending"] = list(self.cleanup_pending)
+        return result
 
     def active_ue4ss_mods(self):
         return [
@@ -832,8 +838,11 @@ def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation
     )
 
     assert rescanned.status_code == 200
-    assert enabled.json["data"][0]["enabled"] is True
-    assert disabled.json["data"][0]["enabled"] is False
+    assert enabled.json["data"]["mods"][0]["enabled"] is True
+    assert enabled.json["data"]["changed_ids"] == ["3625223587"]
+    assert enabled.json["data"]["cleanup_pending"] == []
+    assert disabled.json["data"]["mods"][0]["enabled"] is False
+    assert disabled.json["data"]["changed_ids"] == ["3625223587"]
     assert workshop.calls == [
         ("list", True),
         ("toggle", "3625223587", True, False),
@@ -841,6 +850,19 @@ def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation
         ("toggle", "3625223587", False, True),
         ("list", False),
     ]
+
+
+def test_workshop_toggle_returns_only_app_generated_cleanup_paths(app, auth_client):
+    workshop = FakeWorkshopService([_workshop_mod()])
+    trusted = workshop.settings_path.parent / "..PalModSettings.ini.tx.tmp.safe.quarantine"
+    workshop.cleanup_pending = [str(trusted), "F:/private/not-generated.txt"]
+    app.extensions["workshop_service"] = workshop
+
+    response = auth_client.post("/api/workshop/3625223587/enable", json={})
+
+    assert response.status_code == 200
+    assert response.json["data"]["cleanup_pending"] == [str(trusted)]
+    assert "not-generated" not in response.get_data(as_text=True)
 
 
 @pytest.mark.parametrize("workshop_id", ["0", "01", "-1", "1.5", "steam-workshop:1", "1" * 21])
