@@ -53,6 +53,7 @@ class ArchivePolicy:
     max_files: int = 5000
     max_single_bytes: int = 2 * 1024**3
     max_total_bytes: int = 8 * 1024**3
+    max_compression_ratio: int = 1000
 
 
 @dataclass(frozen=True)

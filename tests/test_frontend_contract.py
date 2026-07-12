@@ -413,6 +413,12 @@ def test_ue4ss_card_uses_fixed_palworld_sources_and_real_actions():
     assert 'confirm_replace: true' in app
     assert 'error.code === "ue4ss_conflict"' in app
     assert 'hidden = !state.ue4ssUpdateAvailable' in app
+    assert "UE4SS_WRITE_ACTIONS" in app
+    for action in ("installUe4ss", "installUe4ssUpdate", "selectUe4ssZip"):
+        assert f'"{action}"' in app
+    assert 'endpoint === "/api/ue4ss/install-upstream"' in app
+    assert "state.ue4ssUpdateAvailable = false" in app
+    assert '$("#installUe4ssUpdate").hidden = true' in app
     assert ".ue4ss-card" in css
     for forbidden in ("browser_download_url", "download_url", "ue4ssUrl", "asset_url"):
         assert forbidden not in app

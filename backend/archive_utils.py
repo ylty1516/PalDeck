@@ -10,6 +10,7 @@ import tempfile
 import zipfile
 import zlib
 from pathlib import Path, PureWindowsPath
+from typing import BinaryIO
 
 from backend.domain import ArchivePolicy, InspectedMod, ModKind
 
@@ -75,7 +76,10 @@ def _reject_special_file(info: zipfile.ZipInfo) -> None:
 def _validate_entries(
     infos: list[zipfile.ZipInfo], root: Path, policy: ArchivePolicy
 ) -> list[tuple[zipfile.ZipInfo, tuple[str, ...], Path]]:
-    if policy.max_files < 0 or policy.max_single_bytes < 0 or policy.max_total_bytes < 0:
+    if (
+        policy.max_files < 0 or policy.max_single_bytes < 0
+        or policy.max_total_bytes < 0 or policy.max_compression_ratio < 0
+    ):
         raise ValueError("解包限制不能为负数")
 
     entries = 0
@@ -101,6 +105,10 @@ def _validate_entries(
             raise ValueError(f"ZIP 条目路径逃逸目标目录：{info.filename!r}")
 
         if not info.is_dir():
+            if info.file_size and info.file_size / max(info.compress_size, 1) > policy.max_compression_ratio:
+                raise ValueError(
+                    f"ZIP 条目压缩比超过限制（最多 {policy.max_compression_ratio}:1）"
+                )
             if info.file_size > policy.max_single_bytes:
                 raise ValueError(
                     f"ZIP 单个文件声明大小超过限制（最多 {policy.max_single_bytes} 字节）"
@@ -310,12 +318,12 @@ def _cleanup_staging(staging: Path | None) -> None:
 
 
 def extract_archive_safely(
-    archive: Path | str,
+    archive: Path | str | BinaryIO,
     dest: Path | str,
     policy: ArchivePolicy | None = None,
 ) -> Path:
     """Validate and stream-extract an archive without applying Mod classification."""
-    archive_path = Path(archive)
+    archive_source = Path(archive) if isinstance(archive, (str, os.PathLike)) else archive
     destination = Path(os.path.abspath(dest))
     selected_policy = policy or ArchivePolicy()
     staging: Path | None = None
@@ -325,11 +333,11 @@ def extract_archive_safely(
         if os.path.lexists(destination):
             raise _TargetError(f"目标目录已存在，请选择空的新目录：{destination}")
         try:
-            zip_file = zipfile.ZipFile(archive_path, "r")
+            zip_file = zipfile.ZipFile(archive_source, "r")
         except _ARCHIVE_ERRORS as error:
             raise ValueError("ZIP 文件已损坏或无法解码，请重新下载并确认压缩包完整") from error
         except OSError as error:
-            raise ValueError(f"无法读取 ZIP 文件：{archive_path}") from error
+            raise ValueError(f"无法读取 ZIP 文件：{archive_source}") from error
 
         with zip_file:
             try:

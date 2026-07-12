@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+from io import BytesIO
 import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,15 @@ from .domain import ArchivePolicy
 from .game_detector import get_mod_directories, has_ue4ss
 from .manifest_store import validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
+
+UE4SS_ARCHIVE_POLICY = ArchivePolicy(
+    max_files=256,
+    max_single_bytes=32 * 1024**2,
+    max_total_bytes=128 * 1024**2,
+    max_compression_ratio=200,
+)
+_INSTALL_LOCKS: dict[str, threading.RLock] = {}
+_INSTALL_LOCKS_GUARD = threading.Lock()
 
 PALWORLD_REQUIRED_FILES = {
     "dwmapi.dll",
@@ -34,6 +45,13 @@ class Ue4ssGameRunningError(RuntimeError):
     pass
 
 
+def install_lock(game_root: Path | str) -> threading.RLock:
+    """Return the process-wide transaction lock for one canonical game root."""
+    key = os.path.normcase(str(Path(game_root).resolve()))
+    with _INSTALL_LOCKS_GUARD:
+        return _INSTALL_LOCKS.setdefault(key, threading.RLock())
+
+
 def _win64(game_root: Path | str) -> Path:
     return Path(game_root) / "Pal" / "Binaries" / "Win64"
 
@@ -41,15 +59,16 @@ def _win64(game_root: Path | str) -> Path:
 def status(game_root: Path | str) -> dict[str, Any]:
     root = Path(game_root)
     win64 = _win64(root)
-    installed = has_ue4ss(root)
     markers = {
         "dwmapi": (win64 / "dwmapi.dll").is_file(),
+        "xinput1_3": (win64 / "xinput1_3.dll").is_file(),
         "ue4ss_dll_root": (win64 / "UE4SS.dll").is_file(),
         "ue4ss_dll_sub": (win64 / "ue4ss" / "UE4SS.dll").is_file(),
         "settings_root": (win64 / "UE4SS-settings.ini").is_file(),
         "settings_sub": (win64 / "ue4ss" / "UE4SS-settings.ini").is_file(),
         "mods_dir": (win64 / "Mods").is_dir() or (win64 / "ue4ss" / "Mods").is_dir(),
     }
+    installed = has_ue4ss(root) or markers["xinput1_3"]
     bp_mod_loader = _bp_mod_loader_enabled(win64)
     return {
         "installed": installed,
@@ -165,10 +184,11 @@ def install_from_zip(
         raise FileNotFoundError(f"找不到文件: {archive}")
     if archive.suffix.lower() != ".zip":
         raise ValueError("UE4SS 安装仅支持 .zip（可直接拖入 zip，无需手动解压）")
-    return _install_archive(
-        game_root, archive, policy=policy, confirm_replace=confirm_replace,
-        require_palworld_layout=require_palworld_layout,
-    )
+    with install_lock(game_root):
+        return _install_archive(
+            game_root, archive, policy=policy, confirm_replace=confirm_replace,
+            require_palworld_layout=require_palworld_layout,
+        )
 
 
 def install_from_bytes(
@@ -182,9 +202,23 @@ def install_from_bytes(
     """Install an immutable verified snapshot without reopening its source path."""
     if not isinstance(archive_bytes, bytes):
         raise TypeError("archive_bytes must be immutable bytes")
-    return _install_archive(
-        game_root, None, archive_bytes=archive_bytes, policy=policy,
-        confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
+    with install_lock(game_root):
+        return _install_archive(
+            game_root, None, archive_bytes=archive_bytes, policy=policy,
+            confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
+        )
+
+
+def _ue4ss_policy(requested: ArchivePolicy | None) -> ArchivePolicy:
+    if requested is None:
+        return UE4SS_ARCHIVE_POLICY
+    return ArchivePolicy(
+        max_files=min(requested.max_files, UE4SS_ARCHIVE_POLICY.max_files),
+        max_single_bytes=min(requested.max_single_bytes, UE4SS_ARCHIVE_POLICY.max_single_bytes),
+        max_total_bytes=min(requested.max_total_bytes, UE4SS_ARCHIVE_POLICY.max_total_bytes),
+        max_compression_ratio=min(
+            requested.max_compression_ratio, UE4SS_ARCHIVE_POLICY.max_compression_ratio
+        ),
     )
 
 
@@ -219,13 +253,10 @@ def _install_archive(
     removed_legacy = False
     try:
         extract = temp / "extract"
-        source_archive = archive_path
-        if archive_bytes is not None:
-            source_archive = temp / "archive.zip"
-            source_archive.write_bytes(archive_bytes)
+        source_archive = BytesIO(archive_bytes) if archive_bytes is not None else archive_path
         if source_archive is None:
             raise ValueError("缺少 UE4SS 压缩包")
-        extract_archive_safely(source_archive, extract, policy=policy)
+        extract_archive_safely(source_archive, extract, policy=_ue4ss_policy(policy))
         if require_palworld_layout:
             extracted_names = {
                 str(path.relative_to(extract)).replace("\\", "/")

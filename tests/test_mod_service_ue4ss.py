@@ -423,18 +423,23 @@ def test_bundled_bytes_require_complete_palworld_layout(fake_game_root, monkeypa
         )
 
 
-def test_bundled_bytes_are_written_only_to_private_temp_and_not_reloaded_from_vendor(
+def test_bundled_bytes_use_same_in_memory_snapshot_and_strict_policy(
     fake_game_root, monkeypatch
 ):
     monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
     observed = []
     original_extract = ue4ss_installer.extract_archive_safely
 
-    def observing_extract(path, *args, **kwargs):
-        observed.append(Path(path))
-        assert Path(path).name == "archive.zip"
-        assert "ue4ss_install_" in str(path.parent)
-        return original_extract(path, *args, **kwargs)
+    def observing_extract(source, *args, **kwargs):
+        observed.append(source)
+        assert isinstance(source, io.BytesIO)
+        assert source.getvalue() == _palworld_archive_bytes()
+        policy = kwargs["policy"]
+        assert policy.max_files == 256
+        assert policy.max_single_bytes == 32 * 1024**2
+        assert policy.max_total_bytes == 128 * 1024**2
+        assert policy.max_compression_ratio == 200
+        return original_extract(source, *args, **kwargs)
 
     monkeypatch.setattr(ue4ss_installer, "extract_archive_safely", observing_extract)
     result = ue4ss_installer.install_from_bytes(
@@ -443,6 +448,24 @@ def test_bundled_bytes_are_written_only_to_private_temp_and_not_reloaded_from_ve
 
     assert result["ok"] is True
     assert len(observed) == 1
+
+
+def test_ue4ss_install_lock_is_process_wide_per_game_root(fake_game_root):
+    assert ue4ss_installer.install_lock(fake_game_root) is ue4ss_installer.install_lock(
+        fake_game_root / "."
+    )
+
+
+def test_xinput_marker_requires_confirmation_before_legacy_removal(fake_game_root, monkeypatch):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    legacy = fake_game_root / "Pal" / "Binaries" / "Win64" / "xinput1_3.dll"
+    legacy.write_bytes(b"manual")
+
+    with pytest.raises(ue4ss_installer.Ue4ssConflictError) as conflict:
+        ue4ss_installer.install_from_bytes(fake_game_root, _palworld_archive_bytes())
+
+    assert conflict.value.details["markers"]["xinput1_3"] is True
+    assert legacy.read_bytes() == b"manual"
 
 
 def test_existing_ue4ss_requires_confirmation_and_reports_markers(fake_game_root, monkeypatch):

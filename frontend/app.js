@@ -21,6 +21,9 @@ const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
 });
+const UE4SS_WRITE_ACTIONS = new Set([
+  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip",
+]);
 const LOCAL_INPUT_ACTIONS = new Set([
   "filterMods", "changeImportType", "editImportName", "editImportNexusId",
   "editNexusQuery", "editGamePath", "changeMask", "changeBlur", "changePetals",
@@ -345,6 +348,10 @@ async function installFixedUe4ss(endpoint) {
     method: "POST", body: confirmReplace ? { confirm_replace: true } : {}, timeout: 120000,
   }));
   $("#ue4ssResult").textContent = result.message || "UE4SS 安装完成";
+  if (endpoint === "/api/ue4ss/install-upstream") {
+    state.ue4ssUpdateAvailable = false;
+    $("#installUe4ssUpdate").hidden = true;
+  }
   await loadUe4ssStatus();
 }
 
@@ -402,7 +409,7 @@ export const ACTION_HANDLERS = Object.freeze({
   checkUe4ss: async () => checkUe4ssUpstream(),
   installUe4ssUpdate: async () => installFixedUe4ss("/api/ue4ss/install-upstream"),
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
-  selectUe4ssZip: async (event) => executeFileOperation(() => installZip(event.currentTarget.files?.[0])),
+  selectUe4ssZip: async (event) => run(event.currentTarget, () => executeFileOperation(() => installZip(event.currentTarget.files?.[0])), { disable: false, global: true, busyText: "正在安装 UE4SS…" }),
   checkUpdate: async () => { state.updateInfo = await request("/api/update/check", { timeout: 30000 }); $("#updateStatus").textContent = state.updateInfo.update_available ? `发现新版本 ${state.updateInfo.remote_version}` : `已是最新版 ${state.updateInfo.local_version}`; },
   applyUpdate: async () => { const result = await request("/api/update/apply", { method: "POST", body: {}, timeout: 120000 }); toast(result.message || "更新已准备，将自动重启", "success"); },
   themeAurora: chooseTheme,
@@ -447,7 +454,7 @@ async function dispatchStatic(event) {
     catch (error) { toast(actionableErrorMessage(error), "error"); }
     return;
   }
-  try { await run(target, () => ACTION_HANDLERS[target.dataset.action](actionEvent), { global: target.dataset.action === "importMod" || target.dataset.action === "installUe4ss" || target.dataset.action === "applyUpdate", busyText: "请稍候，正在处理…" }); }
+  try { await run(target, () => ACTION_HANDLERS[target.dataset.action](actionEvent), { global: target.dataset.action === "importMod" || UE4SS_WRITE_ACTIONS.has(target.dataset.action) || target.dataset.action === "applyUpdate", busyText: "请稍候，正在处理…" }); }
   catch { /* errors are surfaced by run or a conflict modal */ }
 }
 

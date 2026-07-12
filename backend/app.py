@@ -89,6 +89,7 @@ def create_app(
     app.extensions["nexus_catalog"] = nexus_api.NexusCatalog(writable / "nexus-cache")
     app.extensions["ue4ss_provider"] = Ue4ssProvider(resource_root=app_root)
     app.extensions["ue4ss_cache"] = writable / "ue4ss-cache"
+    app.extensions["ue4ss_pending_lock"] = threading.Lock()
 
     game_path = os.environ.get("PALMOD_GAME_PATH")
     if not game_path:
@@ -446,6 +447,9 @@ def create_app(
     def serialized_asset(asset):
         return asdict(asset) if asset is not None else None
 
+    def ue4ss_game_lock(game_root: Path | str) -> threading.RLock:
+        return ue4ss_installer.install_lock(game_root)
+
     @app.get("/api/ue4ss/status")
     def ue4ss_status():
         result = ue4ss_installer.status(service().game_root)
@@ -459,12 +463,20 @@ def create_app(
     @app.post("/api/ue4ss/install-bundled")
     def ue4ss_bundled():
         confirm = ue4ss_install_body()
+        current = service()
         provider = app.extensions["ue4ss_provider"]
-        payload = provider.bundled_archive()
-        return success(ue4ss_installer.install_from_bytes(
-            service().game_root, payload, confirm_replace=confirm,
-            require_palworld_layout=True,
-        ))
+        with ue4ss_game_lock(current.game_root):
+            try:
+                payload = provider.bundled_archive()
+            except Exception as exc:
+                app.logger.error("Bundled UE4SS validation failed", exc_info=exc)
+                raise ApiError(
+                    "内置 UE4SS 资源损坏或不可用", 500, "bundled_resource_invalid"
+                ) from exc
+            return success(ue4ss_installer.install_from_bytes(
+                current.game_root, payload, confirm_replace=confirm,
+                require_palworld_layout=True,
+            ))
 
     @app.post("/api/ue4ss/check-upstream")
     def ue4ss_check_upstream():
@@ -476,10 +488,11 @@ def create_app(
         except Exception as exc:
             app.logger.warning("UE4SS upstream check failed", exc_info=exc)
             return failure("无法检查 UE4SS 上游版本", 502, "upstream_error")
-        app.extensions["ue4ss_pending_asset"] = {
-            "asset": checked["asset"],
-            "expires": time.time() + 600,
-        }
+        with app.extensions["ue4ss_pending_lock"]:
+            app.extensions["ue4ss_pending_asset"] = {
+                "asset": checked["asset"],
+                "expires": time.time() + 600,
+            }
         return success({
             "asset": serialized_asset(checked["asset"]),
             "update_available": checked["update_available"],
@@ -488,34 +501,52 @@ def create_app(
     @app.post("/api/ue4ss/install-upstream")
     def ue4ss_install_upstream():
         confirm = ue4ss_install_body()
-        pending_asset = app.extensions.get("ue4ss_pending_asset")
-        if pending_asset is None:
-            raise ApiError("请先检查 UE4SS 上游版本", 409, "ue4ss_check_required")
-        if pending_asset["expires"] <= time.time():
-            app.extensions.pop("ue4ss_pending_asset", None)
-            raise ApiError("UE4SS 检查结果已过期，请重新检查", 410, "ue4ss_check_expired")
-        provider = app.extensions["ue4ss_provider"]
-        cache_dir = Path(app.extensions["ue4ss_cache"])
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        archive = cache_dir / f"{uuid.uuid4().hex}.zip"
-        try:
+        current = service()
+        with ue4ss_game_lock(current.game_root):
+            with app.extensions["ue4ss_pending_lock"]:
+                pending_asset = app.extensions.pop("ue4ss_pending_asset", None)
+            if pending_asset is None:
+                raise ApiError("请先检查 UE4SS 上游版本", 409, "ue4ss_check_required")
+            expires = pending_asset["expires"]
+            if expires <= time.time():
+                raise ApiError("UE4SS 检查结果已过期，请重新检查", 410, "ue4ss_check_expired")
+            provider = app.extensions["ue4ss_provider"]
+            cache_dir = Path(app.extensions["ue4ss_cache"])
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            archive = cache_dir / f"{uuid.uuid4().hex}.zip"
             try:
-                provider.download_verified(pending_asset["asset"], archive)
-            except Exception as exc:
-                app.logger.warning("UE4SS upstream download failed", exc_info=exc)
-                return failure("UE4SS 下载或校验失败", 502, "upstream_error")
-            result = ue4ss_installer.install_from_zip(
-                service().game_root, archive, confirm_replace=confirm,
-                require_palworld_layout=True,
-            )
-        finally:
-            archive.unlink(missing_ok=True)
-        app.extensions.pop("ue4ss_pending_asset", None)
-        return success(result)
+                try:
+                    provider.download_verified(pending_asset["asset"], archive)
+                except Exception as exc:
+                    app.logger.warning("UE4SS upstream download failed", exc_info=exc)
+                    return failure("UE4SS 下载或校验失败", 502, "upstream_error")
+                if expires <= time.time():
+                    raise ApiError(
+                        "UE4SS 检查结果已过期，请重新检查", 410,
+                        "ue4ss_check_expired",
+                    )
+                try:
+                    result = ue4ss_installer.install_from_zip(
+                        current.game_root, archive, confirm_replace=confirm,
+                        require_palworld_layout=True,
+                    )
+                except ue4ss_installer.Ue4ssConflictError:
+                    with app.extensions["ue4ss_pending_lock"]:
+                        app.extensions.setdefault("ue4ss_pending_asset", pending_asset)
+                    raise
+            finally:
+                archive.unlink(missing_ok=True)
+            return success(result)
 
     @app.post("/api/ue4ss/install-zip")
     def ue4ss_zip():
         current = service()
+        if set(request.files) != {"file"} or len(request.files.getlist("file")) != 1:
+            raise ApiError("UE4SS 本地安装仅接受一个 file", 400, "invalid_input")
+        if not set(request.form) <= {"confirm_replace"} or len(
+            request.form.getlist("confirm_replace")
+        ) > 1:
+            raise ApiError("UE4SS 本地安装包含额外或重复字段", 400, "invalid_input")
         uploaded = request.files.get("file")
         if not uploaded or not uploaded.filename:
             raise ApiError("请上传 UE4SS 的 .zip 文件", 400, "missing_file")
@@ -530,9 +561,10 @@ def create_app(
         dest = upload_dir / f"{uuid.uuid4().hex}-{name}"
         uploaded.save(dest)
         try:
-            return success(ue4ss_installer.install_from_zip(
-                current.game_root, dest, confirm_replace=confirm_raw == "true"
-            ))
+            with ue4ss_game_lock(current.game_root):
+                return success(ue4ss_installer.install_from_zip(
+                    current.game_root, dest, confirm_replace=confirm_raw == "true"
+                ))
         finally:
             dest.unlink(missing_ok=True)
 

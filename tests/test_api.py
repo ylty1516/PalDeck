@@ -109,6 +109,49 @@ def test_ue4ss_endpoints_require_authentication(app):
         assert response.json["error_code"] == "invalid_session"
 
 
+def test_all_ue4ss_write_routes_share_one_game_lock(app, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    entered = threading.Event()
+    release = threading.Event()
+    zip_entered = threading.Event()
+    responses = []
+
+    def blocking_bytes(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return {"ok": True}
+
+    def observing_zip(*_args, **_kwargs):
+        zip_entered.set()
+        return {"ok": True}
+
+    monkeypatch.setattr("backend.ue4ss_installer.install_from_bytes", blocking_bytes)
+    monkeypatch.setattr("backend.ue4ss_installer.install_from_zip", observing_zip)
+
+    def bundled_request():
+        client = app.test_client(); client.get("/?token=test-token")
+        responses.append(client.post("/api/ue4ss/install-bundled", json={}))
+
+    def local_request():
+        client = app.test_client(); client.get("/?token=test-token")
+        responses.append(client.post(
+            "/api/ue4ss/install-zip",
+            data={"file": (io.BytesIO(_ue4ss_zip_bytes()), "UE4SS.zip")},
+            content_type="multipart/form-data",
+        ))
+
+    first = threading.Thread(target=bundled_request)
+    second = threading.Thread(target=local_request)
+    first.start(); assert entered.wait(5)
+    second.start()
+    assert not zip_entered.wait(0.2)
+    release.set(); first.join(5); second.join(5)
+
+    assert zip_entered.is_set()
+    assert [response.status_code for response in responses] == [200, 200]
+
+
 def test_ue4ss_install_rejects_extra_fields_without_calling_provider(app, auth_client):
     provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
     app.extensions["ue4ss_provider"] = provider
@@ -119,6 +162,17 @@ def test_ue4ss_install_rejects_extra_fields_without_calling_provider(app, auth_c
             assert response.status_code == 400
             assert response.json["error_code"] == "invalid_input"
     assert provider.calls == []
+
+
+def test_ue4ss_bundled_resource_failure_is_server_error(app, auth_client, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr(provider, "bundled_archive", lambda: (_ for _ in ()).throw(ValueError("tampered")))
+
+    response = auth_client.post("/api/ue4ss/install-bundled", json={})
+
+    assert response.status_code >= 500
+    assert response.json["error_code"] == "bundled_resource_invalid"
 
 
 def test_ue4ss_bundled_install_maps_running_and_existing_conflict(app, auth_client, monkeypatch):
@@ -169,6 +223,76 @@ def test_ue4ss_upstream_install_requires_unexpired_server_check(app, auth_client
     assert expired.status_code == 410
     assert expired.json["error_code"] == "ue4ss_check_expired"
     assert not any(isinstance(call, tuple) for call in provider.calls)
+
+
+def test_ue4ss_pending_consumption_does_not_delete_newer_check(app, auth_client, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    asset_a = provider.asset
+    asset_b = Ue4ssAsset(asset_a.name, asset_a.size, "b" * 64, "newer", asset_a.download_url)
+    checks = iter((asset_a, asset_b))
+    provider.check_upstream = lambda: {"asset": next(checks), "update_available": True}
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+    second_client = app.test_client()
+    second_client.get("/?token=test-token")
+
+    def interleaved_download(asset, destination):
+        assert asset is asset_a
+        Path(destination).write_bytes(provider.archive)
+        assert second_client.post("/api/ue4ss/check-upstream", json={}).status_code == 200
+
+    provider.download_verified = interleaved_download
+    assert auth_client.post("/api/ue4ss/check-upstream", json={}).status_code == 200
+
+    installed = auth_client.post("/api/ue4ss/install-upstream", json={})
+
+    assert installed.status_code == 200
+    assert app.extensions["ue4ss_pending_asset"]["asset"] is asset_b
+
+
+def test_ue4ss_pending_expiry_is_rechecked_after_download(app, auth_client, monkeypatch):
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    now = [100.0]
+    monkeypatch.setattr("backend.app.time.time", lambda: now[0])
+    assert auth_client.post("/api/ue4ss/check-upstream", json={}).status_code == 200
+
+    def expiring_download(_asset, destination):
+        Path(destination).write_bytes(provider.archive)
+        now[0] = 701.0
+
+    provider.download_verified = expiring_download
+    called = []
+    monkeypatch.setattr("backend.ue4ss_installer.install_from_zip", lambda *a, **k: called.append(True))
+
+    response = auth_client.post("/api/ue4ss/install-upstream", json={})
+
+    assert response.status_code == 410
+    assert response.json["error_code"] == "ue4ss_check_expired"
+    assert called == []
+
+
+def test_ue4ss_local_zip_rejects_extra_and_duplicate_multipart_fields(app, auth_client, monkeypatch):
+    from werkzeug.datastructures import MultiDict
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+
+    cases = [
+        {"file": (io.BytesIO(_ue4ss_zip_bytes()), "UE4SS.zip"), "url": "https://evil.example"},
+        MultiDict([
+            ("file", (io.BytesIO(_ue4ss_zip_bytes()), "UE4SS.zip")),
+            ("confirm_replace", "false"), ("confirm_replace", "true"),
+        ]),
+        MultiDict([
+            ("file", (io.BytesIO(_ue4ss_zip_bytes()), "one.zip")),
+            ("file", (io.BytesIO(_ue4ss_zip_bytes()), "two.zip")),
+        ]),
+    ]
+    for data in cases:
+        response = auth_client.post(
+            "/api/ue4ss/install-zip", data=data, content_type="multipart/form-data"
+        )
+        assert response.status_code == 400
+        assert response.json["error_code"] == "invalid_input"
 
 
 def test_ue4ss_upstream_install_uses_server_asset_and_revalidates_zip(app, auth_client, monkeypatch):

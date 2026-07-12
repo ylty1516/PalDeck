@@ -114,6 +114,27 @@ def test_rejects_declared_single_file_size_limit(tmp_path: Path) -> None:
     assert not (tmp_path / "out").exists()
 
 
+def test_extract_archive_accepts_open_binary_stream_without_reopening_path(tmp_path):
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("safe.txt", b"same snapshot")
+    payload.seek(0)
+
+    result = archive_utils.extract_archive_safely(payload, tmp_path / "stream-out")
+
+    assert result.joinpath("safe.txt").read_bytes() == b"same snapshot"
+    assert not payload.closed
+
+
+def test_rejects_excessive_compression_ratio(tmp_path):
+    archive = make_zip(tmp_path / "ratio.zip", {"huge.txt": b"0" * 100_000})
+
+    with pytest.raises(ValueError, match="压缩比"):
+        archive_utils.extract_archive_safely(
+            archive, tmp_path / "ratio-out", ArchivePolicy(max_compression_ratio=10)
+        )
+
+
 def test_rejects_declared_total_size_limit(tmp_path: Path) -> None:
     archive = make_zip(tmp_path / "large.zip", {"a.pak": b"123", "a.utoc": b"456"})
 
