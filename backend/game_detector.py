@@ -117,14 +117,16 @@ def _parse_keyvalues(text: str) -> dict[str, object]:
     return parse_object(nested=False)
 
 
-def _load_keyvalues(path: Path) -> dict[str, object]:
+def load_steam_keyvalues(path: Path) -> dict[str, object]:
+    """Strictly parse a Steam KeyValues file, returning empty data on failure."""
     try:
         return _parse_keyvalues(_read_vdf(path))
     except ValueError:
         return {}
 
 
-def _get_casefold(mapping: dict[str, object], key: str) -> object | None:
+def get_keyvalues_value(mapping: dict[str, object], key: str) -> object | None:
+    """Look up a Steam KeyValues key using its case-insensitive semantics."""
     wanted = key.casefold()
     for candidate, value in mapping.items():
         if candidate.casefold() == wanted:
@@ -133,7 +135,7 @@ def _get_casefold(mapping: dict[str, object], key: str) -> object | None:
 
 
 def _parse_library_folders(vdf_path: Path) -> list[Path]:
-    root = _get_casefold(_load_keyvalues(vdf_path), "libraryfolders")
+    root = get_keyvalues_value(load_steam_keyvalues(vdf_path), "libraryfolders")
     if not isinstance(root, dict):
         return []
 
@@ -141,7 +143,7 @@ def _parse_library_folders(vdf_path: Path) -> list[Path]:
     for entry in root.values():
         if not isinstance(entry, dict):
             continue
-        raw = _get_casefold(entry, "path")
+        raw = get_keyvalues_value(entry, "path")
         if isinstance(raw, str) and raw:
             libraries.append(Path(raw))
     return libraries
@@ -161,11 +163,11 @@ def _is_safe_installdir(value: str) -> bool:
 
 def _manifest_installdir(library: Path) -> str | None:
     manifest = library / "steamapps" / f"appmanifest_{APP_ID}.acf"
-    app_state = _get_casefold(_load_keyvalues(manifest), "AppState")
+    app_state = get_keyvalues_value(load_steam_keyvalues(manifest), "AppState")
     if not isinstance(app_state, dict):
         return None
-    appid = _get_casefold(app_state, "appid")
-    installdir = _get_casefold(app_state, "installdir")
+    appid = get_keyvalues_value(app_state, "appid")
+    installdir = get_keyvalues_value(app_state, "installdir")
     if appid != APP_ID or not isinstance(installdir, str):
         return None
     return installdir if _is_safe_installdir(installdir) else None
@@ -223,26 +225,34 @@ def _describe_valid_installs(candidates: list[Path]) -> list[dict[str, object]]:
     return found
 
 
-def find_palworld_installs(
+def find_steam_libraries(
     *, steam_roots: list[Path] | None = None
-) -> list[dict[str, object]]:
-    """Find manifest-backed Palworld installs in Steam libraries."""
-    supplied_roots = steam_roots is not None
+) -> list[Path]:
+    """Return configured Steam libraries without probing game/content directories."""
     roots = list(steam_roots or [])
-    if not supplied_roots:
+    if steam_roots is None:
         registry_root = _read_steam_path_from_registry()
         if registry_root:
             roots.append(registry_root)
 
     libraries: list[Path] = []
     for root in roots:
-        libraries.append(Path(root))
+        root = Path(root)
+        libraries.append(root)
         libraries.extend(
-            _parse_library_folders(Path(root) / "steamapps" / "libraryfolders.vdf")
+            _parse_library_folders(root / "steamapps" / "libraryfolders.vdf")
         )
+    return _unique_paths(libraries)
+
+
+def find_palworld_installs(
+    *, steam_roots: list[Path] | None = None
+) -> list[dict[str, object]]:
+    """Find manifest-backed Palworld installs in Steam libraries."""
+    supplied_roots = steam_roots is not None
 
     manifest_candidates: list[Path] = []
-    for library in _unique_paths(libraries):
+    for library in find_steam_libraries(steam_roots=steam_roots):
         installdir = _manifest_installdir(library)
         if installdir:
             manifest_candidates.append(library / "steamapps" / "common" / installdir)
