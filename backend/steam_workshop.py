@@ -10,7 +10,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Callable
 
 from .game_lock import game_write_lock
 from .mod_service import GameRunningError
@@ -220,6 +220,7 @@ class SteamWorkshopService:
         enabled: bool,
         *,
         confirm_dependents: bool = False,
+        conflict_validator: Callable[[WorkshopMod], None] | None = None,
     ) -> dict[str, object]:
         """Atomically update ActiveModList using only the latest trusted scan."""
         if type(enabled) is not bool or type(confirm_dependents) is not bool:
@@ -236,6 +237,8 @@ class SteamWorkshopService:
                 raise GameRunningError("Palworld 正在运行，无法修改 Workshop 模组")
             mods = tuple(self.scan(force=True))
             target = self._trusted_mod(workshop_id, mods)
+            if conflict_validator is not None:
+                conflict_validator(target)
             graph = _build_dependency_graph(mods)
             document = _read_settings(self.settings_path)
             original = document.bom + document.text.encode(document.encoding)

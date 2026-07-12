@@ -4,7 +4,7 @@ import {
   actionableErrorMessage, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
-import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl, validatedSteamWorkshopUrl } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
@@ -133,7 +133,10 @@ async function loadMods() {
 
 function filterMods() {
   const query = $("#modFilter").value.trim().toLocaleLowerCase();
-  const filtered = state.mods.filter((mod) => !query || [mod.name, mod.mod_type, mod.nexus_id, mod.status].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)));
+  const filtered = state.mods.filter((mod) => !query || [
+    mod.name, mod.mod_type, mod.nexus_id, mod.status, mod.author,
+    mod.install_types, mod.package_name, mod.workshop_id, mod.dependencies,
+  ].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)));
   const enabled = state.mods.filter((mod) => (mod.status || mod.audit?.status) === "enabled").length;
   const abnormal = state.mods.filter((mod) => !["enabled", "disabled"].includes(mod.status || mod.audit?.status)).length;
   $("#modStats").textContent = `共 ${state.mods.length} 个 · 显示 ${filtered.length} 个 · 已启用 ${enabled} 个 · 异常 ${abnormal} 个`;
@@ -295,12 +298,6 @@ async function toggleWorkshop(id, enabled, confirmDependents = false) {
     await loadMods();
     throw error;
   }
-}
-
-function openSteamWorkshop(id) {
-  const url = validatedSteamWorkshopUrl(id);
-  if (!url) throw new ApiError("Workshop ID 无效");
-  window.open(url, "_blank", "noopener");
 }
 
 function openValidatedNexus(target) {
@@ -543,7 +540,7 @@ async function handleDynamicAction(event) {
       case "toggleWorkshop": await run(target, () => toggleWorkshop(id, target.dataset.enabled === "true"), { disable: false }); break;
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
       case "openWorkshopFolder": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-folder`), { disable: false }); break;
-      case "openSteamWorkshop": await run(target, () => openSteamWorkshop(id), { disable: false }); break;
+      case "openSteamWorkshop": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-page`, { method: "POST", body: {} }), { disable: false }); break;
       case "rescanMods": beginModsWrite(); await request("/api/mods/resync", { method: "POST", body: {} }); await loadMods(); toast("重扫完成", "success"); break;
       case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;

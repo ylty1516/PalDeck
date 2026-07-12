@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import types
+from types import SimpleNamespace
 import zipfile
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 
 from backend.app import create_app
 from backend.mod_service import GameRunningError
-from backend.steam_workshop import WorkshopDependencyError
+from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopMod
 from backend.ue4ss_provider import Ue4ssAsset
 
 
@@ -742,9 +743,11 @@ class FakeWorkshopService:
         self.calls.append(("list", force))
         return [dict(mod) for mod in self.mods]
 
-    def set_enabled(self, workshop_id, enabled, *, confirm_dependents=False):
+    def set_enabled(self, workshop_id, enabled, *, confirm_dependents=False, conflict_validator=None):
         self.calls.append(("toggle", workshop_id, enabled, confirm_dependents))
         item = next(mod for mod in self.mods if mod["workshop_id"] == workshop_id)
+        if conflict_validator is not None:
+            conflict_validator(SimpleNamespace(install_types=tuple(item.get("install_types", []))))
         item["enabled"] = enabled
         item["status"] = "enabled" if enabled else "disabled"
         return dict(item)
@@ -793,6 +796,7 @@ def test_workshop_routes_require_authentication(app):
         ("/api/workshop/rescan", "post"),
         ("/api/workshop/3625223587/enable", "post"),
         ("/api/workshop/3625223587/disable", "post"),
+        ("/api/workshop/3625223587/open-page", "post"),
     ):
         response = getattr(client, method)(path, json={} if method == "post" else None)
         assert response.status_code == 403
@@ -830,7 +834,6 @@ def test_workshop_rescan_and_toggle_use_only_scanned_id_and_boolean_confirmation
     assert disabled.json["data"]["enabled"] is False
     assert workshop.calls == [
         ("list", True),
-        ("list", False),
         ("toggle", "3625223587", True, False),
         ("toggle", "3625223587", False, True),
     ]
@@ -890,7 +893,7 @@ def test_workshop_ue4ss_and_manual_ue4ss_are_mutually_exclusive(app, auth_client
     blocked_enable = auth_client.post("/api/workshop/3625223587/enable", json={})
     assert blocked_enable.status_code == 409
     assert blocked_enable.json["error_code"] == "ue4ss_conflict"
-    assert not any(call[0] == "toggle" for call in workshop.calls)
+    assert workshop.mods[0]["enabled"] is False
 
     (win64 / "dwmapi.dll").unlink()
     workshop.mods[0].update(enabled=True, status="enabled")
@@ -901,6 +904,34 @@ def test_workshop_ue4ss_and_manual_ue4ss_are_mutually_exclusive(app, auth_client
     assert blocked_install.json["error_code"] == "ue4ss_conflict"
     assert blocked_install.json["details"]["reason"] == "workshop_ue4ss_active"
     assert provider.calls == []
+
+
+def test_workshop_open_page_uses_only_server_scanned_id_and_system_browser(app, auth_client):
+    opened = []
+    app.config["OPEN_URL"] = opened.append
+    app.extensions["workshop_service"] = FakeWorkshopService([_workshop_mod()])
+
+    response = auth_client.post("/api/workshop/3625223587/open-page", json={})
+
+    assert response.status_code == 200
+    assert opened == ["https://steamcommunity.com/sharedfiles/filedetails/?id=3625223587"]
+    assert response.json["data"] == {"opened": True}
+
+
+@pytest.mark.parametrize("body", [
+    {"url": "https://evil.example"}, {"path": "F:/evil"},
+    {"workshop_id": "9999"}, None,
+])
+def test_workshop_open_page_rejects_url_paths_extra_fields_and_non_object_body(app, auth_client, body):
+    opened = []
+    app.config["OPEN_URL"] = opened.append
+    app.extensions["workshop_service"] = FakeWorkshopService([_workshop_mod()])
+
+    response = auth_client.post("/api/workshop/3625223587/open-page", json=body)
+
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+    assert opened == []
 
 
 def test_workshop_open_folder_uses_scanned_path_only(app, auth_client):
@@ -915,6 +946,59 @@ def test_workshop_open_folder_uses_scanned_path_only(app, auth_client):
     rejected = auth_client.get("/api/workshop/9999/open-folder?path=F:/evil")
     assert rejected.status_code == 404
     assert opened == ["F:/Steam/workshop/content/1623730/3625223587"]
+
+
+def test_concurrent_workshop_ue4ss_enable_and_bundled_install_never_both_succeed(
+    app, tmp_path, monkeypatch
+):
+    workshop_root = tmp_path / "Steam"
+    game_root = Path(app.extensions["mod_service"].game_root)
+    settings = game_root / "Palworld" / "Mods" / "PalModSettings.ini"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("[PalModSettings]\nbGlobalEnableMod=False\n", encoding="utf-8")
+    mod = WorkshopMod(
+        "3625223587", "Workshop UE4SS", "WorkshopFramework", "Author", "1.0",
+        (), ("UE4SS",), ("Pal/Binaries/Win64",),
+        workshop_root / "steamapps/workshop/content/1623730/3625223587",
+        1, True, None,
+    )
+    workshop = SteamWorkshopService(
+        workshop_root, game_root, game_running=lambda: False,
+        lock_root=app.config["DATA_DIR"],
+    )
+    monkeypatch.setattr(workshop, "scan", lambda *, force=False: [mod])
+    app.extensions["workshop_service"] = workshop
+    provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    app.extensions["ue4ss_provider"] = provider
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+
+    installed = []
+    def install_manual(root, *_args, **_kwargs):
+        win64 = Path(root) / "Pal" / "Binaries" / "Win64"
+        (win64 / "dwmapi.dll").write_bytes(b"manual")
+        installed.append(True)
+        return {"installed": True}
+    monkeypatch.setattr("backend.ue4ss_installer.install_from_bytes", install_manual)
+
+    barrier = threading.Barrier(2)
+    responses = []
+    def call(path):
+        client = app.test_client(); client.get("/?token=test-token")
+        barrier.wait(timeout=5)
+        responses.append(client.post(path, json={}))
+
+    threads = [
+        threading.Thread(target=call, args=("/api/workshop/3625223587/enable",)),
+        threading.Thread(target=call, args=("/api/ue4ss/install-bundled",)),
+    ]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(timeout=10)
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    active = workshop.active_ue4ss_mods()
+    manual = (game_root / "Pal" / "Binaries" / "Win64" / "dwmapi.dll").is_file()
+    assert not (active and manual)
+    assert bool(installed) is manual
 
 
 def test_internal_errors_do_not_leak_exception_text(app, auth_client, monkeypatch):

@@ -438,9 +438,12 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     workshop_branch = re.search(r'if \(mod\.source === "steam_workshop"\) \{(.*?)^\s{4}\}', render, re.S | re.M)
     assert workshop_branch
     assert '"deleteMod"' not in workshop_branch.group(1)
-    assert 'https://steamcommunity.com/sharedfiles/filedetails/?id=${id}' in render
-    assert "validatedSteamWorkshopUrl" in app
+    assert "steamcommunity.com/sharedfiles" not in app
+    assert "steamcommunity.com/sharedfiles" not in render
+    assert "validatedSteamWorkshopUrl" not in app
+    assert "validatedSteamWorkshopUrl" not in render
     assert 'request(`/api/workshop/${encodeURIComponent(id)}/open-folder`)' in app
+    assert 'request(`/api/workshop/${encodeURIComponent(id)}/open-page`, { method: "POST", body: {} })' in app
     assert 'request(`/api/workshop/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`' in app
     assert 'id="workshopDependencyModal"' in html
     assert 'data-action="cancelWorkshopDependency"' in html
@@ -451,20 +454,12 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     assert ".source-workshop" in css
 
 
-def test_steam_workshop_url_validator_executable_contract():
-    script = """
-      import { validatedSteamWorkshopUrl } from './frontend/render.js';
-      const valid = validatedSteamWorkshopUrl('3625223587');
-      if (valid?.href !== 'https://steamcommunity.com/sharedfiles/filedetails/?id=3625223587') process.exit(1);
-      for (const value of ['0', '01', '../1', '1.5', '1'.repeat(21)]) {
-        if (validatedSteamWorkshopUrl(value) !== null) process.exit(2);
-      }
-    """
-    result = subprocess.run(
-        ["node", "--input-type=module", "--eval", script], cwd=ROOT,
-        text=True, capture_output=True, check=False,
-    )
-    assert result.returncode == 0, result.stderr
+def test_workshop_filter_includes_server_metadata_fields():
+    app = APP.read_text(encoding="utf-8")
+    filter_body = re.search(r"function filterMods\(\) \{(.*?)^\}", app, re.S | re.M)
+    assert filter_body
+    for field in ("author", "install_types", "package_name", "workshop_id", "dependencies"):
+        assert f"mod.{field}" in filter_body.group(1)
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

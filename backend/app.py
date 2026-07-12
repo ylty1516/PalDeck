@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 import uuid
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ def create_app(
         PENDING_MAX_ITEMS=MAX_PENDING_ITEMS,
         PENDING_MAX_TOTAL_BYTES=MAX_PENDING_BYTES,
         OPEN_FOLDER=getattr(os, "startfile", None),
+        OPEN_URL=webbrowser.open,
         EXIT_PROCESS=os._exit,
         UPDATE_EXIT_DELAY=1.2,
     )
@@ -351,20 +353,34 @@ def create_app(
         confirm = workshop_toggle_body()
         validate_workshop_id(workshop_id)
         enabled = request.path.endswith("/enable")
-        if enabled:
-            item = workshop_record(workshop_id)
+
+        def reject_manual_ue4ss(target) -> None:
             is_ue4ss = any(
-                str(kind).casefold() == "ue4ss"
-                for kind in item.get("install_types", [])
+                str(kind).casefold() == "ue4ss" for kind in target.install_types
             )
-            if is_ue4ss and ue4ss_installer.status(service().game_root)["installed"]:
+            if enabled and is_ue4ss and ue4ss_installer.status(service().game_root)["installed"]:
                 raise ApiError(
                     "请先移除手动或内置 UE4SS，再启用 Workshop UE4SS",
                     409, "ue4ss_conflict", {"reason": "manual_ue4ss_installed"},
                 )
+
         return success(workshop_service().set_enabled(
             workshop_id, enabled, confirm_dependents=confirm,
+            conflict_validator=reject_manual_ue4ss,
         ))
+
+    @app.post("/api/workshop/<workshop_id>/open-page")
+    def open_workshop_page(workshop_id: str):
+        if request.get_json(silent=True) != {}:
+            raise ApiError("打开 Workshop 页面请求不接受参数", 400, "invalid_input")
+        item = workshop_record(workshop_id)
+        trusted_id = str(item["workshop_id"])
+        validate_workshop_id(trusted_id)
+        opener = app.config.get("OPEN_URL")
+        if not callable(opener):
+            raise ApiError("当前系统不支持打开网页", 500, "open_url_unavailable")
+        opener(f"https://steamcommunity.com/sharedfiles/filedetails/?id={trusted_id}")
+        return success({"opened": True})
 
     @app.get("/api/workshop/<workshop_id>/open-folder")
     def open_workshop_folder(workshop_id: str):
@@ -568,9 +584,9 @@ def create_app(
     def ue4ss_bundled():
         confirm = ue4ss_install_body()
         current = service()
-        reject_active_workshop_ue4ss()
         provider = app.extensions["ue4ss_provider"]
         with ue4ss_game_lock(current.game_root):
+            reject_active_workshop_ue4ss()
             try:
                 payload = provider.bundled_archive()
             except Exception as exc:
@@ -607,8 +623,8 @@ def create_app(
     def ue4ss_install_upstream():
         confirm = ue4ss_install_body()
         current = service()
-        reject_active_workshop_ue4ss()
         with ue4ss_game_lock(current.game_root):
+            reject_active_workshop_ue4ss()
             with app.extensions["ue4ss_pending_lock"]:
                 pending_asset = app.extensions.pop("ue4ss_pending_asset", None)
             if pending_asset is None:
@@ -662,13 +678,13 @@ def create_app(
         confirm_raw = request.form.get("confirm_replace", "false").casefold()
         if confirm_raw not in {"true", "false"}:
             raise ApiError("confirm_replace 必须是布尔值", 400, "invalid_input")
-        reject_active_workshop_ue4ss()
         upload_dir = writable / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         dest = upload_dir / f"{uuid.uuid4().hex}-{name}"
         uploaded.save(dest)
         try:
             with ue4ss_game_lock(current.game_root):
+                reject_active_workshop_ue4ss()
                 return success(ue4ss_installer.install_from_zip(
                     current.game_root, dest, confirm_replace=confirm_raw == "true"
                 ))

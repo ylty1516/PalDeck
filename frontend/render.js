@@ -1,11 +1,5 @@
 const text = (value) => document.createTextNode(String(value ?? ""));
 
-export function validatedSteamWorkshopUrl(value) {
-  const id = String(value ?? "");
-  if (!/^[1-9][0-9]{0,19}$/.test(id)) return null;
-  return new URL(`https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`);
-}
-
 export function validatedNexusUrl(value) {
   let url;
   try { url = new URL(value); } catch { return null; }
