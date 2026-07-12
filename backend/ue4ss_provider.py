@@ -19,7 +19,7 @@ API_URL = "https://api.github.com/repos/Okaetsu/RE-UE4SS/releases/tags/experimen
 REPO = "https://github.com/Okaetsu/RE-UE4SS"
 TAG = "experimental-palworld"
 ASSET_NAME = "UE4SS-Palworld.zip"
-DOWNLOAD_PREFIX = f"{REPO}/releases/download/"
+DOWNLOAD_URL = f"{REPO}/releases/download/{TAG}/{ASSET_NAME}"
 MAX_ASSET_SIZE = 8 * 1024 * 1024
 # urllib applies this socket timeout to both connection establishment and reads.
 HTTP_CONNECT_READ_TIMEOUT = 30
@@ -106,7 +106,7 @@ class Ue4ssProvider:
         if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
             raise ValueError("invalid UE4SS manifest schema")
         fixed = {
-            "source": f"{DOWNLOAD_PREFIX}{TAG}/{ASSET_NAME}",
+            "source": DOWNLOAD_URL,
             "repo": REPO,
             "tag": TAG,
             "asset": ASSET_NAME,
@@ -211,7 +211,7 @@ class Ue4ssProvider:
         if isinstance(size, bool) or not isinstance(size, int) or not 0 < size <= MAX_ASSET_SIZE:
             raise ValueError("invalid GitHub asset size")
         url = metadata.get("browser_download_url")
-        if not isinstance(url, str) or not url.startswith(DOWNLOAD_PREFIX):
+        if url != DOWNLOAD_URL:
             raise ValueError("invalid GitHub asset URL")
         _validate_https_url(url, context="asset")
         updated_at = metadata.get("updated_at")

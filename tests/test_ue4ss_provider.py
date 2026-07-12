@@ -156,6 +156,7 @@ def test_download_read_error_preserves_existing_target_and_removes_temp(tmp_path
 
 
 # Runtime provider trust-chain tests.
+import backend.ue4ss_provider as ue4ss_provider
 from backend.ue4ss_provider import Ue4ssAsset, Ue4ssProvider, _SafeRedirectHandler
 
 
@@ -219,6 +220,49 @@ def test_bundled_zip_rejects_tampered_manifest(tmp_path, change, error):
     _make_bundle(tmp_path, manifest_changes=change)
     with pytest.raises(ValueError, match=error):
         Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+
+def test_bundled_zip_rejects_manifest_parse_and_read_failures(tmp_path, monkeypatch):
+    _make_bundle(tmp_path)
+    manifest_path = tmp_path / "third_party" / "ue4ss-palworld" / "manifest.json"
+    manifest_path.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest"):
+        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+    original_read_text = Path.read_text
+    def failing_read_text(path, *args, **kwargs):
+        if path == manifest_path:
+            raise OSError("manifest unreadable")
+        return original_read_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    with pytest.raises(ValueError, match="manifest"):
+        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+
+def test_bundled_zip_rejects_missing_unreadable_and_invalid_zip(tmp_path, monkeypatch):
+    archive, manifest = _make_bundle(tmp_path)
+    archive.unlink()
+    with pytest.raises(ValueError, match="unavailable"):
+        Ue4ssProvider(resource_root=tmp_path).bundled_zip()
+
+    archive, manifest = _make_bundle(tmp_path / "unreadable")
+    original_open = Path.open
+    def failing_open(path, *args, **kwargs):
+        if path == archive:
+            raise OSError("archive unreadable")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(ValueError, match="cannot read"):
+        Ue4ssProvider(resource_root=tmp_path / "unreadable").bundled_zip()
+    monkeypatch.setattr(Path, "open", original_open)
+
+    bad_archive, bad_manifest = _make_bundle(tmp_path / "bad-zip")
+    bad_archive.write_bytes(b"not a zip")
+    bad_manifest["size"] = bad_archive.stat().st_size
+    bad_manifest["sha256"] = hashlib.sha256(bad_archive.read_bytes()).hexdigest()
+    (bad_archive.parent / "manifest.json").write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid bundled UE4SS ZIP"):
+        Ue4ssProvider(resource_root=tmp_path / "bad-zip").bundled_zip()
 
 
 def test_bundled_zip_rejects_changed_bytes_and_missing_required_entry(tmp_path):
@@ -292,6 +336,39 @@ def test_check_upstream_rejects_untrusted_metadata(tmp_path, override, match):
         provider.check_upstream()
 
 
+@pytest.mark.parametrize("url", [
+    "https://github.com/Okaetsu/RE-UE4SS/releases/download/wrong-tag/UE4SS-Palworld.zip",
+    "https://github.com/Okaetsu/RE-UE4SS/releases/download/experimental-palworld/subdir/UE4SS-Palworld.zip",
+    "https://github.com/Okaetsu/RE-UE4SS/releases/download/experimental-palworld/other.zip",
+])
+def test_check_upstream_rejects_same_host_wrong_release_url(tmp_path, url):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(
+        resource_root=tmp_path,
+        opener=lambda *_a, **_k: JsonResponse(_release({"browser_download_url": url})),
+    )
+    with pytest.raises(ValueError, match="URL"):
+        provider.check_upstream()
+
+
+def test_check_upstream_rejects_oversized_invalid_duplicate_and_missing_updated_at(tmp_path):
+    _make_bundle(tmp_path)
+    cases = [
+        b"x" * (1024 * 1024 + 1),
+        b"not-json",
+        json.dumps({"assets": [json.loads(_release())["assets"][0]] * 2}).encode(),
+        _release({"updated_at": ""}),
+    ]
+    matches = ["too large", "release response", "uniquely", "updated_at"]
+    for payload, match in zip(cases, matches):
+        provider = Ue4ssProvider(
+            resource_root=tmp_path,
+            opener=lambda *_a, payload=payload, **_k: JsonResponse(payload),
+        )
+        with pytest.raises(ValueError, match=match):
+            provider.check_upstream()
+
+
 def test_check_upstream_rejects_untrusted_final_response_host(tmp_path):
     _make_bundle(tmp_path)
     provider = Ue4ssProvider(
@@ -334,6 +411,50 @@ def test_download_verified_streams_and_replaces_atomically(tmp_path):
     assert provider.download_verified(asset, target) == target
     assert target.read_bytes() == payload
     assert not target.with_name(target.name + ".tmp").exists()
+
+
+def test_download_verified_write_and_replace_failures_clean_temp_and_preserve_target(
+    tmp_path, monkeypatch
+):
+    _make_bundle(tmp_path)
+    provider = Ue4ssProvider(resource_root=tmp_path)
+    payload = b"expected"
+    asset = _checked_asset(provider, payload)
+    target = tmp_path / "target.zip"
+    temporary = target.with_name(target.name + ".tmp")
+    target.write_bytes(b"old")
+    provider._opener = lambda *_a, **_k: ChunkedResponse(payload)
+
+    original_open = Path.open
+    class FailingWriter:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, _chunk):
+            raise OSError("disk full")
+
+    def failing_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        return FailingWriter(stream) if path == temporary else stream
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(OSError, match="disk full"):
+        provider.download_verified(asset, target)
+    assert target.read_bytes() == b"old"
+    assert not temporary.exists()
+
+    monkeypatch.setattr(Path, "open", original_open)
+    monkeypatch.setattr(ue4ss_provider.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("replace failed")))
+    with pytest.raises(OSError, match="replace failed"):
+        provider.download_verified(asset, target)
+    assert target.read_bytes() == b"old"
+    assert not temporary.exists()
 
 
 @pytest.mark.parametrize("kind", ["short", "long", "digest", "read-error", "bad-host"])
