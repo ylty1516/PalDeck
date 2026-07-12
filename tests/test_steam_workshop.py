@@ -612,25 +612,108 @@ def test_list_mods_treats_missing_settings_as_disabled(tmp_path):
     assert service.list_mods(force=True)[0]["enabled"] is False
 
 
+def test_quarantine_cleanup_preserves_file_replaced_at_replace_entry(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    target = tmp_path / "transaction.tmp"
+    target.write_bytes(b"created")
+    metadata = target.stat()
+    expected = (metadata.st_dev, metadata.st_ino)
+    replacement = tmp_path / "replacement.tmp"
+    replacement.write_bytes(b"replacement")
+    real_replace = os.replace
+    swapped = False
+
+    def swap_at_replace(source, destination):
+        nonlocal swapped
+        if not swapped and Path(source) == target:
+            swapped = True
+            real_replace(replacement, target)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(steam_workshop.os, "replace", swap_at_replace)
+
+    quarantine = steam_workshop._quarantine_transaction_file(target, expected)
+
+    assert quarantine is not None
+    assert target.read_bytes() == b"replacement"
+    assert quarantine.read_bytes() == b"replacement"
+
+
+def test_restore_backup_does_not_overwrite_replacement_at_quarantine_entry(tmp_path, monkeypatch):
+    from backend import steam_workshop
+
+    target = tmp_path / "PalModSettings.ini"
+    target.write_bytes(b"updated")
+    target_stat = target.stat()
+    target_identity = (target_stat.st_dev, target_stat.st_ino)
+    backup = tmp_path / ".PalModSettings.ini.backup"
+    backup.write_bytes(b"original")
+    backup_stat = backup.stat()
+    backup_identity = (backup_stat.st_dev, backup_stat.st_ino)
+    replacement = tmp_path / "replacement.ini"
+    replacement.write_bytes(b"replacement")
+    real_replace = os.replace
+    swapped = False
+
+    def swap_at_replace(source, destination):
+        nonlocal swapped
+        if not swapped and Path(source) == target:
+            swapped = True
+            real_replace(replacement, target)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(steam_workshop.os, "replace", swap_at_replace)
+
+    with pytest.raises(UnsafeSteamFileError, match="rollback target changed"):
+        steam_workshop._restore_backup(
+            target, backup, backup_identity, target_identity,
+        )
+
+    assert target.read_bytes() == b"replacement"
+    assert backup.read_bytes() == b"original"
+
+
+def test_successful_first_create_never_uses_path_unlink_and_reports_cleanup_pending(tmp_path, monkeypatch):
+    service, settings = workshop_service(
+        tmp_path, {"1001": {"PackageName": "Core", "Dependencies": []}}
+    )
+    settings.unlink(missing_ok=True)
+
+    real_unlink = Path.unlink
+    def forbidden_unlink(path, *args, **kwargs):
+        if "PalModSettings.ini" in Path(path).name:
+            raise AssertionError("transaction cleanup must not unlink by path")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", forbidden_unlink)
+
+    result = service.set_enabled("1001", True)
+
+    assert result["enabled"] is True
+    assert result["cleanup_pending"]
+    assert settings.is_file()
+    assert list(settings.parent.glob("*.quarantine"))
+
+
 def test_atomic_create_failure_does_not_delete_file_replaced_after_link(tmp_path, monkeypatch):
     from backend import steam_workshop
 
     target = tmp_path / "PalModSettings.ini"
     replacement = tmp_path / "replacement.ini"
     replacement.write_bytes(b"replacement")
-    real_unlink = Path.unlink
+    real_replace = os.replace
     swapped = False
 
-    def swap_then_fail(path, *args, **kwargs):
+    def swap_at_temp_quarantine(source, destination):
         nonlocal swapped
-        candidate = Path(path)
+        candidate = Path(source)
         if not swapped and candidate.name.startswith(".PalModSettings.ini.") and candidate.suffix == ".tmp":
             swapped = True
-            os.replace(replacement, target)
-            raise OSError("unlink failed after replacement")
-        return real_unlink(candidate, *args, **kwargs)
+            real_replace(replacement, target)
+        return real_replace(source, destination)
 
-    monkeypatch.setattr(Path, "unlink", swap_then_fail)
+    monkeypatch.setattr(steam_workshop.os, "replace", swap_at_temp_quarantine)
 
     with pytest.raises(UnsafeSteamFileError, match="settings file changed"):
         steam_workshop._atomic_create(target, b"created")
@@ -656,7 +739,7 @@ def test_first_enable_atomically_creates_missing_settings_and_disable_missing_is
         "bGlobalEnableMod=True\n"
         "ActiveModList=Core\n"
     )
-    assert list(settings.parent.glob(".PalModSettings.ini.*")) == []
+    assert list(settings.parent.glob("*.quarantine"))
 
 
 def test_enable_and_disable_are_deduplicated_idempotent_and_disable_only_target(tmp_path):
@@ -1077,7 +1160,7 @@ def test_game_running_rejects_change_without_touching_settings(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["write", "replace"])
-def test_atomic_write_failure_preserves_original_and_removes_temp_files(
+def test_atomic_write_failure_preserves_original_and_retains_safe_cleanup_residue(
     tmp_path, monkeypatch, failure
 ):
     from backend import steam_workshop
@@ -1109,7 +1192,7 @@ def test_atomic_write_failure_preserves_original_and_removes_temp_files(
         service.set_enabled("1001", True)
 
     assert settings.read_bytes() == original
-    assert list(settings.parent.glob(".PalModSettings.ini.*.tmp")) == []
+    assert list(settings.parent.glob("*PalModSettings.ini*"))
 
 
 @pytest.mark.parametrize("confirmation", ["read_error", "content_mismatch"])
@@ -1143,7 +1226,9 @@ def test_confirmation_failure_restores_exclusive_backup(
         service.set_enabled("1001", True)
 
     assert settings.read_bytes() == original
-    assert list(settings.parent.glob(".PalModSettings.ini.*.backup")) == []
+    backups = list(settings.parent.glob(".PalModSettings.ini.*.backup"))
+    assert backups and all(path.read_bytes() == original for path in backups)
+    assert list(settings.parent.glob("*.quarantine"))
 
 
 def test_fsync_failure_preserves_original_and_cleans_transaction_files(

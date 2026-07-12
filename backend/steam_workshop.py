@@ -290,7 +290,7 @@ class SteamWorkshopService:
                     remove_package=target.package_name,
                 )
 
-            backup: tuple[Path, tuple[int, int]] | None = None
+            backup: tuple[Path, tuple[int, int], tuple[int, int]] | None = None
             created_identity = None
             if updated != original:
                 if settings_existed:
@@ -318,16 +318,19 @@ class SteamWorkshopService:
                     raise RuntimeError("PalModSettings.ini 全局开关写入确认失败")
             except BaseException:
                 if backup is not None:
-                    _restore_backup(document.path, backup[0], backup[1])
+                    _restore_backup(document.path, backup[0], backup[1], backup[2])
                 elif created_identity is not None:
-                    _unlink_if_identity(document.path, created_identity)
+                    _quarantine_transaction_file(document.path, created_identity)
                 raise
             else:
                 if backup is not None:
-                    _unlink_if_identity(backup[0], backup[1])
+                    _quarantine_transaction_file(backup[0], backup[1])
 
             result = target.to_dict()
             result.update({"enabled": authoritative_enabled, "needs_restart": True})
+            quarantined = sorted(document.path.parent.glob("*.quarantine"))
+            if quarantined:
+                result["cleanup_pending"] = [str(path) for path in quarantined]
             if affected and confirm_dependents:
                 result["affected_dependents"] = affected
             return result
@@ -736,21 +739,40 @@ def _safe_file_identity(
     return identity
 
 
-def _unlink_if_identity(path: Path, expected: tuple[int, int] | None) -> bool:
-    """Best-effort cleanup that never removes a replaced or reparse file."""
+def _quarantine_transaction_file(
+    path: Path, expected: tuple[int, int] | None
+) -> Path | None:
+    """Atomically isolate a transaction path without ever unlinking a raced name."""
     if expected is None:
-        return False
+        return None
+    quarantine = path.with_name(f".{path.name}.{uuid.uuid4().hex}.quarantine")
     try:
-        if any(_is_reparse(candidate) for candidate in (path, *path.parents)):
-            return False
-        metadata = path.lstat()
-        identity = (metadata.st_dev, metadata.st_ino)
-        if not stat.S_ISREG(metadata.st_mode) or identity != expected:
-            return False
-        path.unlink()
-        return True
+        os.replace(path, quarantine)
     except OSError:
-        return False
+        return None
+
+    matches = False
+    safe_regular = False
+    try:
+        metadata = quarantine.lstat()
+        identity = (metadata.st_dev, metadata.st_ino)
+        safe_regular = not any(
+            _is_reparse(candidate) for candidate in (quarantine, *quarantine.parents)
+        ) and stat.S_ISREG(metadata.st_mode)
+        matches = safe_regular and identity == expected
+    except OSError:
+        pass
+    if matches:
+        return quarantine
+
+    # A replacement won the race at os.replace. Preserve it under both names
+    # when possible; otherwise the quarantined copy remains available.
+    if safe_regular and not any(_is_reparse(candidate) for candidate in path.parents):
+        try:
+            os.link(quarantine, path)
+        except OSError:
+            pass
+    return quarantine
 
 
 def _write_exclusive(path: Path, content: bytes) -> tuple[int, int]:
@@ -778,7 +800,7 @@ def _write_exclusive(path: Path, content: bytes) -> tuple[int, int]:
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
-        _unlink_if_identity(path, created_identity)
+        _quarantine_transaction_file(path, created_identity)
         raise
 
 
@@ -808,15 +830,15 @@ def _atomic_create(path: Path, content: bytes) -> tuple[int, int]:
         os.link(temporary, path)
         linked = True
         published = _safe_file_identity(path, identity)
-        _unlink_if_identity(temporary, identity)
+        _quarantine_transaction_file(temporary, identity)
         temporary_created = False
         _safe_file_identity(path, published)
         return published
     except BaseException:
         if linked:
-            _unlink_if_identity(path, identity)
+            _quarantine_transaction_file(path, identity)
         if temporary_created:
-            _unlink_if_identity(temporary, identity)
+            _quarantine_transaction_file(temporary, identity)
         raise
 
 
@@ -825,7 +847,7 @@ def _atomic_write(
     content: bytes,
     original: bytes,
     original_identity: tuple[int, int],
-) -> tuple[Path, tuple[int, int]]:
+) -> tuple[Path, tuple[int, int], tuple[int, int]]:
     backup = path.with_name(f".{path.name}.{uuid.uuid4().hex}.backup")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     backup_created = False
@@ -837,31 +859,39 @@ def _atomic_write(
         backup_created = True
         temporary_identity = _write_exclusive(temporary, content)
         temporary_created = True
-        _safe_replace(
+        published_identity = _safe_replace(
             temporary,
             path,
             source_identity=temporary_identity,
             destination_identity=original_identity,
         )
         temporary_created = False
-        return backup, backup_identity
+        return backup, backup_identity, published_identity
     except BaseException:
         if temporary_created:
-            _unlink_if_identity(temporary, temporary_identity)
+            _quarantine_transaction_file(temporary, temporary_identity)
         if backup_created:
-            _unlink_if_identity(backup, backup_identity)
+            _quarantine_transaction_file(backup, backup_identity)
         raise
 
 
 def _restore_backup(
-    path: Path, backup: Path, backup_identity: tuple[int, int]
+    path: Path,
+    backup: Path,
+    backup_identity: tuple[int, int],
+    destination_identity: tuple[int, int],
 ) -> None:
-    _safe_replace(
-        backup,
-        path,
-        source_identity=_safe_file_identity(backup, backup_identity),
-        destination_identity=_safe_file_identity(path),
-    )
+    _safe_file_identity(backup, backup_identity)
+    isolated = _quarantine_transaction_file(path, destination_identity)
+    if isolated is None:
+        raise UnsafeSteamFileError("rollback target unavailable")
+    if path.exists():
+        raise UnsafeSteamFileError("rollback target changed")
+    try:
+        os.link(backup, path)
+    except OSError as error:
+        raise UnsafeSteamFileError("rollback target unavailable") from error
+    _safe_file_identity(path, backup_identity)
 
 
 def _validate_info(value: Any) -> dict[str, Any]:
