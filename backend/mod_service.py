@@ -17,7 +17,12 @@ from typing import Iterable
 
 from .archive_utils import inspect_and_extract
 from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
-from .game_detector import ensure_mod_folders, get_mod_directories, is_ue4ss_framework_mod
+from .game_detector import (
+    ensure_mod_folders,
+    get_mod_directories,
+    get_ue4ss_mod_roots,
+    is_ue4ss_framework_mod,
+)
 from .game_lock import game_write_lock
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
@@ -86,7 +91,9 @@ class ModService:
         dirs = get_mod_directories(self.game_root)
         self.store = ManifestStore(
             self.data_dir / "manifests",
-            known_roots=(dirs["tilde_mods"], dirs["logic_mods"], dirs["ue4ss_mods"]),
+            known_roots=(
+                dirs["tilde_mods"], dirs["logic_mods"], *get_ue4ss_mod_roots(self.game_root),
+            ),
         )
         self.game_running = game_running
         self._migrate_legacy_once()
@@ -177,18 +184,21 @@ class ModService:
 
     def _prepare_dirs(self) -> dict[str, Path]:
         dirs = get_mod_directories(self.game_root)
+        ue4ss_roots = get_ue4ss_mod_roots(self.game_root)
         for path in (
             self.game_root,
             dirs["tilde_mods"],
             dirs["logic_mods"],
-            dirs["ue4ss_mods"],
+            *ue4ss_roots,
             self.data_dir,
         ):
             validate_no_reparse_ancestors(path)
         ensure_mod_folders(self.game_root)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "staging").mkdir(parents=True, exist_ok=True)
-        for path in (dirs["tilde_mods"], dirs["logic_mods"], dirs["ue4ss_mods"], self.data_dir):
+        writable_roots = [dirs["tilde_mods"], dirs["logic_mods"], self.data_dir]
+        writable_roots.extend(path for path in ue4ss_roots if path.is_dir())
+        for path in writable_roots:
             if not check_directory_writable(path):
                 raise PermissionError(f"目录不可写：{path}")
         return dirs
@@ -821,8 +831,36 @@ class ModService:
             self._remove_empty_parents(original, stop)
         return {"ok": True, "deleted": manifest.id}
 
+    def _discovery_marker(self) -> Path:
+        identity = str(self.game_root.resolve(strict=False)).casefold().encode("utf-8")
+        return self.data_dir / "discovery" / f"{hashlib.sha256(identity).hexdigest()}.done"
+
+    def discover_existing_once(self) -> list[dict[str, object]]:
+        """Adopt pre-existing mods once per game path, deferring while the game runs."""
+        marker = self._discovery_marker()
+        if marker.is_file():
+            return self.list_mods()
+        try:
+            with self._transaction_lock():
+                if marker.is_file():
+                    return self.list_mods()
+                result = self._rescan_locked()
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                temporary = marker.with_name(f".{marker.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    temporary.write_text("1\n", encoding="ascii")
+                    os.replace(temporary, marker)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                return result
+        except GameRunningError:
+            return self.list_mods()
+
     @_locked_write
     def rescan(self) -> list[dict[str, object]]:
+        return self._rescan_locked()
+
+    def _rescan_locked(self) -> list[dict[str, object]]:
         self._assert_stopped()
         self._prepare_dirs()
         dirs = get_mod_directories(self.game_root)
@@ -834,7 +872,8 @@ class ModService:
         for root, kind in ((dirs["tilde_mods"], ModKind.PAK), (dirs["logic_mods"], ModKind.LOGICPAK)):
             if _is_reparse(root):
                 continue
-            for pak in sorted(root.glob("*.pak"), key=lambda path: path.name.casefold()):
+            paks = (path for path in root.iterdir() if path.suffix.casefold() == ".pak")
+            for pak in sorted(paks, key=lambda path: path.name.casefold()):
                 if _is_reparse(pak) or not pak.is_file():
                     continue
                 key = (str(root.resolve()).casefold(), pak.name.casefold())
@@ -848,13 +887,14 @@ class ModService:
                 manifest = self.store.create(pak.stem, kind, root, group, source_name="rescan")
                 tracked.update((str(root.resolve()).casefold(), item.relative_path.casefold()) for item in manifest.files)
 
-        ue4ss_root = dirs["ue4ss_mods"]
         tracked_roots = {
             str(manifest.install_root.resolve()).casefold()
             for manifest in self.store.list()
             if manifest.kind is ModKind.UE4SS
         }
-        if not _is_reparse(ue4ss_root):
+        for ue4ss_root in get_ue4ss_mod_roots(self.game_root):
+            if not ue4ss_root.is_dir() or _is_reparse(ue4ss_root):
+                continue
             for candidate in sorted(ue4ss_root.iterdir(), key=lambda path: path.name.casefold()):
                 if (
                     not candidate.is_dir()
@@ -874,12 +914,12 @@ class ModService:
                 metadata: Path | None = None
                 try:
                     if enabled is None:
+                        enabled = enabled_txt is not None
                         current = old_config if old_config is not None else b""
                         self._write_mods_txt(
                             mods_txt,
-                            self._updated_mods_bytes(current, candidate.name, False),
+                            self._updated_mods_bytes(current, candidate.name, enabled),
                         )
-                        enabled = False
                     manifest = self.store.create(
                         candidate.name, ModKind.UE4SS, candidate, payload,
                         source_name="rescan", enabled=enabled,
@@ -915,8 +955,11 @@ class ModService:
         """Return only a configured mod root or a managed manifest's install root."""
         directories = get_mod_directories(self.game_root)
         allowed_roots = tuple(
-            validate_no_reparse_ancestors(directories[key]).resolve(strict=False)
-            for key in ("tilde_mods", "logic_mods", "ue4ss_mods")
+            validate_no_reparse_ancestors(path).resolve(strict=False)
+            for path in (
+                directories["tilde_mods"], directories["logic_mods"],
+                *get_ue4ss_mod_roots(self.game_root),
+            )
         )
         candidate = (
             self.store.get(mod_id).install_root

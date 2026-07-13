@@ -319,7 +319,7 @@ def create_app(
     def list_mods():
         current = service(required=False)
         workshop = workshop_service(required=False)
-        local_mods = current.list_mods() if current else []
+        local_mods = current.discover_existing_once() if current else []
         workshop_mods = workshop.list_mods() if workshop else []
         return success([*local_mods, *workshop_mods])
 

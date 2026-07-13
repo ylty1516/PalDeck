@@ -15,10 +15,16 @@ MAX_KEYVALUES_BYTES = 4 * 1024 * 1024
 MAX_KEYVALUES_TOKENS = 200_000
 MAX_KEYVALUES_DEPTH = 64
 UE4SS_FRAMEWORK_MODS = frozenset({
+    "bpml_genericfunctions",
     "bpmodloadermod",
+    "cheatmanagerenablermod",
     "cheatmanagermod",
     "consolecommandsmod",
+    "consoleenablermod",
     "keybinds",
+    "linetracemod",
+    "shared",
+    "splitscreenmod",
     "uobjecthook",
 })
 
@@ -374,6 +380,17 @@ def resolve_ue4ss_mods_dir(game_root: Path | str) -> Path:
     if classic_mods.is_dir() or any(marker.is_file() for marker in classic_markers):
         return classic_mods
     return classic_mods
+
+
+def get_ue4ss_mod_roots(game_root: Path | str) -> tuple[Path, Path]:
+    """Return both supported UE4SS Mods layouts, active layout first."""
+    root = Path(game_root)
+    win64 = root / "Pal" / "Binaries" / "Win64"
+    nested = win64 / "ue4ss" / "Mods"
+    classic = win64 / "Mods"
+    primary = resolve_ue4ss_mods_dir(root)
+    secondary = classic if primary == nested else nested
+    return primary, secondary
 
 
 def get_mod_directories(game_root: Path | str) -> dict[str, Path]:

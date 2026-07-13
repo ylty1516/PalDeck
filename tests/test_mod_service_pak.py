@@ -422,6 +422,25 @@ def test_rescan_groups_sidecars_is_idempotent_and_ignores_orphans(fake_game_root
     assert {f["relative_path"] for f in first[0]["manifest_files"]} == {"Found.pak", "Found.utoc"}
 
 
+def test_initial_discovery_defers_while_game_runs_and_retries_later(fake_game_root, tmp_path):
+    live = _live(fake_game_root)
+    live.mkdir(parents=True, exist_ok=True)
+    (live / "BeforePalDeck.PAK").write_bytes(b"pak")
+    running = {"value": True}
+    service = ModService(
+        fake_game_root, tmp_path / "data", game_running=lambda: running["value"],
+    )
+
+    assert service.discover_existing_once() == []
+    assert not service._discovery_marker().exists()
+    running["value"] = False
+    [found] = service.discover_existing_once()
+
+    assert found["name"] == "BeforePalDeck"
+    assert service._discovery_marker().is_file()
+    assert service.discover_existing_once()[0]["id"] == found["id"]
+
+
 def test_list_mods_returns_real_audit(fake_game_root, tmp_path):
     source = tmp_path / "Audit.pak"
     source.write_bytes(b"original")

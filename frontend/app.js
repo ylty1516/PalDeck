@@ -205,7 +205,7 @@ async function loadMods() {
   state.modsRequestController = controller;
   renderMessage($("#modList"), "正在加载模组…", "empty-state glass-panel");
   try {
-    const mods = await request("/api/mods", { signal: controller.signal });
+    const mods = await request("/api/mods", { signal: controller.signal, timeout: 120000 });
     if (sequence !== state.modsRequestSequence || generation !== state.modsRequestGeneration) return false;
     state.mods = mods;
     $("#modConflictNotice").hidden = true;
@@ -693,7 +693,16 @@ export const ACTION_HANDLERS = Object.freeze({
   windowMaximize: async () => callWindowControl("toggle_maximize"),
   windowClose: async () => callWindowControl("close"),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
-  refreshMods: async () => loadMods(),
+  refreshMods: async () => {
+    beginModsWrite();
+    try {
+      await request("/api/mods/resync", { method: "POST", body: {}, timeout: 120000 });
+      await loadMods();
+      toast("已重新扫描游戏模组目录", "success");
+    } finally {
+      endModsWrite();
+    }
+  },
   openModsFolder: async () => request("/api/mods/open-folder"),
   filterMods: () => filterMods(),
   filterModSource: () => filterMods(),

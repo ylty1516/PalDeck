@@ -115,11 +115,17 @@ def test_ue4ss_toggle_is_transactional_on_config_or_manifest_failure(
 
 def test_rescan_ue4ss_is_idempotent_and_skips_framework_builtins(fake_game_root, tmp_path):
     mods = _layout(fake_game_root, True)
-    for name in ("FoundLua", "BPModLoaderMod"):
+    framework = (
+        "BPML_GenericFunctions", "BPModLoaderMod", "CheatManagerEnablerMod",
+        "ConsoleCommandsMod", "ConsoleEnablerMod", "Keybinds", "LineTraceMod",
+        "shared", "SplitScreenMod",
+    )
+    for name in ("FoundLua", *framework):
         script = mods / name / "Scripts" / "main.lua"
         script.parent.mkdir(parents=True)
         script.write_bytes(name.encode())
-    (mods / "mods.txt").write_text("FoundLua : 0\nBPModLoaderMod : 1\n", encoding="utf-8")
+    entries = "FoundLua : 0\n" + "".join(f"{name} : 1\n" for name in framework)
+    (mods / "mods.txt").write_text(entries, encoding="utf-8")
     service = _service(fake_game_root, tmp_path)
 
     first = service.rescan()
@@ -130,6 +136,40 @@ def test_rescan_ue4ss_is_idempotent_and_skips_framework_builtins(fake_game_root,
     assert first[0]["name"] == "FoundLua"
     assert first[0]["enabled"] is False
     assert first[0]["kind"] == "ue4ss"
+
+
+def test_rescan_discovers_user_mods_from_classic_and_nested_layouts(fake_game_root, tmp_path):
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    classic = win64 / "Mods"
+    nested = win64 / "ue4ss" / "Mods"
+    for root, name in ((classic, "ClassicUserMod"), (nested, "NestedUserMod")):
+        script = root / name / "Scripts" / "main.lua"
+        script.parent.mkdir(parents=True)
+        script.write_bytes(name.encode())
+        (root / "mods.txt").write_text(f"{name} : 1\n", encoding="utf-8")
+    (win64 / "ue4ss" / "UE4SS.dll").touch()
+    service = _service(fake_game_root, tmp_path)
+
+    found = service.rescan()
+
+    assert {item["name"] for item in found} == {"ClassicUserMod", "NestedUserMod"}
+    assert {Path(item["install_root"]).parent for item in found} == {classic, nested}
+
+
+def test_rescan_preserves_existing_enabled_marker_as_enabled(fake_game_root, tmp_path):
+    mods = _layout(fake_game_root, True)
+    candidate = mods / "MarkerEnabled"
+    script = candidate / "Scripts" / "main.lua"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"lua")
+    (candidate / "enabled.txt").write_bytes(b"marker")
+    service = _service(fake_game_root, tmp_path)
+
+    [item] = service.rescan()
+
+    assert item["enabled"] is True
+    assert item["status"] == "enabled"
+    assert "MarkerEnabled : 1" in (mods / "mods.txt").read_text(encoding="utf-8")
 
 
 def test_delete_ue4ss_removes_only_owned_files_and_preserves_user_additions(

@@ -116,6 +116,32 @@ def test_mods_success_uses_standard_envelope(auth_client):
     assert response.json == {"ok": True, "data": []}
 
 
+def test_first_mod_listing_discovers_preinstalled_mods_across_supported_layouts(
+    app, auth_client, fake_game_root
+):
+    pak = fake_game_root / "Pal" / "Content" / "Paks" / "~mods" / "ExistingPak.pak"
+    pak.parent.mkdir(parents=True, exist_ok=True)
+    pak.write_bytes(b"pak")
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    for root, name in (
+        (win64 / "Mods", "ClassicExisting"),
+        (win64 / "ue4ss" / "Mods", "NestedExisting"),
+    ):
+        script = root / name / "Scripts" / "main.lua"
+        script.parent.mkdir(parents=True)
+        script.write_bytes(b"lua")
+        (root / "mods.txt").write_text(f"{name} : 1\n", encoding="utf-8")
+    (win64 / "ue4ss" / "UE4SS.dll").touch()
+
+    response = auth_client.get("/api/mods")
+
+    assert response.status_code == 200
+    local = [item for item in response.json["data"] if item.get("source") != "steam_workshop"]
+    assert {item["name"] for item in local} == {
+        "ExistingPak", "ClassicExisting", "NestedExisting",
+    }
+
+
 def test_ue4ss_endpoints_require_authentication(app):
     for path in ("/api/ue4ss/install-bundled", "/api/ue4ss/check-upstream", "/api/ue4ss/install-upstream"):
         response = app.test_client().post(path, json={})

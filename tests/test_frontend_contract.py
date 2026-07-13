@@ -443,6 +443,15 @@ def test_conflict_decisions_have_real_requests_timeout_and_visible_result_feedba
     assert 'resolveImportConflict("keep_both")' in app
 
 
+def test_toolbar_refresh_performs_a_real_disk_rescan_before_listing():
+    app = APP.read_text(encoding="utf-8")
+    assert 'refreshMods: async () => {' in app
+    refresh = app.split('refreshMods: async () => {', 1)[1].split('  openModsFolder:', 1)[0]
+    assert 'request("/api/mods/resync", { method: "POST", body: {}, timeout: 120000 })' in refresh
+    assert refresh.index('/api/mods/resync') < refresh.index('loadMods()')
+    assert 'request("/api/mods", { signal: controller.signal, timeout: 120000 })' in app
+
+
 def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
     app = APP.read_text(encoding="utf-8")
     assert 'case "rescanMods":' in app
@@ -516,7 +525,7 @@ def test_import_lifecycle_and_mod_generation_contract():
     assert "selectionToken" in app and "transitionActiveImport" in app and "processImportQueue" in app
     assert "nextModsGeneration" in app
     assert "modsRequestController.abort()" in app
-    assert 'request("/api/mods", { signal: controller.signal })' in app
+    assert 'request("/api/mods", { signal: controller.signal, timeout: 120000 })' in app
     assert "generation !== state.modsRequestGeneration" in app
     for operation in ("importSelected", "toggleMod", "deletePendingMod"):
         body = re.search(rf"async function {operation}\([^)]*\) \{{(.*?)^\}}", app, re.S | re.M)
