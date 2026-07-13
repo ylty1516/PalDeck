@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.nexus_api import NexusError
+from backend.nexus_api import NexusCatalog, NexusError
 
 
 class FakeCatalog:
@@ -39,6 +39,25 @@ def test_nexus_routes_return_catalog_envelope_and_forward_parameters(app, auth_c
     assert fake.calls[-1] == ("search", "abc", True, 3)
     assert auth_client.get("/api/nexus/mod/123?force=1").status_code == 200
     assert fake.calls[-1] == ("get", 123, True)
+
+
+def test_nexus_api_response_excludes_adult_content_and_metadata(app, auth_client, tmp_path):
+    def transport(_query, _variables):
+        return {"data": {"mods": {"nodes": [{
+            "modId": 42,
+            "name": "SECRET ADULT NAME",
+            "summary": "SECRET ADULT SUMMARY",
+            "pictureUrl": "https://secret.example/adult.webp",
+            "author": "SECRET ADULT AUTHOR",
+            "adultContent": True,
+        }]}}}
+
+    app.extensions["nexus_catalog"] = NexusCatalog(tmp_path / "nexus-cache", transport=transport)
+    response = auth_client.get("/api/nexus/popular")
+
+    assert response.status_code == 200
+    assert response.json["data"]["items"] == []
+    assert "SECRET ADULT" not in response.get_data(as_text=True)
 
 
 def test_nexus_route_parameter_errors_are_400(app, auth_client):

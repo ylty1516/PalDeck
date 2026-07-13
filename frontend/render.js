@@ -23,21 +23,6 @@ function actionButton(label, action, className = "btn") {
   return button;
 }
 
-const adultCardData = new WeakMap();
-
-export function revealAdultCard(card, button) {
-  const content = adultCardData.get(card);
-  if (!content) return false;
-  card.querySelector(".mod-title").textContent = content.name;
-  card.querySelector(".nexus-summary").textContent = content.summary;
-  card.querySelector(".mod-meta").textContent = content.stats;
-  card.classList.remove("adult-hidden");
-  button.setAttribute("aria-expanded", "true");
-  button.textContent = "成人内容已显示";
-  adultCardData.delete(card);
-  return true;
-}
-
 export function renderMessage(container, message, className = "empty-state") {
   container.replaceChildren(el("div", className, message));
 }
@@ -127,8 +112,8 @@ export function renderNexus(container, mods) {
   if (!mods.length) return renderMessage(container, "没有找到相关模组。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
-    const adult = mod.adultContent === true;
-    const card = el("article", `nexus-card glass-panel${adult ? " adult-hidden" : ""}`);
+    if (mod.adultContent === true) continue;
+    const card = el("article", "nexus-card glass-panel");
     const image = el("div", "nexus-image");
     if (typeof mod.picture_url === "string" && /^https:\/\//i.test(mod.picture_url)) {
       const picture = el("img", "nexus-picture");
@@ -140,17 +125,15 @@ export function renderNexus(container, mods) {
       image.append(picture);
     }
     image.append(el("span", "badge", `#${mod.nexus_id ?? "-"}`));
-    if (adult) image.append(el("span", "adult-label", "成人内容"));
     const body = el("div", "nexus-body");
     const name = mod.name || "未命名";
     const summary = mod.summary || "暂无简介";
     const stats = `作者 ${mod.author || "未知"} · 版本 ${mod.version || "未知"} · 下载 ${Number(mod.downloads || 0).toLocaleString("zh-CN")} · 推荐 ${Number(mod.endorsements || 0).toLocaleString("zh-CN")}`;
     body.append(
-      el("h3", "mod-title", adult ? "成人内容" : name),
-      el("p", "nexus-summary", adult ? "敏感信息已隐藏" : summary),
-      el("p", "mod-meta", adult ? "敏感信息已隐藏" : stats),
+      el("h3", "mod-title", name),
+      el("p", "nexus-summary", summary),
+      el("p", "mod-meta", stats),
     );
-    if (adult) adultCardData.set(card, { name, summary, stats });
     const actions = el("div", "button-row");
     const id = String(mod.nexus_id ?? "");
     const open = actionButton("打开 N 网", "openNexus", "btn");
@@ -159,11 +142,6 @@ export function renderNexus(container, mods) {
     copy.dataset.id = id;
     copy.append(text(` #${id}`));
     actions.append(open, copy);
-    if (adult) {
-      const reveal = actionButton("显示成人内容", "revealAdult", "btn");
-      reveal.setAttribute("aria-expanded", "false");
-      actions.append(reveal);
-    }
     body.append(actions);
     card.append(image, body);
     fragment.append(card);

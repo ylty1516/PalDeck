@@ -4,7 +4,7 @@ import {
   actionableErrorMessage, createRevisionGuard, createSerialQueue, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
-import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, revealAdultCard, validatedNexusUrl } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
@@ -676,7 +676,6 @@ async function handleDynamicAction(event) {
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
       case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;
-      case "revealAdult": revealAdultCard(target.closest(".nexus-card"), target); break;
       case "openTrustedLink": await run(target, () => request("/api/system/open-trusted-link", { method: "POST", body: { id } }), { disable: false }); break;
       default: return;
     }

@@ -99,7 +99,7 @@ def test_invoke_checked_preserves_native_stderr_and_uses_exit_code(
 def test_release_version_assets_and_node_tests_are_derived_and_packaged():
     script = read_script("build_portable.ps1")
 
-    assert APP_VERSION == "2.1.0"
+    assert APP_VERSION == "2.1.1"
     assert '((Join-Path $repoRoot "third_party") + $separator + "third_party")' in script
     assert 'Invoke-Checked "运行 Node 测试" "npm" @("test")' in script
     assert script.index('Node 语法检查：') < script.index('Invoke-Checked "运行 Node 测试"')

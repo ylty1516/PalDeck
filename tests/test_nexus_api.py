@@ -147,9 +147,82 @@ def test_invalid_sort_count_and_id_are_rejected_before_transport(tmp_path):
     assert transport.calls == []
 
 
-def test_adult_content_is_preserved(tmp_path):
-    result = NexusCatalog(tmp_path, transport=Transport([payload([node(adultContent=True)])])).popular()
-    assert result["items"][0]["adultContent"] is True
+@pytest.mark.parametrize("sort", ["downloads", "endorsements", "latest"])
+def test_popular_sorts_exclude_adult_content_and_preserve_safe_order(tmp_path, sort):
+    transport = Transport([payload([
+        node(modId=1, name="First"),
+        node(modId=2, name="SECRET ADULT", summary="SECRET SUMMARY", author="SECRET AUTHOR", adultContent=True),
+        node(modId=3, name="Third"),
+    ])])
+
+    result = NexusCatalog(tmp_path, transport=transport).popular(sort)
+
+    assert [item["nexus_id"] for item in result["items"]] == [1, 3]
+    assert result["source"] == "live" and result["stale"] is False
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_search_excludes_adult_content_and_all_adult_results_are_empty(tmp_path):
+    mixed = NexusCatalog(tmp_path / "mixed", transport=Transport([payload([
+        node(modId=4), node(modId=5, name="SECRET ADULT", adultContent=True), node(modId=6),
+    ])])).search("pal")
+    all_adult = NexusCatalog(tmp_path / "all", transport=Transport([payload([
+        node(name="SECRET ADULT", adultContent=True),
+    ])])).search("pal")
+
+    assert [item["nexus_id"] for item in mixed["items"]] == [4, 6]
+    assert all_adult["items"] == []
+    assert "SECRET" not in json.dumps(mixed) + json.dumps(all_adult)
+
+
+def test_get_returns_empty_for_adult_mod_without_leaking_metadata(tmp_path):
+    result = NexusCatalog(tmp_path, transport=Transport([{"data": {"mod": node(
+        name="SECRET NAME", summary="SECRET SUMMARY", pictureUrl="https://secret.example/image.webp",
+        author="SECRET AUTHOR", adultContent=True,
+    )}}])).get(42)
+
+    assert result["items"] == []
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_fresh_legacy_cache_is_filtered_without_leaking_adult_metadata(tmp_path):
+    catalog = NexusCatalog(tmp_path, transport=Transport([]), ttl=600)
+    store = catalog._store("sort", {"sort": "downloads", "count": 24})
+    store.write({
+        "items": [
+            nexus_api._normalize(node(modId=1, name="Safe")),
+            nexus_api._normalize(node(modId=2, name="SECRET NAME", summary="SECRET SUMMARY",
+                                           pictureUrl="https://secret.example/image.webp",
+                                           author="SECRET AUTHOR", adultContent=True)),
+            nexus_api._normalize(node(modId=3, name="Also safe")),
+        ],
+        "timestamp": time.time(),
+        "fetched_at": "2026-07-12T00:00:00Z",
+    })
+
+    result = catalog.popular()
+
+    assert [item["nexus_id"] for item in result["items"]] == [1, 3]
+    assert result["source"] == "cache" and result["stale"] is False
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_stale_legacy_cache_is_filtered_when_refresh_fails(tmp_path):
+    catalog = NexusCatalog(tmp_path, transport=Transport([TimeoutError("timed out")]), ttl=0)
+    store = catalog._store("query", {"query": "pal", "count": 24})
+    store.write({
+        "items": [nexus_api._normalize(node(name="SECRET NAME", summary="SECRET SUMMARY",
+                                                   pictureUrl="https://secret.example/image.webp",
+                                                   author="SECRET AUTHOR", adultContent=True))],
+        "timestamp": time.time() - 10,
+        "fetched_at": "2026-07-12T00:00:00Z",
+    })
+
+    result = catalog.search("pal")
+
+    assert result["items"] == []
+    assert result["source"] == "cache" and result["stale"] is True
+    assert "SECRET" not in json.dumps(result)
 
 
 def test_force_requests_for_same_key_are_singleflight(tmp_path):

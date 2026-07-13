@@ -119,10 +119,8 @@ hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
 .credit-dependency .btn { margin-top: 7px; }
 .nexus-card { border-radius: var(--radius); overflow: hidden; }
 .nexus-image { position: relative; height: 118px; padding: 10px; overflow: hidden; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 30%, var(--panel-solid)), var(--panel-solid)); }
-.nexus-picture { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: filter .2s ease; }
-.nexus-image .badge, .adult-label { position: relative; z-index: 1; }
-.adult-label { float: right; padding: 3px 7px; border-radius: 8px; background: color-mix(in srgb, #b31b58 75%, transparent); color: white; font-size: 12px; }
-.adult-hidden .nexus-picture { filter: blur(18px); transform: scale(1.1); }
+.nexus-picture { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.nexus-image .badge { position: relative; z-index: 1; }
 .nexus-body { padding: 14px; }
 .nexus-summary { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .detect-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px; border: 1px solid var(--line); border-radius: 11px; }

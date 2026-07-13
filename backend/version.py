@@ -1,6 +1,6 @@
 """Application version — bump this when publishing a GitHub Release."""
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 # Override via env for testing
 import os
 

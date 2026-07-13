@@ -244,8 +244,12 @@ class NexusCatalog:
         return cached
 
     @staticmethod
-    def _cache_result(cached: dict[str, Any], *, stale: bool = False, warning: str = "") -> dict[str, Any]:
-        return {"items": cached["items"], "source": "cache", "stale": stale,
+    def _safe_items(items: list[Any]) -> list[dict[str, Any]]:
+        return [item for item in items if isinstance(item, dict) and item.get("adultContent") is not True]
+
+    @classmethod
+    def _cache_result(cls, cached: dict[str, Any], *, stale: bool = False, warning: str = "") -> dict[str, Any]:
+        return {"items": cls._safe_items(cached["items"]), "source": "cache", "stale": stale,
                 "fetched_at": cached["fetched_at"], "warning": warning}
 
     def _load(self, store: JsonStore, fetch: Callable[[], list[dict[str, Any]]], force: bool) -> dict[str, Any]:
@@ -269,7 +273,7 @@ class NexusCatalog:
                 return self._cache_result(cached)
             fallback = cached or initial
             try:
-                items = fetch()
+                items = self._safe_items(fetch())
             except NexusError as exc:
                 if fallback is None:
                     raise

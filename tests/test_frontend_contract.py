@@ -21,7 +21,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "useGamePath", "openNexus", "copyNexusId", "revealAdult"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -233,7 +233,7 @@ def test_request_sequences_conflict_feedback_and_nexus_validation():
     assert "validatedNexusUrl" in app
 
 
-def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_adult_reveal():
+def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_skips_adult_content():
     html = HTML.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
     render = RENDER.read_text(encoding="utf-8")
@@ -242,18 +242,18 @@ def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_adult_reveal
         assert f'data-action="{action}"' in html
     assert "result.source" in app and "result.fetched_at" in app and "result.warning" in app
     assert "force=1" in app
-    assert "adultContent" in render and '"revealAdult"' in render
-    assert 'case "revealAdult":' in app
-    assert 'setAttribute("aria-expanded", "false")' in render
-    assert 'setAttribute("aria-expanded", "true")' in render
-    assert 'revealAdultCard(' in app
-    assert 'adult ? "成人内容"' in render
-    assert 'adult ? "敏感信息已隐藏"' in render
+    assert "if (mod.adultContent === true) continue;" in render
+    for forbidden in ("adultCardData", "revealAdult", "显示成人内容"):
+        assert forbidden not in render and forbidden not in app
     assert 'addEventListener("error"' in render
     assert "/^https:\\/\\//i" in render
     assert "下载" in render and "推荐" in render and "版本" in render and "作者" in render
-    assert ".adult-hidden" in css and "filter: blur" in css
+    assert ".adult-hidden" not in css and ".adult-label" not in css
+    assert ".adult-hidden .nexus-picture" not in css
     assert "下载模组" not in render
+    readme = ROOT.joinpath("README.md").read_text(encoding="utf-8")
+    assert "Nexus 成人内容会被彻底过滤" in readme
+    assert "显示成人内容" not in readme
 
 
 def test_nexus_url_validator_executable_contract():
