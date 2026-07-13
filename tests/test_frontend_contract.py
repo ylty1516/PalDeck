@@ -598,6 +598,23 @@ def test_v22_shell_has_brand_sidebar_workspace_statusbar_and_three_breakpoints()
     assert 'data-action="showSettingsStatus"' in html
 
 
+def test_v22_custom_window_chrome_is_accessible_and_has_native_frame_fallback():
+    html = HTML.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    backend = ROOT.joinpath("backend/app.py").read_text(encoding="utf-8")
+    for action, label in (("windowMinimize", "最小化"), ("windowMaximize", "最大化或还原"), ("windowClose", "关闭")):
+        assert f'data-action="{action}"' in html
+        assert f'aria-label="{label}"' in html
+        assert f"{action}:" in app
+    assert "pywebview-drag-region" in html
+    assert ".window-chrome[hidden]" in css
+    assert 'os.environ.get("PALDECK_NATIVE_FRAME"' in backend
+    assert "frameless=not use_native_frame" in backend
+    assert "easy_drag=False" in backend
+    assert "js_api=bridge" in backend
+
+
 def test_all_javascript_modules_pass_node_syntax_check():
     for path in sorted(FRONTEND.glob("*.js")):
         result = subprocess.run(

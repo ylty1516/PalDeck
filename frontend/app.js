@@ -6,6 +6,7 @@ import {
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
+import { callWindowControl, initializeWindowControls } from "./window-controls.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
@@ -547,6 +548,9 @@ export const ACTION_HANDLERS = Object.freeze({
   showSettingsStatus: async () => switchView("settings"),
   openGameFolder: async () => request("/api/mods/open-folder"),
   checkUpdateSidebar: async () => checkApplicationUpdate(),
+  windowMinimize: async () => callWindowControl("minimize"),
+  windowMaximize: async () => callWindowControl("toggle_maximize"),
+  windowClose: async () => callWindowControl("close"),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
   refreshMods: async () => loadMods(),
   openModsFolder: async () => request("/api/mods/open-folder"),
@@ -720,6 +724,7 @@ function setupDropzone() {
 
 async function init() {
   hydrateIcons();
+  initializeWindowControls();
   document.addEventListener("click", dispatchStatic);
   document.addEventListener("input", dispatchStatic);
   document.addEventListener("change", dispatchStatic);

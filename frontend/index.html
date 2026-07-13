@@ -27,6 +27,14 @@
     </aside>
 
     <main class="workspace">
+      <div class="window-chrome" hidden>
+        <div class="window-drag-region pywebview-drag-region" aria-hidden="true"></div>
+        <div class="window-buttons" aria-label="窗口控制">
+          <button type="button" class="window-button" data-action="windowMinimize" aria-label="最小化"><span data-icon="minimize"></span></button>
+          <button type="button" class="window-button" data-action="windowMaximize" aria-label="最大化或还原"><span data-icon="maximize"></span></button>
+          <button type="button" class="window-button close" data-action="windowClose" aria-label="关闭"><span data-icon="close"></span></button>
+        </div>
+      </div>
       <header class="topbar">
         <div><h1 id="viewTitle">我的模组</h1><p id="viewSubtitle">管理已安装的模组</p></div>
         <div class="top-actions">

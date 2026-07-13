@@ -61,7 +61,16 @@ nav { display: grid; gap: 8px; }
 .status-dot, .path-chip { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 .path-chip { display: block; max-width: min(36vw, 430px); white-space: nowrap; }
 
-.workspace { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.workspace { position: relative; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.window-chrome { position: absolute; z-index: 45; inset: 0 0 auto 0; height: 38px; display: flex; pointer-events: none; }
+.window-chrome[hidden] { display: none; }
+.window-drag-region { flex: 1; min-width: 80px; pointer-events: auto; }
+.window-buttons { display: flex; pointer-events: auto; }
+.window-button { display: grid; place-items: center; width: 44px; height: 34px; padding: 0; border: 0; border-radius: 0 0 8px 8px; color: var(--text); background: transparent; }
+.window-button span { font-size: 17px; }
+.window-button:hover { background: color-mix(in srgb, var(--panel-solid) 72%, transparent); }
+.window-button.close:hover { color: white; background: #d83b52; }
+.has-custom-chrome .topbar { padding-top: 40px; }
 .app-statusbar { grid-column: 2; grid-row: 2; min-width: 0; border-radius: 20px; display: grid; grid-template-columns: minmax(190px, .7fr) minmax(360px, 1.3fr) minmax(210px, .8fr); align-items: center; overflow: hidden; }
 .status-segment { min-width: 0; height: 100%; display: flex; align-items: center; gap: 12px; padding: 9px 22px; border: 0; border-right: 1px solid var(--line); text-align: left; background: transparent; }
 .status-segment:last-child { border-right: 0; }

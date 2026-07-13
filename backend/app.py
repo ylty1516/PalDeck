@@ -24,6 +24,7 @@ from werkzeug.utils import secure_filename
 
 from backend import credits, game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
 from backend.appearance import AppearanceService
+from backend.desktop_bridge import DesktopBridge
 from backend.game_lock import game_write_lock
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
@@ -906,7 +907,16 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
             pass
         return
 
-    webview.create_window("幻兽帕鲁 Mod 管理面板", launch_url, width=1280, height=820, min_size=(960, 640), background_color="#EEF4FF", text_select=True, confirm_close=False, resizable=True)
+    use_native_frame = os.environ.get("PALDECK_NATIVE_FRAME", "").strip().casefold() in {"1", "true", "yes"}
+    bridge = DesktopBridge(custom_chrome=not use_native_frame)
+    window = webview.create_window(
+        "PalDeck", launch_url, js_api=bridge,
+        width=1280, height=820, min_size=(960, 640),
+        frameless=not use_native_frame, easy_drag=False, shadow=True,
+        background_color="#EEF4FF", text_select=True,
+        confirm_close=False, resizable=True,
+    )
+    bridge.bind(window)
     webview.start(debug=False, private_mode=False)
 
 
