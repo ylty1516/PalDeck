@@ -138,14 +138,12 @@
 
       <section id="view-credits" class="view" aria-labelledby="viewTitle">
         <div class="credits-intro glass-panel">
-          <h2>开源项目致谢</h2>
-          <p>PalDeck 的实现离不开以下开放源代码项目与社区资料。致谢数据随源码提供，查看页面不会联网。</p>
+          <img src="app-icon.png" alt="" class="credits-logo"><div class="credits-project"><h2>PalDeck <span id="creditsVersion" class="badge">当前版本</span></h2><p>感谢开放源代码项目、维护者、测试者、Mod 作者和社区用户的支持。致谢数据随源码提供，页面本身不会联网。</p></div>
+          <div id="creditsIntroActions" class="button-row credits-intro-actions"><button type="button" class="btn primary" data-action="openPalDeckHome">项目主页</button><button type="button" class="btn" data-action="openPalDeckIssues">问题反馈</button><button type="button" class="btn" data-action="openPalDeckLicense">查看 LICENSE</button></div>
         </div>
-        <div id="creditsCore" class="credits-grid" aria-live="polite"></div>
-        <details class="credits-dependencies glass-panel">
-          <summary>完整直接运行与构建依赖及许可证</summary>
-          <div id="creditsDependencies" class="credits-dependency-list"></div>
-        </details>
+        <h2 class="section-heading">开源项目致谢 · 核心项目</h2><div id="creditsCore" class="credits-grid" aria-live="polite"></div>
+        <section class="special-thanks glass-panel"><h2>特别感谢</h2><div><article><strong>测试者</strong><p>帮助复现问题、验证安装流程与便携构建。</p></article><article><strong>Mod 作者</strong><p>持续创作 Palworld 内容，让管理工具具有意义。</p></article><article><strong>社区支持者</strong><p>提交建议、反馈 Issue，并帮助项目持续改进。</p></article></div></section>
+        <details class="credits-dependencies glass-panel"><summary>完整直接运行与构建依赖及许可证</summary><div id="creditsDependencies" class="credits-dependency-list"></div></details>
       </section>
     </main>
 

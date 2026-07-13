@@ -8,6 +8,7 @@ from backend.credits import CATALOG, TRUSTED_LINKS, catalog_payload
 
 
 REQUIRED_NAMES = {
+    "PalDeck",
     "Okaetsu/RE-UE4SS",
     "UE4SS-RE/RE-UE4SS",
     "Flask",
@@ -37,6 +38,13 @@ def test_catalog_is_fixed_complete_offline_metadata():
     assert "Copyright (c) 2022 Narknon" in ue4ss["copyright"]
     okaetsu = next(item for item in CATALOG if item["name"] == "Okaetsu/RE-UE4SS")
     assert "Palworld 专用构建" in okaetsu["purpose"]
+    paldeck = next(item for item in CATALOG if item["name"] == "PalDeck")
+    assert paldeck["license"] == "MIT"
+    assert paldeck["version"]
+    assert TRUSTED_LINKS["paldeck-home"] == "https://github.com/ylty1516/PalDeck"
+    assert TRUSTED_LINKS["paldeck-issues"].endswith("/PalDeck/issues")
+    assert TRUSTED_LINKS["paldeck-license"].endswith("/PalDeck/blob/main/LICENSE")
+    assert not {"KingEnderBrine", "Joker409", "Laezel", "Rayden"} & {item["author"] for item in CATALOG}
 
 
 def test_locked_pillow_metadata_matches_authoritative_wheel_metadata():

@@ -5,12 +5,22 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any
 
+from backend.version import APP_VERSION
+
 
 def _entry(**values: Any) -> MappingProxyType:
     return MappingProxyType(values)
 
 
 CATALOG = (
+    _entry(
+        id="paldeck-home", name="PalDeck",
+        purpose="Windows Steam 版 Palworld 的本地、Workshop 与 UE4SS 模组管理器。",
+        author="ylty1516 and contributors", license="MIT", version=APP_VERSION,
+        source_url="https://github.com/ylty1516/PalDeck", core=True,
+        direct_dependency=False,
+        license_text="MIT License；完整许可文本位于仓库 LICENSE。",
+    ),
     _entry(
         id="okaetsu", name="Okaetsu/RE-UE4SS",
         purpose="感谢 Okaetsu 维护 Palworld 专用构建，为游戏提供可用的 UE4SS 发行包。",
@@ -62,7 +72,11 @@ CATALOG = (
     ),
 )
 
-TRUSTED_LINKS = MappingProxyType({item["id"]: item["source_url"] for item in CATALOG})
+TRUSTED_LINKS = MappingProxyType({
+    **{item["id"]: item["source_url"] for item in CATALOG},
+    "paldeck-issues": "https://github.com/ylty1516/PalDeck/issues",
+    "paldeck-license": "https://github.com/ylty1516/PalDeck/blob/main/LICENSE",
+})
 
 
 def catalog_payload() -> list[dict[str, Any]]:

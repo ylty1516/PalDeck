@@ -91,6 +91,10 @@ function creditText(label, value) {
   return line;
 }
 
+function openTrustedId(id) {
+  return request("/api/system/open-trusted-link", { method: "POST", body: { id } });
+}
+
 function trustedLinkButton(item) {
   const button = document.createElement("button");
   button.type = "button";
@@ -551,6 +555,9 @@ export const ACTION_HANDLERS = Object.freeze({
   showNexus: async () => switchView("nexus"),
   showSettings: async () => switchView("settings"),
   showCredits: async () => switchView("credits"),
+  openPalDeckHome: async () => openTrustedId("paldeck-home"),
+  openPalDeckIssues: async () => openTrustedId("paldeck-issues"),
+  openPalDeckLicense: async () => openTrustedId("paldeck-license"),
   showAppearance: async () => { await switchView("settings"); $(".appearance-panel")?.scrollIntoView({ block: "start" }); },
   showSettingsStatus: async () => switchView("settings"),
   openGameFolder: async () => request("/api/mods/open-folder"),
@@ -762,6 +769,7 @@ async function init() {
   try {
     const [health, appearance, game] = await Promise.all([request("/api/health"), request("/api/appearance"), request("/api/game/status")]);
     updateShellStatus({ version: health.version || "-", path: game.game_path || game.path || "", healthy: true });
+    $("#creditsVersion").textContent = `v${health.version || "-"}`;
     applyAppearance(appearance); refreshBackground();
     if (game.configured) showPathInfo(game);
     await loadMods();
