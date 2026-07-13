@@ -1,5 +1,6 @@
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
+import { hydrateIcons } from "./icons.js";
 import {
   actionableErrorMessage, createRevisionGuard, createSerialQueue, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
@@ -447,9 +448,19 @@ async function loadNexus(mode = "downloads", force = false) {
   }
 }
 
+function updateShellStatus({ version, path, healthy } = {}) {
+  if (version) {
+    $("#sidebarVersion").textContent = `v${version}`;
+    $("#healthStatus").textContent = `${healthy === false ? "服务异常" : "运行中"} · v${version}`;
+  } else if (healthy === false) {
+    $("#healthStatus").textContent = "服务连接失败";
+  }
+  if (path !== undefined) $("#pathChip").textContent = path || "未配置游戏目录";
+}
+
 function showPathInfo(status) {
   state.gamePath = status.path || state.gamePath;
-  $("#pathChip").textContent = state.gamePath || "未配置游戏目录";
+  updateShellStatus({ path: state.gamePath });
   $("#gamePathInput").value = state.gamePath;
   $("#pathInfo").textContent = status.valid ? `目录有效${status.has_ue4ss ? " · UE4SS 已安装" : " · UE4SS 未安装"}` : "目录尚未配置";
 }
@@ -504,6 +515,14 @@ async function installZip(file) {
   await loadUe4ssStatus();
 }
 
+async function checkApplicationUpdate() {
+  state.updateInfo = await request("/api/update/check", { timeout: 30000 });
+  $("#updateStatus").textContent = state.updateInfo.update_available
+    ? `发现新版本 ${state.updateInfo.remote_version}`
+    : `已是最新版 ${state.updateInfo.local_version}`;
+  return state.updateInfo;
+}
+
 async function checkUe4ssUpstream() {
   const result = await request("/api/ue4ss/check-upstream", { method: "POST", body: {}, timeout: 30000 });
   state.ue4ssUpdateAvailable = result.update_available === true;
@@ -524,6 +543,10 @@ export const ACTION_HANDLERS = Object.freeze({
   showNexus: async () => switchView("nexus"),
   showSettings: async () => switchView("settings"),
   showCredits: async () => switchView("credits"),
+  showAppearance: async () => { await switchView("settings"); $(".appearance-panel")?.scrollIntoView({ block: "start" }); },
+  showSettingsStatus: async () => switchView("settings"),
+  openGameFolder: async () => request("/api/mods/open-folder"),
+  checkUpdateSidebar: async () => checkApplicationUpdate(),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
   refreshMods: async () => loadMods(),
   openModsFolder: async () => request("/api/mods/open-folder"),
@@ -549,7 +572,7 @@ export const ACTION_HANDLERS = Object.freeze({
   installUe4ssUpdate: async () => installFixedUe4ss("/api/ue4ss/install-upstream"),
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
   selectUe4ssZip: async (event) => run(event.currentTarget, () => executeFileOperation(() => installZip(event.currentTarget.files?.[0])), { disable: false, global: true, busyText: "正在安装 UE4SS…" }),
-  checkUpdate: async () => { state.updateInfo = await request("/api/update/check", { timeout: 30000 }); $("#updateStatus").textContent = state.updateInfo.update_available ? `发现新版本 ${state.updateInfo.remote_version}` : `已是最新版 ${state.updateInfo.local_version}`; },
+  checkUpdate: async () => checkApplicationUpdate(),
   applyUpdate: async () => { const result = await request("/api/update/apply", { method: "POST", body: {}, timeout: 120000 }); toast(result.message || "更新已准备，将自动重启", "success"); },
   themeAurora: chooseTheme,
   themeIvory: chooseTheme,
@@ -696,6 +719,7 @@ function setupDropzone() {
 }
 
 async function init() {
+  hydrateIcons();
   document.addEventListener("click", dispatchStatic);
   document.addEventListener("input", dispatchStatic);
   document.addEventListener("change", dispatchStatic);
@@ -722,11 +746,11 @@ async function init() {
   setupDropzone();
   try {
     const [health, appearance, game] = await Promise.all([request("/api/health"), request("/api/appearance"), request("/api/game/status")]);
-    $("#healthStatus").textContent = `服务正常 · v${health.version || "-"}`;
+    updateShellStatus({ version: health.version || "-", path: game.game_path || game.path || "", healthy: true });
     applyAppearance(appearance); refreshBackground();
     if (game.configured) showPathInfo(game);
     await loadMods();
-  } catch (error) { $("#healthStatus").textContent = "服务连接失败"; toast(actionableErrorMessage(error), "error"); }
+  } catch (error) { updateShellStatus({ healthy: false }); toast(actionableErrorMessage(error), "error"); }
 }
 
 init();

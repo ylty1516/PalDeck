@@ -155,7 +155,7 @@ def test_css_has_three_themes_accessibility_effects_and_responsive_rules():
         '[data-theme="aurora-glass"]', '[data-theme="ivory-sakura"]',
         '[data-theme="starlit-night"]', "--background-mask", "--background-blur",
         "--background-position", "--background-url", ":focus-visible", "prefers-contrast: more",
-        "prefers-reduced-motion", "@media (max-width: 960px)", ".ripple",
+        "prefers-reduced-motion", "@media (max-width: 959px)", ".ripple",
         "pointer-events: none",
     ):
         assert token in css
@@ -584,8 +584,22 @@ def test_workshop_filter_includes_server_metadata_fields():
         assert f"mod.{field}" in filter_body.group(1)
 
 
+def test_v22_shell_has_brand_sidebar_workspace_statusbar_and_three_breakpoints():
+    html = HTML.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    for marker in ('class="brand-logo"', 'class="sidebar glass-panel"', 'class="workspace"', 'id="appStatusbar"', 'id="statusGamePath"'):
+        assert marker in html
+    for width in (1440, 1100, 960):
+        assert str(width) in css
+    assert "overflow-x: hidden" in css
+    assert "--statusbar-height" in css
+    assert "updateShellStatus" in app
+    assert 'data-action="showSettingsStatus"' in html
+
+
 def test_all_javascript_modules_pass_node_syntax_check():
-    for path in (APP, API, EFFECTS, RENDER, INTERACTION):
+    for path in sorted(FRONTEND.glob("*.js")):
         result = subprocess.run(
             ["node", "--check", str(path)], cwd=ROOT, text=True,
             capture_output=True, check=False,

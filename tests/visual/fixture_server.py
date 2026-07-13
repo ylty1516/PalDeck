@@ -196,7 +196,9 @@ def main() -> int:
     port = server.server_address[1]
     if args.ready_file:
         args.ready_file.parent.mkdir(parents=True, exist_ok=True)
-        args.ready_file.write_text(str(port), encoding="ascii")
+        temporary_port = args.ready_file.with_name(f".{args.ready_file.name}.tmp")
+        temporary_port.write_text(str(port), encoding="ascii")
+        temporary_port.replace(args.ready_file)
     print(f"READY http://{HOST}:{port}", flush=True)
     try:
         server.serve_forever()

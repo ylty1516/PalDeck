@@ -11,18 +11,18 @@
   <canvas id="petalCanvas" aria-hidden="true"></canvas>
   <div class="app-shell">
     <aside class="sidebar glass-panel">
-      <div class="brand"><span class="brand-mark">P</span><div><strong>Palworld Mods</strong><small>桌面管理器</small></div></div>
+      <div class="brand"><img class="brand-logo" src="app-icon.png" alt=""><div><strong>Palworld Mods</strong><small>桌面管理器</small></div></div>
       <nav aria-label="主导航">
-        <button type="button" class="nav-item active" data-action="showMods" data-view="mods" aria-current="page">我的模组</button>
-        <button type="button" class="nav-item" data-action="showImport" data-view="import">导入安装</button>
-        <button type="button" class="nav-item" data-action="showNexus" data-view="nexus">N网热门</button>
-        <button type="button" class="nav-item" data-action="showSettings" data-view="settings">设置与外观</button>
-        <button type="button" class="nav-item" data-action="showCredits" data-view="credits">开源致谢</button>
+        <button type="button" class="nav-item active" data-action="showMods" data-view="mods" aria-current="page"><span class="nav-icon" data-icon="mods"></span><span>我的模组</span></button>
+        <button type="button" class="nav-item" data-action="showImport" data-view="import"><span class="nav-icon" data-icon="import"></span><span>导入安装</span></button>
+        <button type="button" class="nav-item" data-action="showNexus" data-view="nexus"><span class="nav-icon" data-icon="nexus"></span><span>N网热门</span></button>
+        <button type="button" class="nav-item" data-action="showSettings" data-view="settings"><span class="nav-icon" data-icon="settings"></span><span>设置与外观</span></button>
+        <button type="button" class="nav-item" data-action="showCredits" data-view="credits"><span class="nav-icon" data-icon="credits"></span><span>开源致谢</span></button>
       </nav>
       <div class="sidebar-foot">
-        <span id="healthStatus" class="status-dot">正在连接…</span>
-        <span id="pathChip" class="path-chip">未配置游戏目录</span>
-        <button type="button" class="btn subtle" data-action="restartAdmin">以管理员身份重启</button>
+        <button type="button" class="background-shortcut" data-action="showAppearance"><span class="background-thumb" aria-hidden="true"></span><span><strong>自定义背景</strong><small>更换你的专属风景</small></span><span aria-hidden="true">›</span></button>
+        <div class="sidebar-version"><span id="sidebarVersion">v2.1.1</span><button type="button" class="btn subtle" data-action="checkUpdateSidebar">检查更新</button></div>
+        <button type="button" class="btn subtle admin-action" data-action="restartAdmin">以管理员身份重启</button>
       </div>
     </aside>
 
@@ -125,6 +125,12 @@
         </details>
       </section>
     </main>
+
+    <footer id="appStatusbar" class="app-statusbar glass-panel" aria-label="应用状态">
+      <div class="status-segment"><span class="status-icon" data-icon="status"></span><span><small>服务状态</small><strong id="healthStatus" class="status-dot">正在连接…</strong></span></div>
+      <div id="statusGamePath" class="status-segment status-path"><span class="status-icon" data-icon="folder"></span><span><small>游戏目录</small><strong id="pathChip" class="path-chip">未配置游戏目录</strong></span><button type="button" class="btn compact" data-action="openGameFolder">打开</button></div>
+      <button type="button" class="status-segment status-config" data-action="showSettingsStatus"><span class="status-icon" data-icon="settings"></span><span><small>配置文件</small><strong>设置与工具</strong></span><span aria-hidden="true">›</span></button>
+    </footer>
   </div>
 
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
