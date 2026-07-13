@@ -12,15 +12,18 @@ const mods = Object.freeze([
   Object.freeze({ id: "local-1", name: "Better Pal", mod_type: "pak", nexus_id: 101, author: "Aiko", status: "enabled", source: "local" }),
   Object.freeze({ id: "local-2", name: "Script Tools", mod_type: "ue4ss", nexus_id: 202, author: "Ren", audit: Object.freeze({ status: "disabled" }), source: "nexus" }),
   Object.freeze({ workshop_id: "334455", name: "Workshop Map", install_types: Object.freeze(["logicpak"]), author: "Mori", enabled: true, valid: true, source: "steam_workshop" }),
-  Object.freeze({ id: "broken", name: "Missing Assets", mod_type: "pak", author: "Kai", status: "missing", source: "local" }),
+  Object.freeze({ id: "broken", name: "Missing Assets", mod_type: "pak", author: "Kai", status: "missing" }),
 ]);
 
-test("normalizedModState normalizes local, audit and Workshop states", () => {
+test("normalizedModState only accepts explicit local states and valid Workshop mapping", () => {
   assert.equal(normalizedModState(mods[0]), "enabled");
   assert.equal(normalizedModState(mods[1]), "disabled");
   assert.equal(normalizedModState(mods[2]), "enabled");
-  assert.equal(normalizedModState({ source: "steam_workshop", enabled: false, valid: false }), "conflict");
-  assert.equal(normalizedModState({ enabled: false }), "disabled");
+  assert.equal(normalizedModState({ source: "steam_workshop", enabled: false, valid: true }), "disabled");
+  assert.equal(normalizedModState({ source: "steam_workshop", enabled: false, valid: false }), "abnormal");
+  assert.equal(normalizedModState({ status: "corrupt", enabled: true }), "abnormal");
+  assert.equal(normalizedModState({ status: "missing" }), "abnormal");
+  assert.equal(normalizedModState({ enabled: false }), "abnormal");
 });
 
 test("deriveModView reports totals and filters all specified searchable fields", () => {
@@ -38,10 +41,13 @@ test("deriveModView reports totals and filters all specified searchable fields",
   }
 });
 
-test("deriveModView combines source and normalized status filters without mutating input", () => {
+test("deriveModView normalizes missing source to local and supports all or empty filters", () => {
   const snapshot = structuredClone(mods);
-  const view = deriveModView(mods, { source: "local", status: "abnormal", query: "pak" });
-  assert.deepEqual(view.items.map(({ id }) => id), ["broken"]);
+  const localAbnormal = deriveModView(mods, { source: "local", status: "abnormal", query: "pak" });
+  assert.deepEqual(localAbnormal.items.map(({ id }) => id), ["broken"]);
+  assert.deepEqual(deriveModView(mods, { source: "steam_workshop", status: "enabled" }).items, [mods[2]]);
+  assert.deepEqual(deriveModView(mods, { source: "all", status: "all" }).items, mods);
+  assert.deepEqual(deriveModView(mods, { source: null, status: undefined }).items, mods);
   assert.deepEqual(mods, snapshot);
 });
 

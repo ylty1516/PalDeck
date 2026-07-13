@@ -22,15 +22,37 @@ const requested = new URLSearchParams(window.location.search).get("view") || "mo
 if (!allowed.has(requested)) throw new TypeError("Unknown visual fixture view");
 window.__VISUAL_READY__ = false;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-for (let attempt = 0; attempt < 100; attempt += 1) {
-  const healthReady = !document.querySelector("#healthStatus")?.textContent.includes("正在连接");
-  const modsReady = !document.querySelector("#modList")?.textContent.includes("正在加载");
-  if (healthReady && modsReady) break;
-  await sleep(20);
-}
+const waitUntil = async (predicate, label) => {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    if (predicate()) return;
+    await sleep(10);
+  }
+  throw new Error(`Visual fixture timed out waiting for ${label}`);
+};
+await waitUntil(() => {
+  const health = document.querySelector("#healthStatus")?.textContent || "";
+  const list = document.querySelector("#modList")?.textContent || "";
+  return !health.includes("正在连接") && !list.includes("正在加载");
+}, "initial API render");
 document.querySelector(`[data-view="${requested}"]`)?.click();
+const rendered = {
+  mods: () => Boolean(document.querySelector("#modList")?.children.length),
+  import: () => Boolean(document.querySelector("#dropzone")),
+  nexus: () => {
+    const status = document.querySelector("#nexusStatus")?.textContent || "";
+    return !status.includes("等待加载") && !status.includes("正在连接") && Boolean(document.querySelector("#nexusGrid")?.children.length);
+  },
+  settings: () => {
+    const status = document.querySelector("#ue4ssStatus")?.textContent || "";
+    return Boolean(status) && !status.includes("未知") && !status.includes("正在读取");
+  },
+  credits: () => Boolean(document.querySelector("#creditsCore")?.children.length),
+};
+await waitUntil(() => {
+  const target = document.querySelector(`#view-${requested}`);
+  return target?.classList.contains("active") && rendered[requested]();
+}, `${requested} view render`);
 await document.fonts?.ready;
-await sleep(250);
 await Promise.all([...document.images].map((image) => image.complete ? null : new Promise((resolve) => {
   image.addEventListener("load", resolve, { once: true });
   image.addEventListener("error", resolve, { once: true });

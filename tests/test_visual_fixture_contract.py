@@ -45,13 +45,20 @@ def test_fixture_files_are_fixed_safe_json_for_all_views():
     assert items and all(item.get("adultContent") is False for item in items)
 
 
-def test_fixture_server_contract_is_loopback_only_and_test_injects_whitelisted_view():
+def test_fixture_server_contract_is_loopback_only_and_waits_for_target_render():
     source = (VISUAL / "fixture_server.py").read_text(encoding="utf-8")
     assert 'HOST = "127.0.0.1"' in source
     assert "ThreadingHTTPServer" in source
     assert "ALLOWED_VIEWS" in source
     assert "__fixture__.js" in source
-    assert "window.__VISUAL_READY__" in source
+    assert "window.__VISUAL_READY__ = true" in source
+    assert 'dataset.visualReady = "true"' in source
+    assert "view-${requested}" in source
+    assert 'classList.contains("active")' in source
+    for selector in ("#modList", "#nexusStatus", "#ue4ssStatus", "#creditsCore"):
+        assert selector in source
+    assert "await sleep(250)" not in source
+    assert "throw new Error" in source
     assert "query" in source.lower() or "parse_qs" in source
     assert "../frontend" in source.replace("\\", "/") or '"frontend"' in source
 
@@ -112,33 +119,51 @@ def test_capture_script_covers_matrix_edge_cleanup_and_stability_budget():
     assert "OutputPath" in source
 
 
-def test_compare_requires_approval_for_missing_baseline(tmp_path):
+def _save_valid_candidate(image_module, directory):
+    directory.mkdir()
+    image = image_module.new("RGB", (1600, 1000), "white")
+    for x in range(10, 20):
+        image.putpixel((x, 10), (0, 0, 0))
+    image.save(directory / "mods-1600x1000.png")
+
+
+def _run_compare(candidate, baseline, *options):
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "compare_ui_screenshots.py"), str(candidate), str(baseline), *options],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def test_compare_requires_approval_only_after_validating_candidate(tmp_path):
+    image_module = pytest.importorskip("PIL.Image")
     candidate = tmp_path / "candidate"
     baseline = tmp_path / "approved"
-    candidate.mkdir()
-    command = [sys.executable, str(ROOT / "scripts" / "compare_ui_screenshots.py"), str(candidate), str(baseline)]
+    _save_valid_candidate(image_module, candidate)
 
-    denied = subprocess.run(command, capture_output=True, text=True, check=False)
+    denied = _run_compare(candidate, baseline)
     assert denied.returncode != 0
     assert "needs approval" in (denied.stdout + denied.stderr).lower()
-    allowed = subprocess.run([*command, "--allow-missing-baseline"], capture_output=True, text=True, check=False)
+    allowed = _run_compare(candidate, baseline, "--allow-missing-baseline")
     assert allowed.returncode == 0
     assert not baseline.exists(), "comparison must never create or approve a baseline"
 
 
-def test_compare_rejects_wrong_dimensions_and_blank_content(tmp_path):
+@pytest.mark.parametrize("kind", ["missing", "bad-png", "wrong-size", "blank"])
+def test_compare_rejects_invalid_candidate_even_when_missing_baseline_is_allowed(tmp_path, kind):
     image_module = pytest.importorskip("PIL.Image")
     candidate = tmp_path / "candidate"
     baseline = tmp_path / "approved"
     candidate.mkdir()
-    baseline.mkdir()
-    image_module.new("RGB", (10, 10), "white").save(candidate / "mods-1600x1000.png")
-    image_module.new("RGB", (11, 10), "black").save(baseline / "mods-1600x1000.png")
+    path = candidate / "mods-1600x1000.png"
+    if kind == "bad-png":
+        path.write_text("not a png", encoding="utf-8")
+    elif kind == "wrong-size":
+        image_module.new("RGB", (10, 10), "white").save(path)
+    elif kind == "blank":
+        image_module.new("RGB", (1600, 1000), "white").save(path)
 
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "compare_ui_screenshots.py"), str(candidate), str(baseline)],
-        capture_output=True, text=True, check=False,
-    )
+    result = _run_compare(candidate, baseline, "--allow-missing-baseline")
     assert result.returncode != 0
     output = (result.stdout + result.stderr).lower()
-    assert "dimension" in output or "尺寸" in output
+    expected = {"missing": "no candidate", "bad-png": "invalid png", "wrong-size": "dimension", "blank": "empty content"}
+    assert expected[kind] in output

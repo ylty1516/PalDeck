@@ -1,16 +1,19 @@
 const ACTIVE_IMPORT_STATES = new Set(["installing", "conflict"]);
-const KNOWN_MOD_STATES = new Set(["enabled", "disabled", "modified", "missing", "conflict"]);
+const KNOWN_MOD_STATES = new Set(["enabled", "disabled"]);
 const ACTION_TYPES = new Set(["start", "conflict", "succeed", "fail", "retry", "cancel"]);
 
 export function normalizedModState(mod) {
-  if (!mod || typeof mod !== "object") return "disabled";
+  if (!mod || typeof mod !== "object") return "abnormal";
   if (mod.source === "steam_workshop") {
-    if (mod.valid === false) return "conflict";
-    return mod.enabled === true ? "enabled" : "disabled";
+    if (mod.valid !== true || typeof mod.enabled !== "boolean") return "abnormal";
+    return mod.enabled ? "enabled" : "disabled";
   }
   const stated = mod.status ?? mod.audit?.status;
-  if (KNOWN_MOD_STATES.has(stated)) return stated;
-  return mod.enabled === true ? "enabled" : "disabled";
+  return KNOWN_MOD_STATES.has(stated) ? stated : "abnormal";
+}
+
+function normalizedModSource(mod) {
+  return mod.source || "local";
 }
 
 function containsQuery(mod, query) {
@@ -31,11 +34,14 @@ export function deriveModView(mods, { query = "", source = "", status = "" } = {
     disabled: states.filter((value) => value === "disabled").length,
     abnormal: states.filter((value) => !["enabled", "disabled"].includes(value)).length,
   };
-  const normalizedQuery = String(query).trim().toLocaleLowerCase();
+  const normalizedQuery = String(query ?? "").trim().toLocaleLowerCase();
+  const sourceFilter = source == null ? "" : String(source);
+  const statusFilter = status == null ? "" : String(status);
   const items = sourceItems.filter((mod) => {
     const modState = normalizedModState(mod);
-    const statusMatches = !status || (status === "abnormal" ? !["enabled", "disabled"].includes(modState) : modState === status);
-    return (!source || mod.source === source) && statusMatches && containsQuery(mod, normalizedQuery);
+    const sourceMatches = !sourceFilter || sourceFilter === "all" || normalizedModSource(mod) === sourceFilter;
+    const statusMatches = !statusFilter || statusFilter === "all" || modState === statusFilter;
+    return sourceMatches && statusMatches && containsQuery(mod, normalizedQuery);
   });
   return { items, stats };
 }

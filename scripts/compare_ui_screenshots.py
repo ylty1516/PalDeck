@@ -41,21 +41,44 @@ def normalized_difference(candidate: Image.Image, baseline: Image.Image) -> floa
 
 
 def compare(candidate_dir: Path, baseline_dir: Path, tolerance: float, allow_missing: bool) -> int:
-    if not baseline_dir.is_dir():
-        print(f"Baseline needs approval: {baseline_dir}", file=sys.stderr)
-        return 0 if allow_missing else 2
-
-    candidates = sorted(candidate_dir.glob("*.png")) if candidate_dir.is_dir() else []
-    if not candidates:
+    candidate_paths = sorted(candidate_dir.glob("*.png")) if candidate_dir.is_dir() else []
+    if not candidate_paths:
         print(f"No candidate screenshots found: {candidate_dir}", file=sys.stderr)
         return 2
 
     failures: list[str] = []
-    for candidate_path in candidates:
+    candidates: list[tuple[Path, tuple[int, int], Image.Image]] = []
+    for candidate_path in candidate_paths:
         size = expected_size(candidate_path)
         if size is None:
             failures.append(f"unexpected screenshot name: {candidate_path.name}")
             continue
+        try:
+            with Image.open(candidate_path) as source:
+                if source.format != "PNG":
+                    raise ValueError(f"expected PNG, got {source.format or 'unknown'}")
+                candidate = source.copy()
+        except (OSError, ValueError) as error:
+            failures.append(f"invalid PNG {candidate_path.name}: {error}")
+            continue
+        if candidate.size != size:
+            failures.append(f"candidate dimension mismatch for {candidate_path.name}: {candidate.size} != {size}")
+            continue
+        if not has_content(candidate):
+            failures.append(f"candidate has empty content bounds: {candidate_path.name}")
+            continue
+        candidates.append((candidate_path, size, candidate))
+
+    if failures:
+        for failure in failures:
+            print(f"ERROR: {failure}", file=sys.stderr)
+        return 1
+
+    if not baseline_dir.is_dir():
+        print(f"Baseline needs approval: {baseline_dir}", file=sys.stderr)
+        return 0 if allow_missing else 2
+
+    for candidate_path, size, candidate in candidates:
         baseline_path = baseline_dir / candidate_path.name
         if not baseline_path.is_file():
             message = f"Baseline needs approval: {baseline_path}"
@@ -65,20 +88,15 @@ def compare(candidate_dir: Path, baseline_dir: Path, tolerance: float, allow_mis
             failures.append(message)
             continue
         try:
-            with Image.open(candidate_path) as candidate_source, Image.open(baseline_path) as baseline_source:
-                candidate = candidate_source.copy()
-                baseline = baseline_source.copy()
+            with Image.open(baseline_path) as source:
+                if source.format != "PNG":
+                    raise ValueError(f"expected PNG, got {source.format or 'unknown'}")
+                baseline = source.copy()
         except (OSError, ValueError) as error:
-            failures.append(f"invalid PNG {candidate_path.name}: {error}")
-            continue
-        if candidate.size != size:
-            failures.append(f"candidate dimension mismatch for {candidate_path.name}: {candidate.size} != {size}")
+            failures.append(f"invalid PNG {baseline_path.name}: {error}")
             continue
         if baseline.size != size:
             failures.append(f"baseline dimension mismatch for {baseline_path.name}: {baseline.size} != {size}")
-            continue
-        if not has_content(candidate):
-            failures.append(f"candidate has empty content bounds: {candidate_path.name}")
             continue
         if not has_content(baseline):
             failures.append(f"baseline has empty content bounds: {baseline_path.name}")
