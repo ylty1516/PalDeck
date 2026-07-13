@@ -1,0 +1,10 @@
+{
+  "view": "settings",
+  "api": {
+    "/api/health": {"version": "2.2.0-fixture"},
+    "/api/appearance": {"theme": "aurora-glass", "mask": 0.35, "blur": 0, "position": "center", "petals": "off", "petal_style": "natural", "background": "default"},
+    "/api/game/status": {"configured": true, "valid": true, "path": "D:\\SteamLibrary\\steamapps\\common\\Palworld", "has_ue4ss": true},
+    "/api/mods": [],
+    "/api/ue4ss/status": {"installed": true, "version": "Palworld-fixed", "bundled": {"asset": {"updated_at": "2026-07-01", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
+  }
+}

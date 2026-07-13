@@ -1,0 +1,9 @@
+{
+  "view": "import",
+  "api": {
+    "/api/health": {"version": "2.2.0-fixture"},
+    "/api/appearance": {"theme": "aurora-glass", "mask": 0.35, "blur": 0, "position": "center", "petals": "off", "petal_style": "natural", "background": "default"},
+    "/api/game/status": {"configured": true, "valid": true, "path": "D:\\SteamLibrary\\steamapps\\common\\Palworld", "has_ue4ss": true},
+    "/api/mods": []
+  }
+}
