@@ -110,12 +110,26 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             'id="petalCanvas"',
             'id="ue4ssUpdatedAt"',
             'id="ue4ssDigest"',
+            'id="appStatusbar"',
+            'id="modSourceFilter"',
+            'id="importQueue"',
+            'class="nexus-catalog-layout"',
+            'data-action="windowMinimize"',
+            'data-settings-section="advanced"',
             *(f'data-petal-style="{style}"' for style in ("natural", "watercolor", "minimal")),
         ]
         missing = [marker for marker in markers if marker not in index]
         if missing:
             raise AssertionError(f"index missing markers: {missing}")
         passed("index_five_views_and_release_markers", {"markers": markers})
+        passed("v22_responsive_shell", {"statusbar": True, "desktop_bridge": True})
+        passed("import_queue_empty", {"marker": 'id="importQueue"'})
+
+        with request("render.js") as response:
+            render_source = response.read().decode("utf-8")
+        if 'if (mod.adultContent !== false) continue;' not in render_source:
+            raise AssertionError("frontend Nexus adult fail-closed guard missing")
+        passed("nexus_adult_filtered", {"frontend_fail_closed": True})
 
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:

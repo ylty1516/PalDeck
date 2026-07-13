@@ -53,6 +53,9 @@ def test_http_smoke_uses_real_cookie_session_and_records_all_checks(tmp_path, mo
     assert all(item["pass"] is True for item in saved["items"])
     assert {item["name"] for item in saved["items"]} == {
         "index_five_views_and_release_markers",
+        "v22_responsive_shell",
+        "import_queue_empty",
+        "nexus_adult_filtered",
         "health",
         "fresh_data_no_game_path",
         "workshop_empty_state",
