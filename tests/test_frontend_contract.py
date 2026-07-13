@@ -166,6 +166,15 @@ def test_css_has_three_themes_accessibility_effects_and_responsive_rules():
     assert "microsoft yahei ui" in css.lower()
 
 
+def test_v22_settings_page_has_seven_real_sections_and_live_preview():
+    html = HTML.read_text(encoding="utf-8")
+    for section in ("game", "update", "ue4ss", "theme", "background", "effects", "advanced"):
+        assert f'data-settings-section="{section}"' in html
+    assert 'class="appearance-live-preview"' in html
+    assert "效果预览" in html
+    assert '<details class="advanced-settings' in html
+
+
 def test_background_upload_and_appearance_persistence_contract():
     app = APP.read_text(encoding="utf-8")
     assert 'accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"' in HTML.read_text(encoding="utf-8")

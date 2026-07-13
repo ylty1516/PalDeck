@@ -98,12 +98,12 @@
 
       <section id="view-settings" class="view" aria-labelledby="viewTitle">
         <div class="settings-grid">
-          <article class="glass-panel panel">
+          <article class="glass-panel panel settings-card" data-settings-section="game">
             <h2>游戏与工具</h2>
             <label>游戏目录<input id="gamePathInput" type="text" data-action="editGamePath" placeholder="含 Palworld.exe 的目录"></label>
             <div class="button-row"><button type="button" class="btn" data-action="autoDetectGame">自动检测</button><button type="button" class="btn primary" data-action="saveGamePath">保存路径</button><button type="button" class="btn" data-action="repairFolders">修复目录</button></div>
             <div id="detectList" class="stack"></div><div id="pathInfo" class="result"></div>
-            <hr><section class="ue4ss-card" aria-label="Palworld 专用 UE4SS">
+            <hr><section class="ue4ss-card" data-settings-section="ue4ss" aria-label="Palworld 专用 UE4SS">
               <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
               <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
               <p id="ue4ssUpdatedAt" class="ue4ss-meta">正在读取内置版本…</p><p id="ue4ssDigest" class="ue4ss-meta"></p>
@@ -111,24 +111,26 @@
               <input id="ue4ssZipInput" type="file" data-action="selectUe4ssZip" accept=".zip,application/zip">
               <div id="ue4ssResult" class="result" aria-live="polite"></div>
             </section>
-            <hr><p id="updateStatus" class="muted">尚未检查更新</p>
-            <div class="button-row"><button type="button" class="btn" data-action="checkUpdate">检查更新</button><button type="button" class="btn primary" data-action="applyUpdate">安装更新</button></div>
+            <section class="settings-subcard" data-settings-section="update"><h3>应用更新</h3><p id="updateStatus" class="muted">尚未检查更新</p>
+            <div class="button-row"><button type="button" class="btn" data-action="checkUpdate">检查更新</button><button type="button" class="btn primary" data-action="applyUpdate">安装更新</button></div></section>
           </article>
 
           <article class="glass-panel panel appearance-panel">
             <h2>主题与背景</h2>
-            <div class="theme-picker" aria-label="主题"><button type="button" data-action="themeAurora" class="theme-card" data-theme-value="aurora-glass" aria-pressed="false">极光玻璃</button><button type="button" data-action="themeIvory" class="theme-card" data-theme-value="ivory-sakura" aria-pressed="false">象牙樱花</button><button type="button" data-action="themeStarlit" class="theme-card" data-theme-value="starlit-night" aria-pressed="false">星夜</button></div>
-            <div class="button-row"><button type="button" class="btn" data-action="chooseBackground">选择背景</button><button type="button" class="btn" data-action="resetBackground">恢复默认</button></div>
+            <div class="appearance-live-preview" aria-label="效果预览"><strong>效果预览</strong><div><span></span><span></span><span></span></div><small>当前主题与背景组合</small></div>
+            <section class="settings-subcard" data-settings-section="theme"><h3>外观主题</h3><div class="theme-picker" aria-label="主题"><button type="button" data-action="themeAurora" class="theme-card" data-theme-value="aurora-glass" aria-pressed="false">极光玻璃</button><button type="button" data-action="themeIvory" class="theme-card" data-theme-value="ivory-sakura" aria-pressed="false">象牙樱花</button><button type="button" data-action="themeStarlit" class="theme-card" data-theme-value="starlit-night" aria-pressed="false">星夜</button></div></section>
+            <section class="settings-subcard" data-settings-section="background"><h3>背景自定义</h3><div class="button-row"><button type="button" class="btn" data-action="chooseBackground">选择背景</button><button type="button" class="btn" data-action="resetBackground">恢复默认</button></div>
             <input id="backgroundInput" type="file" data-action="selectBackground" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp">
             <label>遮罩 <output id="maskValue">35%</output><input id="maskRange" type="range" data-action="changeMask" min="0" max="85" value="35"></label>
             <label>模糊 <output id="blurValue">0px</output><input id="blurRange" type="range" data-action="changeBlur" min="0" max="24" value="0"></label>
-            <fieldset><legend>背景位置</legend><div class="position-grid"><button type="button" data-action="positionTopLeft" data-position="top-left" aria-label="左上" aria-pressed="false">↖</button><button type="button" data-action="positionTopCenter" data-position="top-center" aria-label="顶部居中" aria-pressed="false">↑</button><button type="button" data-action="positionTopRight" data-position="top-right" aria-label="右上" aria-pressed="false">↗</button><button type="button" data-action="positionCenterLeft" data-position="center-left" aria-label="左侧居中" aria-pressed="false">←</button><button type="button" data-action="positionCenter" data-position="center" aria-label="居中" aria-pressed="false">·</button><button type="button" data-action="positionCenterRight" data-position="center-right" aria-label="右侧居中" aria-pressed="false">→</button><button type="button" data-action="positionBottomLeft" data-position="bottom-left" aria-label="左下" aria-pressed="false">↙</button><button type="button" data-action="positionBottomCenter" data-position="bottom-center" aria-label="底部居中" aria-pressed="false">↓</button><button type="button" data-action="positionBottomRight" data-position="bottom-right" aria-label="右下" aria-pressed="false">↘</button></div></fieldset>
-            <label>樱花密度<select id="petalLevel" data-action="changePetals"><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+            <fieldset><legend>背景位置</legend><div class="position-grid"><button type="button" data-action="positionTopLeft" data-position="top-left" aria-label="左上" aria-pressed="false">↖</button><button type="button" data-action="positionTopCenter" data-position="top-center" aria-label="顶部居中" aria-pressed="false">↑</button><button type="button" data-action="positionTopRight" data-position="top-right" aria-label="右上" aria-pressed="false">↗</button><button type="button" data-action="positionCenterLeft" data-position="center-left" aria-label="左侧居中" aria-pressed="false">←</button><button type="button" data-action="positionCenter" data-position="center" aria-label="居中" aria-pressed="false">·</button><button type="button" data-action="positionCenterRight" data-position="center-right" aria-label="右侧居中" aria-pressed="false">→</button><button type="button" data-action="positionBottomLeft" data-position="bottom-left" aria-label="左下" aria-pressed="false">↙</button><button type="button" data-action="positionBottomCenter" data-position="bottom-center" aria-label="底部居中" aria-pressed="false">↓</button><button type="button" data-action="positionBottomRight" data-position="bottom-right" aria-label="右下" aria-pressed="false">↘</button></div></fieldset></section>
+            <section class="settings-subcard" data-settings-section="effects"><h3>动态效果</h3><label>樱花密度<select id="petalLevel" data-action="changePetals"><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
             <fieldset class="petal-style-fieldset"><legend>樱花风格</legend><div class="petal-style-picker">
               <button type="button" class="petal-style-card" data-action="petalStyleNatural" data-petal-style="natural" aria-pressed="false"><span class="petal-preview preview-natural" aria-hidden="true"><i></i><i></i><i></i></span><strong>自然</strong><small>立体花瓣与风中翻转</small></button>
               <button type="button" class="petal-style-card" data-action="petalStyleWatercolor" data-petal-style="watercolor" aria-pressed="false"><span class="petal-preview preview-watercolor" aria-hidden="true"><i></i><i></i><i></i></span><strong>水彩</strong><small>透明晕染与偶现花朵</small></button>
               <button type="button" class="petal-style-card" data-action="petalStyleMinimal" data-petal-style="minimal" aria-pressed="false"><span class="petal-preview preview-minimal" aria-hidden="true"><i></i><i></i><i></i></span><strong>简约</strong><small>低饱和边缘轻落</small></button>
-            </div></fieldset>
+            </div></fieldset></section>
+            <details class="advanced-settings settings-subcard" data-settings-section="advanced"><summary>高级选项</summary><p class="muted">窗口兼容模式、诊断与管理员操作保持现有安全边界；需要时可从侧栏进入管理员重启。</p></details>
             <button type="button" class="btn primary" data-action="saveAppearance">保存外观</button>
           </article>
         </div>
