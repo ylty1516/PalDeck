@@ -232,7 +232,9 @@ def _install_archive(
     if current_status["installed"] and not confirm_replace:
         raise Ue4ssConflictError(current_status["markers"])
 
-    temp = Path(tempfile.mkdtemp(prefix="ue4ss_install_"))
+    # os.replace is atomic only within one volume. Keep extraction, backups and
+    # publish staging beside Win64 so Steam libraries on non-system drives work.
+    temp = Path(tempfile.mkdtemp(prefix=".paldeck-ue4ss-", dir=win64))
     backups = temp / "backups"
     published: list[Path] = []
     replaced: list[tuple[Path, Path]] = []

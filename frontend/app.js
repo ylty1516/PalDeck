@@ -623,7 +623,8 @@ async function installWithUe4ssConfirmation(operation) {
   try {
     return await operation(false);
   } catch (error) {
-    if (error.code === "ue4ss_conflict" && window.confirm("检测到已有 UE4SS 安装。是否确认替换？")) {
+    const replaceable = error.code === "ue4ss_conflict" && error.details?.markers;
+    if (replaceable && window.confirm("检测到已有 UE4SS 安装。是否确认替换？")) {
       return operation(true);
     }
     throw error;
@@ -631,15 +632,24 @@ async function installWithUe4ssConfirmation(operation) {
 }
 
 async function installFixedUe4ss(endpoint) {
-  const result = await installWithUe4ssConfirmation((confirmReplace) => request(endpoint, {
-    method: "POST", body: confirmReplace ? { confirm_replace: true } : {}, timeout: 120000,
-  }));
-  $("#ue4ssResult").textContent = result.message || "UE4SS 安装完成";
-  if (endpoint === "/api/ue4ss/install-upstream") {
-    state.ue4ssUpdateAvailable = false;
-    $("#installUe4ssUpdate").hidden = true;
+  const output = $("#ue4ssResult");
+  output.textContent = endpoint === "/api/ue4ss/install-bundled"
+    ? "正在安装内置 UE4SS…" : "正在安装 UE4SS 更新…";
+  try {
+    const result = await installWithUe4ssConfirmation((confirmReplace) => request(endpoint, {
+      method: "POST", body: confirmReplace ? { confirm_replace: true } : {}, timeout: 120000,
+    }));
+    output.textContent = result.message || "UE4SS 安装完成";
+    if (endpoint === "/api/ue4ss/install-upstream") {
+      state.ue4ssUpdateAvailable = false;
+      $("#installUe4ssUpdate").hidden = true;
+    }
+    await loadUe4ssStatus();
+    toast("UE4SS 安装完成", "success");
+  } catch (error) {
+    output.textContent = `UE4SS 安装失败：${actionableErrorMessage(error)}`;
+    throw error;
   }
-  await loadUe4ssStatus();
 }
 
 async function installZip(file) {

@@ -534,6 +534,24 @@ def test_import_lifecycle_and_mod_generation_contract():
     assert "externalSignal" in api
 
 
+def test_ue4ss_install_reports_progress_and_only_confirms_replaceable_installations():
+    app = APP.read_text(encoding="utf-8")
+    confirmation = re.search(
+        r"async function installWithUe4ssConfirmation\(operation\) \{(.*?)^\}",
+        app, re.S | re.M,
+    )
+    assert confirmation and "error.details?.markers" in confirmation.group(1)
+    installer = re.search(
+        r"async function installFixedUe4ss\(endpoint\) \{(.*?)^\}",
+        app, re.S | re.M,
+    )
+    assert installer
+    body = installer.group(1)
+    assert "正在安装内置 UE4SS" in body
+    assert "UE4SS 安装失败" in body
+    assert 'toast("UE4SS 安装完成", "success")' in body
+
+
 def test_ue4ss_card_uses_fixed_palworld_sources_and_real_actions():
     html = HTML.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")

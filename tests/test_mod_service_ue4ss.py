@@ -463,6 +463,32 @@ def test_bundled_bytes_require_complete_palworld_layout(fake_game_root, monkeypa
         )
 
 
+def test_installer_stages_transaction_on_game_volume_before_atomic_publish(
+    fake_game_root, monkeypatch
+):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    win64 = fake_game_root / "Pal" / "Binaries" / "Win64"
+    observed = []
+    original_mkdtemp = ue4ss_installer.tempfile.mkdtemp
+
+    def same_volume_mkdtemp(*args, **kwargs):
+        prefix = kwargs.get("prefix", "")
+        directory = kwargs.get("dir")
+        if prefix == ".paldeck-ue4ss-":
+            observed.append((prefix, Path(directory) if directory is not None else None))
+            assert Path(directory) == win64
+        return original_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(ue4ss_installer.tempfile, "mkdtemp", same_volume_mkdtemp)
+    result = ue4ss_installer.install_from_bytes(
+        fake_game_root, _palworld_archive_bytes(), require_palworld_layout=True
+    )
+
+    assert result["ok"] is True
+    assert observed == [(".paldeck-ue4ss-", win64)]
+    assert not any(path.name.startswith(".paldeck-ue4ss-") for path in win64.iterdir())
+
+
 def test_bundled_bytes_use_same_in_memory_snapshot_and_strict_policy(
     fake_game_root, monkeypatch
 ):
