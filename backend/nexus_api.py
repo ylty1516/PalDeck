@@ -115,6 +115,10 @@ def _number(value: Any) -> int:
         return 0
 
 
+def _is_explicitly_safe(node: dict[str, Any]) -> bool:
+    return type(node.get("adultContent")) is bool and node["adultContent"] is False
+
+
 def _normalize(node: dict[str, Any]) -> dict[str, Any]:
     mod_id = _number(node.get("modId")) or None
     picture = node.get("pictureUrl") or node.get("thumbnailUrl") or ""
@@ -133,7 +137,7 @@ def _normalize(node: dict[str, Any]) -> dict[str, Any]:
         "created": text("createdAt"),
         "updated": text("updatedAt"),
         "url": f"https://www.nexusmods.com/{GAME_DOMAIN}/mods/{mod_id}" if mod_id else "",
-        "adultContent": node.get("adultContent") is True,
+        "adultContent": not _is_explicitly_safe(node),
     }
 
 
@@ -245,7 +249,7 @@ class NexusCatalog:
 
     @staticmethod
     def _safe_items(items: list[Any]) -> list[dict[str, Any]]:
-        return [item for item in items if isinstance(item, dict) and item.get("adultContent") is not True]
+        return [item for item in items if isinstance(item, dict) and _is_explicitly_safe(item)]
 
     @classmethod
     def _cache_result(cls, cached: dict[str, Any], *, stale: bool = False, warning: str = "") -> dict[str, Any]:

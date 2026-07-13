@@ -55,9 +55,9 @@ def test_popular_normalizes_fields_and_never_trusts_response_url(tmp_path):
     }]
 
 
-def test_missing_fields_are_safe_and_non_https_images_are_removed(tmp_path):
+def test_missing_optional_fields_are_safe_and_non_https_images_are_removed(tmp_path):
     result = NexusCatalog(tmp_path, transport=Transport([payload([
-        {"modId": 7, "pictureUrl": "http://unsafe.example/x"},
+        {"modId": 7, "pictureUrl": "http://unsafe.example/x", "adultContent": False},
     ])])).popular()
     item = result["items"][0]
     assert item == {
@@ -66,6 +66,18 @@ def test_missing_fields_are_safe_and_non_https_images_are_removed(tmp_path):
         "created": "", "updated": "", "url": "https://www.nexusmods.com/palworld/mods/7",
         "adultContent": False,
     }
+
+
+@pytest.mark.parametrize("adult_value", [None, "true", 1, {}])
+def test_normalize_treats_non_false_adult_markers_as_sensitive(adult_value):
+    assert nexus_api._normalize(node(adultContent=adult_value))["adultContent"] is True
+
+
+def test_normalize_treats_missing_adult_marker_as_sensitive():
+    upstream = node()
+    upstream.pop("adultContent")
+
+    assert nexus_api._normalize(upstream)["adultContent"] is True
 
 
 def test_search_uses_variables_so_injection_never_enters_query(tmp_path):
@@ -147,6 +159,29 @@ def test_invalid_sort_count_and_id_are_rejected_before_transport(tmp_path):
     assert transport.calls == []
 
 
+@pytest.mark.parametrize("adult_value", [None, "true", 1, {}])
+def test_live_results_fail_closed_for_non_false_adult_markers(tmp_path, adult_value):
+    result = NexusCatalog(tmp_path, transport=Transport([payload([
+        node(modId=1, name="Safe", adultContent=False),
+        node(modId=2, name="SECRET", adultContent=adult_value),
+    ])])).popular()
+
+    assert [item["nexus_id"] for item in result["items"]] == [1]
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_live_results_fail_closed_for_missing_adult_marker(tmp_path):
+    malformed = node(modId=2, name="SECRET")
+    malformed.pop("adultContent")
+
+    result = NexusCatalog(tmp_path, transport=Transport([payload([
+        node(modId=1, name="Safe", adultContent=False), malformed,
+    ])])).popular()
+
+    assert [item["nexus_id"] for item in result["items"]] == [1]
+    assert "SECRET" not in json.dumps(result)
+
+
 @pytest.mark.parametrize("sort", ["downloads", "endorsements", "latest"])
 def test_popular_sorts_exclude_adult_content_and_preserve_safe_order(tmp_path, sort):
     transport = Transport([payload([
@@ -204,6 +239,42 @@ def test_fresh_legacy_cache_is_filtered_without_leaking_adult_metadata(tmp_path)
 
     assert [item["nexus_id"] for item in result["items"]] == [1, 3]
     assert result["source"] == "cache" and result["stale"] is False
+    assert "SECRET" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("adult_value", [None, "true", 1, {}])
+def test_cache_fails_closed_for_non_false_adult_markers(tmp_path, adult_value):
+    catalog = NexusCatalog(tmp_path, transport=Transport([]), ttl=600)
+    store = catalog._store("sort", {"sort": "downloads", "count": 24})
+    store.write({
+        "items": [
+            {**nexus_api._normalize(node(modId=1, name="Safe")), "adultContent": False},
+            {**nexus_api._normalize(node(modId=2, name="SECRET")), "adultContent": adult_value},
+        ],
+        "timestamp": time.time(),
+        "fetched_at": "2026-07-12T00:00:00Z",
+    })
+
+    result = catalog.popular()
+
+    assert [item["nexus_id"] for item in result["items"]] == [1]
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_cache_fails_closed_for_missing_adult_marker(tmp_path):
+    catalog = NexusCatalog(tmp_path, transport=Transport([]), ttl=600)
+    store = catalog._store("sort", {"sort": "downloads", "count": 24})
+    unsafe = nexus_api._normalize(node(modId=2, name="SECRET"))
+    unsafe.pop("adultContent")
+    store.write({
+        "items": [nexus_api._normalize(node(modId=1, name="Safe")), unsafe],
+        "timestamp": time.time(),
+        "fetched_at": "2026-07-12T00:00:00Z",
+    })
+
+    result = catalog.popular()
+
+    assert [item["nexus_id"] for item in result["items"]] == [1]
     assert "SECRET" not in json.dumps(result)
 
 
