@@ -10,6 +10,8 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 
 # Pillow is reproducibly pinned by requirements-lock.txt (currently 12.3.0).
+VIEWS = ("mods", "import", "nexus", "settings", "credits")
+SIZES = ("1600x1000", "1280x820", "960x640")
 IMAGE_NAME = re.compile(r"^(mods|import|nexus|settings|credits)-(1600x1000|1280x820|960x640)\.png$")
 
 
@@ -40,18 +42,26 @@ def normalized_difference(candidate: Image.Image, baseline: Image.Image) -> floa
     return sum(channel_means) / (len(channel_means) * 255.0)
 
 
-def compare(candidate_dir: Path, baseline_dir: Path, tolerance: float, allow_missing: bool) -> int:
+def compare(
+    candidate_dir: Path, baseline_dir: Path, tolerance: float, allow_missing: bool,
+    views: tuple[str, ...], sizes: tuple[str, ...],
+) -> int:
     candidate_paths = sorted(candidate_dir.glob("*.png")) if candidate_dir.is_dir() else []
     if not candidate_paths:
         print(f"No candidate screenshots found: {candidate_dir}", file=sys.stderr)
         return 2
 
-    failures: list[str] = []
+    expected_names = {f"{view}-{size}.png" for view in views for size in sizes}
+    present_names = {path.name for path in candidate_paths}
+    failures = [f"missing candidate screenshot: {name}" for name in sorted(expected_names - present_names)]
+    failures.extend(f"unexpected screenshot name: {name}" for name in sorted(present_names - expected_names))
     candidates: list[tuple[Path, tuple[int, int], Image.Image]] = []
     for candidate_path in candidate_paths:
+        if candidate_path.name not in expected_names:
+            continue
         size = expected_size(candidate_path)
         if size is None:
-            failures.append(f"unexpected screenshot name: {candidate_path.name}")
+            failures.append(f"invalid screenshot name: {candidate_path.name}")
             continue
         try:
             with Image.open(candidate_path) as source:
@@ -119,10 +129,14 @@ def main() -> int:
     parser.add_argument("baseline_dir", type=Path)
     parser.add_argument("--tolerance", type=float, default=0.0, help="maximum normalized mean absolute difference (0..1)")
     parser.add_argument("--allow-missing-baseline", action="store_true", help="report missing baselines without failing; never creates them")
+    parser.add_argument("--views", nargs="+", choices=VIEWS, default=list(VIEWS))
+    parser.add_argument("--sizes", nargs="+", choices=SIZES, default=list(SIZES))
     args = parser.parse_args()
     if not 0.0 <= args.tolerance <= 1.0:
         parser.error("--tolerance must be between 0 and 1")
-    return compare(args.candidate_dir, args.baseline_dir, args.tolerance, args.allow_missing_baseline)
+    views = tuple(dict.fromkeys(args.views))
+    sizes = tuple(dict.fromkeys(args.sizes))
+    return compare(args.candidate_dir, args.baseline_dir, args.tolerance, args.allow_missing_baseline, views, sizes)
 
 
 if __name__ == "__main__":

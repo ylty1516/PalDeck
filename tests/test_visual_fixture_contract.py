@@ -1,5 +1,6 @@
 import http.cookiejar
 import json
+import re
 import subprocess
 import sys
 import time
@@ -105,18 +106,70 @@ def test_visual_assets_are_excluded_from_release_build_and_baselines_are_never_w
     assert "shutil.copy" not in compare.lower()
 
 
-def test_capture_script_covers_matrix_edge_cleanup_and_stability_budget():
+def test_capture_script_covers_matrix_ready_handshake_timeout_and_process_tree_cleanup():
     source = (ROOT / "scripts" / "capture_ui.ps1").read_text(encoding="utf-8-sig")
     for view in VIEWS:
         assert f'"{view}"' in source
     for size in ("1600x1000", "1280x820", "960x640"):
         assert size in source
-    assert "msedge.exe" in source.lower()
-    assert "--headless" in source
-    assert "--virtual-time-budget=3000" in source
-    assert "finally" in source
-    assert "fixture_server.py" in source
-    assert "OutputPath" in source
+    for token in (
+        "msedge.exe", "--headless", "--virtual-time-budget=3000", "finally",
+        "fixture_server.py", "OutputPath", "--ready-dir", "capture=", ".ready",
+        "WaitForExit", "taskkill.exe", "/T", "/F", "Quote-NativeArgument",
+    ):
+        assert token in source
+
+
+def test_capture_native_argument_quoting_preserves_paths_with_spaces(tmp_path):
+    source = (ROOT / "scripts" / "capture_ui.ps1").read_text(encoding="utf-8-sig")
+    quote = re.search(r"function Quote-NativeArgument.*?^}", source, re.MULTILINE | re.DOTALL)
+    join = re.search(r"function Join-NativeArguments.*?^}", source, re.MULTILINE | re.DOTALL)
+    assert quote and join
+    probe = tmp_path / "quote-probe.ps1"
+    probe.write_text(
+        '$ErrorActionPreference = "Stop"\n'
+        + quote.group(0) + "\n" + join.group(0)
+        + '\nJoin-NativeArguments @("plain", "C:\\\\folder with spaces\\\\file.png")\n',
+        encoding="utf-8-sig",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-File", str(probe)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'plain "C:\\\\folder with spaces\\\\file.png"' in result.stdout.strip()
+
+
+def test_fixture_ready_endpoint_atomically_records_unique_capture_token(tmp_path):
+    ready = tmp_path / "port"
+    markers = tmp_path / "ready markers"
+    process = subprocess.Popen(
+        [sys.executable, str(VISUAL / "fixture_server.py"), "--port", "0", "--ready-file", str(ready), "--ready-dir", str(markers)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        for _ in range(100):
+            if ready.exists():
+                break
+            assert process.poll() is None, process.stderr.read()
+            time.sleep(0.02)
+        port = int(ready.read_text(encoding="ascii"))
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/__visual_ready__?capture=abc123&view=nexus",
+            data=b"", method="POST",
+        )
+        payload = json.load(urllib.request.urlopen(request))
+        assert payload == {"ok": True}
+        assert (markers / "abc123.ready").read_text(encoding="ascii") == "nexus"
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{port}/__visual_ready__?capture=../escape&view=nexus",
+                data=b"", method="POST",
+            ))
+        assert error.value.code == 400
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def _save_valid_candidate(image_module, directory):
@@ -127,9 +180,10 @@ def _save_valid_candidate(image_module, directory):
     image.save(directory / "mods-1600x1000.png")
 
 
-def _run_compare(candidate, baseline, *options):
+def _run_compare(candidate, baseline, *options, full_matrix=False):
+    matrix = [] if full_matrix else ["--views", "mods", "--sizes", "1600x1000"]
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "compare_ui_screenshots.py"), str(candidate), str(baseline), *options],
+        [sys.executable, str(ROOT / "scripts" / "compare_ui_screenshots.py"), str(candidate), str(baseline), *matrix, *options],
         capture_output=True, text=True, check=False,
     )
 
@@ -146,6 +200,16 @@ def test_compare_requires_approval_only_after_validating_candidate(tmp_path):
     allowed = _run_compare(candidate, baseline, "--allow-missing-baseline")
     assert allowed.returncode == 0
     assert not baseline.exists(), "comparison must never create or approve a baseline"
+
+
+def test_compare_rejects_incomplete_default_five_by_three_matrix(tmp_path):
+    image_module = pytest.importorskip("PIL.Image")
+    candidate = tmp_path / "candidate"
+    baseline = tmp_path / "approved"
+    _save_valid_candidate(image_module, candidate)
+    result = _run_compare(candidate, baseline, "--allow-missing-baseline", full_matrix=True)
+    assert result.returncode != 0
+    assert "missing candidate screenshot" in (result.stdout + result.stderr).lower()
 
 
 @pytest.mark.parametrize("kind", ["missing", "bad-png", "wrong-size", "blank"])

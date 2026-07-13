@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,8 +19,11 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 INJECTION_TAG = '<script type="module" src="/__fixture__.js"></script>'
 
 FIXTURE_SCRIPT = r'''const allowed = new Set(["mods", "import", "nexus", "settings", "credits"]);
-const requested = new URLSearchParams(window.location.search).get("view") || "mods";
+const parameters = new URLSearchParams(window.location.search);
+const requested = parameters.get("view") || "mods";
+const capture = parameters.get("capture") || "";
 if (!allowed.has(requested)) throw new TypeError("Unknown visual fixture view");
+if (!/^[A-Za-z0-9_-]{6,64}$/.test(capture)) throw new TypeError("Invalid visual capture token");
 window.__VISUAL_READY__ = false;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const waitUntil = async (predicate, label) => {
@@ -58,6 +62,12 @@ await Promise.all([...document.images].map((image) => image.complete ? null : ne
   image.addEventListener("error", resolve, { once: true });
 })));
 await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+const readyResponse = await fetch(`/__visual_ready__?capture=${encodeURIComponent(capture)}&view=${encodeURIComponent(requested)}`, {
+  method: "POST",
+  headers: { "Content-Type": "application/octet-stream" },
+  body: new Uint8Array(),
+});
+if (!readyResponse.ok) throw new Error("Visual fixture ready handshake failed");
 document.documentElement.dataset.visualReady = "true";
 window.__VISUAL_READY__ = true;
 '''
@@ -68,6 +78,9 @@ def load_fixtures() -> dict[str, dict]:
         view: json.loads((FIXTURES / f"{view}.json").read_text(encoding="utf-8"))
         for view in ALLOWED_VIEWS
     }
+
+
+CAPTURE_TOKEN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -96,6 +109,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if separator and key == "visual_fixture_view" and value in ALLOWED_VIEWS:
                 return value
         return "mods"
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urlsplit(self.path)
+        if parsed.path != "/__visual_ready__":
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+            return
+        query = parse_qs(parsed.query)
+        capture = query.get("capture", [""])[0]
+        view = query.get("view", [""])[0]
+        ready_dir = self.server.ready_dir  # type: ignore[attr-defined]
+        if not CAPTURE_TOKEN.fullmatch(capture) or view not in ALLOWED_VIEWS or ready_dir is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid ready marker"})
+            return
+        marker = ready_dir / f"{capture}.ready"
+        temporary = ready_dir / f".{capture}.tmp"
+        temporary.write_text(view, encoding="ascii")
+        temporary.replace(marker)
+        self._json(HTTPStatus.OK, {"ok": True})
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlsplit(self.path)
@@ -152,14 +183,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0, help="loopback port; 0 chooses a random free port")
     parser.add_argument("--ready-file", type=Path, help="optional file receiving the selected port")
+    parser.add_argument("--ready-dir", type=Path, help="directory for per-capture ready markers")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("port must be between 0 and 65535")
 
     server = ThreadingHTTPServer((HOST, args.port), FixtureHandler)
     server.fixtures = load_fixtures()  # type: ignore[attr-defined]
+    server.ready_dir = args.ready_dir.resolve() if args.ready_dir else None  # type: ignore[attr-defined]
+    if server.ready_dir is not None:  # type: ignore[attr-defined]
+        server.ready_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
     port = server.server_address[1]
     if args.ready_file:
+        args.ready_file.parent.mkdir(parents=True, exist_ok=True)
         args.ready_file.write_text(str(port), encoding="ascii")
     print(f"READY http://{HOST}:{port}", flush=True)
     try:

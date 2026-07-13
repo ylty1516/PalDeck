@@ -51,6 +51,13 @@ test("deriveModView normalizes missing source to local and supports all or empty
   assert.deepEqual(mods, snapshot);
 });
 
+test("deriveModView safely excludes malformed records", () => {
+  const valid = { id: "ok", name: "Safe", source: "local", status: "enabled" };
+  const result = deriveModView([null, [], "bad", 42, valid], { source: "local", query: "safe" });
+  assert.deepEqual(result.items, [valid]);
+  assert.deepEqual(result.stats, { total: 1, enabled: 1, disabled: 0, abnormal: 0 });
+});
+
 test("import queue transitions immutably through start and success", () => {
   const files = Object.freeze([Object.freeze({ id: "a", name: "a.zip" }), Object.freeze({ id: "b", name: "b.pak" })]);
   const initial = createImportQueue(files);
@@ -66,6 +73,12 @@ test("import queue transitions immutably through start and success", () => {
   assert.deepEqual(complete[0].result, { installed: true });
   assert.equal(initial[0].status, "queued");
   assert.deepEqual(files, [{ id: "a", name: "a.zip" }, { id: "b", name: "b.pak" }]);
+});
+
+test("createImportQueue assigns stable unique ids across explicit and generated collisions", () => {
+  const queue = createImportQueue([{ id: "2" }, {}, { id: "2" }, {}]);
+  assert.deepEqual(queue.map(({ id }) => id), ["2", "2-2", "2-3", "4"]);
+  assert.equal(new Set(queue.map(({ id }) => id)).size, queue.length);
 });
 
 test("conflict pauses later items and permits at most one active item", () => {

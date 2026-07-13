@@ -26,7 +26,9 @@ function containsQuery(mod, query) {
 }
 
 export function deriveModView(mods, { query = "", source = "", status = "" } = {}) {
-  const sourceItems = Array.isArray(mods) ? mods : [];
+  const sourceItems = Array.isArray(mods)
+    ? mods.filter((mod) => mod !== null && typeof mod === "object" && !Array.isArray(mod))
+    : [];
   const states = sourceItems.map(normalizedModState);
   const stats = {
     total: sourceItems.length,
@@ -48,11 +50,15 @@ export function deriveModView(mods, { query = "", source = "", status = "" } = {
 
 export function createImportQueue(entries = []) {
   if (!Array.isArray(entries)) throw new TypeError("Import queue entries must be an array");
-  return entries.map((entry, index) => ({
-    ...entry,
-    id: entry?.id ?? String(index + 1),
-    status: "queued",
-  }));
+  const used = new Set();
+  return entries.map((entry, index) => {
+    const base = String(entry?.id ?? index + 1);
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) id = `${base}-${suffix++}`;
+    used.add(id);
+    return { ...entry, id, status: "queued" };
+  });
 }
 
 function transitionAllowed(status, type) {
