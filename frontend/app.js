@@ -7,6 +7,7 @@ import {
 } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
 import { callWindowControl, initializeWindowControls } from "./window-controls.js";
+import { deriveModView } from "./ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
@@ -31,7 +32,7 @@ const UE4SS_WRITE_ACTIONS = new Set([
   "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip",
 ]);
 const LOCAL_INPUT_ACTIONS = new Set([
-  "filterMods", "changeImportType", "editImportName", "editImportNexusId",
+  "filterMods", "filterModSource", "filterModStatus", "changeImportType", "editImportName", "editImportNexusId",
   "editNexusQuery", "editGamePath", "changeMask", "changeBlur", "changePetals",
 ]);
 
@@ -212,16 +213,22 @@ async function loadMods() {
   }
 }
 
+function renderModStats(stats) {
+  $("#statTotal").textContent = String(stats.total);
+  $("#statEnabled").textContent = String(stats.enabled);
+  $("#statDisabled").textContent = String(stats.disabled);
+  $("#statAbnormal").textContent = String(stats.abnormal);
+}
+
 function filterMods() {
-  const query = $("#modFilter").value.trim().toLocaleLowerCase();
-  const filtered = state.mods.filter((mod) => !query || [
-    mod.name, mod.mod_type, mod.nexus_id, mod.status, mod.author,
-    mod.install_types, mod.package_name, mod.workshop_id, mod.dependencies,
-  ].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)));
-  const enabled = state.mods.filter((mod) => (mod.status || mod.audit?.status) === "enabled").length;
-  const abnormal = state.mods.filter((mod) => !["enabled", "disabled"].includes(mod.status || mod.audit?.status)).length;
-  $("#modStats").textContent = `共 ${state.mods.length} 个 · 显示 ${filtered.length} 个 · 已启用 ${enabled} 个 · 异常 ${abnormal} 个`;
-  renderMods($("#modList"), filtered);
+  const view = deriveModView(state.mods, {
+    query: $("#modFilter").value,
+    source: $("#modSourceFilter").value,
+    status: $("#modStatusFilter").value,
+  });
+  renderModStats(view.stats);
+  $("#modResultCount").textContent = `${view.items.length} 项`;
+  renderMods($("#modList"), view.items);
 }
 
 function isSupportedModFile(file) {
@@ -555,6 +562,8 @@ export const ACTION_HANDLERS = Object.freeze({
   refreshMods: async () => loadMods(),
   openModsFolder: async () => request("/api/mods/open-folder"),
   filterMods: () => filterMods(),
+  filterModSource: () => filterMods(),
+  filterModStatus: () => filterMods(),
   chooseModFile: () => $("#modFileInput").click(),
   selectModFile: async (event) => executeModFileSelection(event.currentTarget.files?.[0] || null),
   changeImportType: noop,

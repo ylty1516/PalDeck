@@ -36,73 +36,86 @@ const MOD_STATUS = Object.freeze({
 });
 
 export function renderMods(container, mods) {
-  if (!mods.length) return renderMessage(container, "暂无模组，请从“导入安装”添加。", "empty-state glass-panel");
+  if (!mods.length) return renderMessage(container, "没有符合当前条件的模组。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
-    if (mod.source === "steam_workshop") {
-      const status = mod.enabled === true ? "enabled" : (mod.valid === false ? "conflict" : "disabled");
-      const card = el("article", `mod-card glass-panel source-workshop status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
-      card.dataset.id = String(mod.workshop_id);
-      const main = el("div", "mod-main");
-      const title = el("h3", "mod-title", mod.name || mod.mod_name || `Workshop ${mod.workshop_id}`);
-      title.append(" ", el("span", "badge source-badge", "Steam Workshop"));
-      const types = Array.isArray(mod.install_types) && mod.install_types.length ? mod.install_types.join(" / ") : "未知";
-      const dependencies = Array.isArray(mod.dependencies) && mod.dependencies.length ? mod.dependencies.join(", ") : "无";
-      main.append(
-        title,
-        el("p", "mod-meta", `${mod.enabled ? "已启用" : "已禁用"} · Workshop ID ${mod.workshop_id} · 作者 ${mod.author || "未知"} · 版本 ${mod.version || "未知"}`),
-        el("p", "mod-meta workshop-details", `类型 ${types} · 依赖 ${dependencies}`),
-        el("p", "mod-meta workshop-state", `全局开关：${mod.global_enabled ? "开启" : "关闭"} · ${mod.deployed ? "已部署" : "未部署"}${mod.needs_restart ? " · 下次启动生效" : ""}`),
-        el("p", "mod-path", mod.source_dir || ""),
-      );
-      const actions = el("div", "button-row");
-      const toggle = actionButton(mod.enabled ? "禁用" : "启用", "toggleWorkshop", "btn");
-      toggle.dataset.id = String(mod.workshop_id);
-      toggle.dataset.enabled = String(!mod.enabled);
-      toggle.disabled = mod.can_toggle === false;
-      const open = actionButton("文件夹", "openWorkshopFolder", "btn");
-      open.dataset.id = String(mod.workshop_id);
-      const steam = actionButton("Steam 页面", "openSteamWorkshop", "btn");
-      steam.dataset.id = String(mod.workshop_id);
-      actions.append(toggle, open, steam);
-      card.append(main, actions);
-      fragment.append(card);
-      continue;
-    }
-    const status = MOD_STATUS[mod.status || mod.audit?.status] ? (mod.status || mod.audit.status) : (mod.enabled ? "enabled" : "disabled");
+    const workshop = mod.source === "steam_workshop";
+    const rawStatus = workshop
+      ? (mod.valid === false ? "conflict" : (mod.enabled === true ? "enabled" : "disabled"))
+      : (mod.status || mod.audit?.status || (mod.enabled === true ? "enabled" : "disabled"));
+    const status = MOD_STATUS[rawStatus] ? rawStatus : "conflict";
     const statusInfo = MOD_STATUS[status];
-    const toggleAllowed = status === "enabled" || status === "disabled";
-    const card = el("article", `mod-card glass-panel status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
-    card.dataset.id = String(mod.id);
-    const main = el("div", "mod-main");
-    const title = el("h3", "mod-title", mod.name || "未命名模组");
-    const badge = el("span", "badge", mod.mod_type || "unknown");
-    title.append(" ", badge);
-    main.append(title);
-    const meta = el("p", "mod-meta");
-    meta.append(text(statusInfo.label), text(` · ${formatBytes(mod.size_bytes)}`));
-    if (mod.nexus_id != null) meta.append(text(` · N#${mod.nexus_id}`));
-    const fileCount = Array.isArray(mod.manifest_files) ? mod.manifest_files.length : (Array.isArray(mod.files) ? mod.files.length : 0);
-    const integrity = el("p", `mod-integrity ${toggleAllowed ? "ok" : "warning"}`, `${statusInfo.integrity} · ${fileCount} 个受管文件`);
-    main.append(meta, integrity, el("p", "mod-path", mod.install_path || ""));
-    if (!toggleAllowed) main.append(el("p", "repair-hint", "请修复文件或重扫；异常状态不可启停。"));
-    const actions = el("div", "button-row");
-    const toggle = actionButton(status === "enabled" ? "禁用" : "启用", "toggleMod", "btn");
-    toggle.dataset.id = String(mod.id);
-    toggle.dataset.enabled = String(status !== "enabled");
-    toggle.disabled = !toggleAllowed;
-    const open = actionButton("文件夹", "openModFolder", "btn");
-    open.dataset.id = String(mod.id);
-    const remove = actionButton("删除", "deleteMod", "btn danger");
-    remove.dataset.id = String(mod.id);
-    actions.append(toggle, open);
-    if (!toggleAllowed) {
-      const rescan = actionButton("重扫", "rescanMods", "btn");
-      rescan.dataset.id = String(mod.id);
-      actions.append(rescan);
+    const toggleAllowed = workshop ? mod.can_toggle !== false && mod.valid !== false : ["enabled", "disabled"].includes(status);
+    const id = String(workshop ? mod.workshop_id : mod.id);
+    const name = mod.name || mod.mod_name || (workshop ? `Workshop ${id}` : "未命名模组");
+    const card = el("article", `mod-row glass-panel${workshop ? " source-workshop" : ""} status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
+    card.dataset.id = id;
+
+    const identity = el("div", "mod-identity");
+    const avatar = el("span", `mod-avatar ${workshop ? "workshop" : "local"}`, workshop ? "W" : (name.trim()[0] || "M").toUpperCase());
+    const identityText = el("div", "mod-identity-text");
+    const title = el("h3", "mod-title", name);
+    title.title = name;
+    const identityMeta = workshop
+      ? `作者：${mod.author || "未提供"} · Workshop ID ${id}`
+      : `作者：${mod.author || "未提供"}${mod.nexus_id != null ? ` · N#${mod.nexus_id}` : ""}`;
+    identityText.append(title, el("p", "mod-meta", identityMeta));
+    identity.append(avatar, identityText);
+
+    const source = el("div", "mod-source-cell");
+    const types = workshop
+      ? (Array.isArray(mod.install_types) && mod.install_types.length ? mod.install_types.join(" / ") : "未知")
+      : (mod.mod_type || "unknown");
+    const typeDetails = workshop ? types : `${types} · ${formatBytes(mod.size_bytes)}`;
+    source.append(el("span", `badge${workshop ? " source-badge" : ""}`, workshop ? "Steam Workshop" : "本地模组"), el("small", "mod-type", typeDetails));
+
+    const version = el("div", "mod-version-cell", mod.version || "未提供");
+    const state = el("div", "mod-state-cell");
+    state.append(el("strong", `state-label state-${status}`, statusInfo.label));
+    if (workshop) {
+      const dependencies = Array.isArray(mod.dependencies) && mod.dependencies.length ? mod.dependencies.join(", ") : "无";
+      state.append(
+        el("small", "workshop-state", `全局开关：${mod.global_enabled ? "开启" : "关闭"} · ${mod.deployed ? "已部署" : "未部署"}${mod.needs_restart ? " · 下次启动生效" : ""}`),
+        el("small", "workshop-details", `依赖：${dependencies}${Array.isArray(mod.cleanup_pending) && mod.cleanup_pending.length ? " · 清理待完成" : ""}`),
+      );
+    } else {
+      const fileCount = Array.isArray(mod.manifest_files) ? mod.manifest_files.length : (Array.isArray(mod.files) ? mod.files.length : 0);
+      state.append(el("small", toggleAllowed ? "ok" : "warning", `${statusInfo.integrity} · ${fileCount} 个受管文件`));
+      if (!toggleAllowed) state.append(el("small", "repair-hint", "请修复文件或重扫；异常状态不可启停。"));
     }
-    actions.append(remove);
-    card.append(main, actions);
+
+    const actions = el("div", "button-row mod-actions");
+    if (workshop) {
+      const toggle = actionButton(mod.enabled ? "禁用" : "启用", "toggleWorkshop", "btn compact");
+      toggle.dataset.id = id;
+      toggle.dataset.enabled = String(!mod.enabled);
+      toggle.disabled = !toggleAllowed;
+      const open = actionButton("文件夹", "openWorkshopFolder", "btn compact");
+      open.dataset.id = id;
+      const steam = actionButton("Steam 页面", "openSteamWorkshop", "btn compact");
+      steam.dataset.id = id;
+      actions.append(toggle, open, steam);
+    } else {
+      const toggle = actionButton(status === "enabled" ? "禁用" : "启用", "toggleMod", "btn compact");
+      toggle.dataset.id = id;
+      toggle.dataset.enabled = String(status !== "enabled");
+      toggle.disabled = !toggleAllowed;
+      const open = actionButton("文件夹", "openModFolder", "btn compact");
+      open.dataset.id = id;
+      const remove = actionButton("删除", "deleteMod", "btn compact danger");
+      remove.dataset.id = id;
+      actions.append(toggle, open);
+      if (!toggleAllowed) {
+        const rescan = actionButton("重扫", "rescanMods", "btn compact");
+        rescan.dataset.id = id;
+        actions.append(rescan);
+      }
+      actions.append(remove);
+    }
+
+    const path = el("p", "mod-path mod-row-path", mod.source_dir || mod.install_path || "");
+    path.title = path.textContent;
+    card.append(identity, source, version, state, actions, path);
     fragment.append(card);
   }
   container.replaceChildren(fragment);

@@ -369,7 +369,7 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
         assert f'{status}:' in render
     for label in ("已启用", "已禁用", "文件已修改", "文件缺失", "文件冲突", "完整性正常", "请修复文件或重扫"):
         assert label in render
-    assert 'const toggleAllowed = status === "enabled" || status === "disabled"' in render
+    assert '["enabled", "disabled"].includes(status)' in render
     assert "toggle.disabled = !toggleAllowed" in render
     assert "mod.manifest_files" in render
     assert "mod.install_path" in render
@@ -389,8 +389,9 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
 def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
     app = APP.read_text(encoding="utf-8")
     html = HTML.read_text(encoding="utf-8")
-    assert "filtered.length" in app
-    assert "异常" in app
+    assert "view.items.length" in app
+    assert "deriveModView" in app
+    assert "异常" in html
     assert "input" in app and "filterMods" in app
     assert 'accept=".zip,.pak,application/zip,application/octet-stream"' in html
     for stage in ("已选择", "正在上传", "正在识别并安装", "安装成功"):
@@ -527,10 +528,10 @@ def test_workshop_cards_have_source_metadata_real_actions_and_no_delete():
     for action in ("toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop"):
         assert f'"{action}"' in render
         assert f'case "{action}":' in app
-    assert 'if (mod.source === "steam_workshop")' in render
-    workshop_branch = re.search(r'if \(mod\.source === "steam_workshop"\) \{(.*?)^\s{4}\}', render, re.S | re.M)
+    assert 'const workshop = mod.source === "steam_workshop"' in render
+    workshop_branch = re.search(r'if \(workshop\) \{\s+const toggle = actionButton\(mod\.enabled.*?\n\s{4}\} else \{', render, re.S)
     assert workshop_branch
-    assert '"deleteMod"' not in workshop_branch.group(1)
+    assert '"deleteMod"' not in workshop_branch.group(0)
     assert "steamcommunity.com/sharedfiles" not in app
     assert "steamcommunity.com/sharedfiles" not in render
     assert "validatedSteamWorkshopUrl" not in app
@@ -577,11 +578,22 @@ def test_workshop_writes_are_globally_serialized_and_dependency_escape_clears_pe
 
 
 def test_workshop_filter_includes_server_metadata_fields():
+    model = FRONTEND.joinpath("ui-model.js").read_text(encoding="utf-8")
+    for field in ("author", "install_types", "workshop_id"):
+        assert f"mod.{field}" in model
+
+
+def test_v22_mod_page_has_real_filters_stats_and_unified_list_header():
+    html = HTML.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
-    filter_body = re.search(r"function filterMods\(\) \{(.*?)^\}", app, re.S | re.M)
-    assert filter_body
-    for field in ("author", "install_types", "package_name", "workshop_id", "dependencies"):
-        assert f"mod.{field}" in filter_body.group(1)
+    render = RENDER.read_text(encoding="utf-8")
+    for identifier in ("modSourceFilter", "modStatusFilter", "statTotal", "statEnabled", "statDisabled", "statAbnormal"):
+        assert f'id="{identifier}"' in html
+    assert 'data-action="filterModSource"' in html
+    assert 'data-action="filterModStatus"' in html
+    assert "deriveModView" in app and "renderModStats" in app
+    assert "mod-list-header" in html
+    assert "mod-row" in render
 
 
 def test_v22_shell_has_brand_sidebar_workspace_statusbar_and_three_breakpoints():

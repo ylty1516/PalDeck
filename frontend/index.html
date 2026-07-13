@@ -44,12 +44,22 @@
       </header>
 
       <section id="view-mods" class="view active" aria-labelledby="viewTitle">
-        <div class="toolbar glass-panel">
-          <label class="grow">筛选模组<input id="modFilter" type="search" data-action="filterMods" placeholder="名称、类型或 N 网尾号"></label>
-          <span id="modStats">共 0 个模组</span>
+        <div class="mod-overview glass-panel">
+          <div class="mod-search-row">
+            <label class="search-field grow"><span class="search-icon" data-icon="search"></span><span class="sr-only">搜索模组</span><input id="modFilter" type="search" data-action="filterMods" placeholder="搜索名称、类型或 N 网尾号"></label>
+            <label class="compact-filter"><span>来源</span><select id="modSourceFilter" data-action="filterModSource"><option value="all">全部来源</option><option value="local">本地模组</option><option value="steam_workshop">Steam Workshop</option></select></label>
+            <label class="compact-filter"><span>状态</span><select id="modStatusFilter" data-action="filterModStatus"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已禁用</option><option value="abnormal">异常</option></select></label>
+          </div>
+          <div id="modStats" class="mod-stats" aria-label="模组统计">
+            <article><span class="stat-icon blue" data-icon="mods"></span><span><small>全部模组</small><strong id="statTotal">0</strong></span></article>
+            <article><span class="stat-icon green" data-icon="status"></span><span><small>已启用</small><strong id="statEnabled">0</strong></span></article>
+            <article><span class="stat-icon gray" data-icon="minimize"></span><span><small>已禁用</small><strong id="statDisabled">0</strong></span></article>
+            <article><span class="stat-icon red" data-icon="close"></span><span><small>异常</small><strong id="statAbnormal">0</strong></span></article>
+          </div>
         </div>
         <div id="modConflictNotice" class="conflict-notice glass-panel" role="alert" hidden></div>
-        <div id="modList" class="card-list" aria-live="polite"></div>
+        <div class="mod-list-header glass-panel" aria-hidden="true"><span>模组信息 <small id="modResultCount">0 项</small></span><span>来源与类型</span><span>版本</span><span>状态</span><span>操作</span></div>
+        <div id="modList" class="card-list mod-table" aria-live="polite"></div>
       </section>
 
       <section id="view-import" class="view" aria-labelledby="viewTitle">
