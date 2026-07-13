@@ -16,6 +16,7 @@ ALLOWED_VIEWS = frozenset({"mods", "import", "nexus", "settings", "credits"})
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+DEFAULT_BACKGROUND = ROOT / "assets" / "default-background.webp"
 INJECTION_TAG = '<script type="module" src="/__fixture__.js"></script>'
 
 FIXTURE_SCRIPT = r'''const allowed = new Set(["mods", "import", "nexus", "settings", "credits"]);
@@ -155,7 +156,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             fixture = self.server.fixtures[self._selected_view()]  # type: ignore[attr-defined]
             api = fixture["api"]
             if path == "/api/appearance/background/current":
-                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "fixture has no background image"})
+                self._send(HTTPStatus.OK, DEFAULT_BACKGROUND.read_bytes(), "image/webp")
                 return
             if path not in api:
                 self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown fixture endpoint"})

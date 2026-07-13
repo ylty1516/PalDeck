@@ -1,3 +1,4 @@
+import { rememberFocus, restoreFocus } from "./a11y.js";
 import { ApiError, request } from "./api.js";
 import { createEffects } from "./effects.js";
 import { hydrateIcons } from "./icons.js";
@@ -344,7 +345,7 @@ async function importSelected(decision = "cancel") {
   beginModsWrite();
   try {
     const sourceName = state.selectedModFile?.name || state.importQueue.find((item) => item.id === state.activeImportId)?.name || "本地文件";
-    $("#importResult").textContent = retryToken || decision !== "cancel"
+    $("#importResult").textContent = retryToken || ["replace", "keep_both"].includes(decision)
       ? "正在识别并安装：应用冲突处理…"
       : (state.selectedModFile ? `正在识别并安装：正在上传 ${state.selectedModFile.name}` : `正在识别并安装：${sourceName}`);
     const result = await request("/api/mods/import", options);
@@ -418,6 +419,7 @@ async function resolveImportConflict(decision) {
 }
 
 function openModal(dialog) {
+  rememberFocus();
   dialog.showModal();
   dialog.querySelector("[autofocus]")?.focus();
 }
@@ -428,7 +430,7 @@ async function cancelImportConflict() {
   beginModsWrite();
   try {
     if (uploadToken) await request("/api/mods/import", { method: "POST", body: { upload_token: uploadToken, decision: "cancel" } });
-    else if (selectionToken) await request("/api/mods/import", { method: "POST", body: { selection_token: selectionToken, decision: "cancel" } });
+    else if (selectionToken) await request("/api/mods/import", { method: "POST", body: { selection_token: selectionToken, cancel: true } });
   } catch (error) {
     if (!(error instanceof ApiError && error.status === 410 && ["upload_expired", "selection_expired"].includes(error.code))) throw error;
   } finally {
@@ -873,6 +875,9 @@ async function init() {
   $("#nexusGrid").addEventListener("click", handleDynamicAction);
   $("#creditsCore").addEventListener("click", handleDynamicAction);
   $("#creditsDependencies").addEventListener("click", handleDynamicAction);
+  for (const dialog of [$("#conflictModal"), $("#deleteModal"), $("#workshopDependencyModal")]) {
+    dialog.addEventListener("close", restoreFocus);
+  }
   $("#conflictModal").addEventListener("cancel", async (event) => {
     event.preventDefault();
     try { await run(null, cancelImportConflict); } catch { /* run displayed the error */ }

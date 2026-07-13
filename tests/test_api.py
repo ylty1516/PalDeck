@@ -416,7 +416,7 @@ def test_native_selection_token_installs_once_without_client_path(app, auth_clie
     grant = app.extensions["import_selection_registry"].issue([archive])[0]
 
     installed = auth_client.post("/api/mods/import", json={
-        "selection_token": grant["selection_token"], "decision": "replace", "type": "auto",
+        "selection_token": grant["selection_token"], "decision": "cancel", "type": "auto",
     })
     assert installed.status_code == 200
     assert installed.json["data"]["name"] == "Example"

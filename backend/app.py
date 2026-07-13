@@ -450,9 +450,11 @@ def create_app(
                 dest = registry.resolve(selection_token)
             except SelectionExpiredError as exc:
                 raise ApiError("本地选择已过期，请重新选择文件夹", 410, "selection_expired") from exc
-            if decision == "cancel":
+            if body.get("cancel") is True:
                 registry.consume(selection_token)
                 return success({"cancelled": True})
+            if "cancel" in body and body.get("cancel") is not False:
+                raise ApiError("cancel 必须是布尔值", 400, "invalid_input")
             nexus = body.get("nexus_id")
             if nexus is not None and (type(nexus) is not int or nexus < 1):
                 raise ApiError("nexus_id 必须是正整数", 400, "invalid_input")
