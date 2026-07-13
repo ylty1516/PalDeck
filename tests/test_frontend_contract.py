@@ -428,6 +428,21 @@ def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
     assert "isSupportedModFile" in app
 
 
+def test_conflict_decisions_have_real_requests_timeout_and_visible_result_feedback():
+    app = APP.read_text(encoding="utf-8")
+    resolver = re.search(r"async function resolveImportConflict\(decision\) \{(.*?)^\}", app, re.S | re.M)
+    assert resolver
+    body = resolver.group(1)
+    assert body.index("modal.close()") < body.index("await importSelected(decision)")
+    assert "正在替换冲突文件" in body and "正在保留两份并安装" in body
+    assert "冲突处理完成" in body and "conflict-inline-error" in body
+    assert "处理失败" in body and "openModal(modal)" in body
+    retry_branch = re.search(r"if \(retryToken\) \{(.*?)\n\s*\} else if", app, re.S)
+    assert retry_branch and "timeout: 120000" in retry_branch.group(1)
+    assert 'resolveImportConflict("replace")' in app
+    assert 'resolveImportConflict("keep_both")' in app
+
+
 def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
     app = APP.read_text(encoding="utf-8")
     assert 'case "rescanMods":' in app
@@ -646,6 +661,9 @@ def test_v22_custom_window_chrome_is_accessible_and_has_native_frame_fallback():
     assert "frameless=not use_native_frame" in backend
     assert "easy_drag=False" in backend
     assert "js_api=bridge" in backend
+    assert '&chrome={0 if use_native_frame else 1}' in backend
+    controls = FRONTEND.joinpath("window-controls.js").read_text(encoding="utf-8")
+    assert "requestedChrome" in controls and "waitForOperation" in controls
 
 
 def test_all_javascript_modules_pass_node_syntax_check():

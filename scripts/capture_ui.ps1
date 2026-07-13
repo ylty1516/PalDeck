@@ -122,7 +122,7 @@ try {
             New-Item -ItemType Directory -Path $profile -Force | Out-Null
             Remove-Item $screenshot -Force -ErrorAction SilentlyContinue
             Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
-            $url = "http://127.0.0.1:$port/index.html?view=$view&capture=$captureToken"
+            $url = "http://127.0.0.1:$port/index.html?view=$view&capture=$captureToken&chrome=1"
             $arguments = @(
                 "--headless=new",
                 "--disable-gpu",

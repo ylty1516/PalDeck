@@ -326,7 +326,7 @@ async function importSelected(decision = "cancel") {
   const selectionToken = state.selectedSelectionToken;
   let options;
   if (retryToken) {
-    options = { method: "POST", body: { upload_token: retryToken, decision } };
+    options = { method: "POST", body: { upload_token: retryToken, decision }, timeout: 120000 };
   } else if (selectionToken) {
     options = { method: "POST", body: {
       selection_token: selectionToken, decision, type: $("#importType").value,
@@ -408,14 +408,28 @@ async function processImportQueue() {
 }
 
 async function resolveImportConflict(decision) {
-  const result = await importSelected(decision);
-  if (result === null) return;
-  transitionActiveImport("succeed", { result });
-  state.pendingUploadToken = null;
-  state.selectedModFile = null;
-  state.selectedSelectionToken = null;
-  $("#conflictModal").close();
-  await processImportQueue();
+  const modal = $("#conflictModal");
+  if (modal.open) modal.close();
+  $("#importResult").textContent = decision === "replace" ? "正在替换冲突文件…" : "正在保留两份并安装…";
+  try {
+    const result = await importSelected(decision);
+    if (result === null) return;
+    transitionActiveImport("succeed", { result });
+    state.pendingUploadToken = null;
+    state.selectedModFile = null;
+    state.selectedSelectionToken = null;
+    $("#importResult").textContent = `冲突处理完成：${result.name || result.mod?.name || "模组"} 已安装`;
+    toast(decision === "replace" ? "已替换原文件并完成安装" : "已保留两者并完成安装", "success");
+    await processImportQueue();
+  } catch (error) {
+    const feedback = document.createElement("p");
+    feedback.className = "conflict-inline-error";
+    feedback.textContent = `处理失败：${actionableErrorMessage(error)}。请确认游戏已退出后重试。`;
+    $("#conflictDetails").prepend(feedback);
+    $("#importResult").textContent = feedback.textContent;
+    if (!modal.open) openModal(modal);
+    throw error;
+  }
 }
 
 function openModal(dialog) {

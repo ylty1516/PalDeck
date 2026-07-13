@@ -96,6 +96,15 @@ def test_index_requires_matching_token_and_redirects_without_token(app):
     assert "test-token" not in response.headers["Location"]
 
 
+def test_index_preserves_only_valid_custom_chrome_contract_across_auth_redirect(app):
+    custom = app.test_client().get("/?token=test-token&chrome=1")
+    native = app.test_client().get("/?token=test-token&chrome=0")
+    invalid = app.test_client().get("/?token=test-token&chrome=javascript:alert(1)")
+    assert custom.headers["Location"].endswith("/?chrome=1")
+    assert native.headers["Location"].endswith("/?chrome=0")
+    assert invalid.headers["Location"].endswith("/")
+
+
 def test_testing_mode_does_not_bypass_auth(app):
     assert app.testing is True
     assert app.test_client().get("/api/mods").status_code == 403

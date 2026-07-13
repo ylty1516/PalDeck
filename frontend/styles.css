@@ -140,6 +140,7 @@ input[type="range"] { min-height: 24px; padding: 0; accent-color: var(--accent);
 .ue4ss-meta { display: inline-block; margin: 4px 12px 10px 0; color: var(--muted); font-size: 12px; }
 .conflict-notice { margin-bottom: 12px; padding: 14px 16px; border-radius: var(--radius); border-color: var(--danger); }
 .conflict-notice[hidden] { display: none; }
+.conflict-inline-error { margin: 0 0 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent); border-radius: 10px; color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--panel-solid)); }
 .mod-card { border-radius: var(--radius); padding: 15px 17px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .source-workshop { border-left: 3px solid #4d88ff; }
 .source-workshop .source-badge { color: #dbe8ff; background: #315a9f; }

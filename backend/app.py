@@ -254,7 +254,9 @@ def create_app(
         if supplied:
             if not secrets.compare_digest(supplied, token):
                 return failure("会话无效", 403, "invalid_session")
-            response = redirect("/", code=302)
+            chrome = request.args.get("chrome", "")
+            redirect_target = f"/?chrome={chrome}" if chrome in {"0", "1"} else "/"
+            response = redirect(redirect_target, code=302)
             response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="Strict", path="/")
             return response
         if not cookie or not secrets.compare_digest(cookie, token):
@@ -919,13 +921,14 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
         threading.Thread(target=run_smoke_report, name="paldeck-smoke-report", daemon=True).start()
 
     force_browser = os.environ.get("PALMOD_BROWSER", "").strip().casefold() in {"1", "true", "yes"}
+    use_native_frame = os.environ.get("PALDECK_NATIVE_FRAME", "").strip().casefold() in {"1", "true", "yes"}
     try:
         if force_browser:
             raise ImportError
         import webview
     except ImportError:
         import webbrowser
-        webbrowser.open(launch_url)
+        webbrowser.open(f"{launch_url}&chrome=0")
         try:
             while server.is_alive():
                 time.sleep(0.5)
@@ -933,13 +936,12 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
             pass
         return
 
-    use_native_frame = os.environ.get("PALDECK_NATIVE_FRAME", "").strip().casefold() in {"1", "true", "yes"}
     bridge = DesktopBridge(
         custom_chrome=not use_native_frame,
         selection_registry=application.extensions["import_selection_registry"],
     )
     window = webview.create_window(
-        "PalDeck", launch_url, js_api=bridge,
+        "PalDeck", f"{launch_url}&chrome={0 if use_native_frame else 1}", js_api=bridge,
         width=1280, height=820, min_size=(960, 640),
         frameless=not use_native_frame, easy_drag=False, shadow=True,
         background_color="#EEF4FF", text_select=True,
