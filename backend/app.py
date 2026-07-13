@@ -26,6 +26,7 @@ from backend import credits, game_detector, nexus_api, process_utils, self_updat
 from backend.appearance import AppearanceService
 from backend.desktop_bridge import DesktopBridge
 from backend.game_lock import game_write_lock
+from backend.import_selection import SelectionExpiredError, SelectionRegistry
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
 from backend.storage import JsonStore
@@ -98,6 +99,7 @@ def create_app(
     app.extensions["ue4ss_provider"] = Ue4ssProvider(resource_root=app_root)
     app.extensions["ue4ss_cache"] = writable / "ue4ss-cache"
     app.extensions["ue4ss_pending_lock"] = threading.Lock()
+    app.extensions["import_selection_registry"] = SelectionRegistry()
 
     game_path = os.environ.get("PALMOD_GAME_PATH")
     if not game_path:
@@ -427,6 +429,7 @@ def create_app(
         current = service()
         body = request.get_json(silent=True) or {}
         retry_token = body.get("upload_token")
+        selection_token = body.get("selection_token")
         retained = False
         dest: Path | None = None
         if retry_token:
@@ -440,6 +443,24 @@ def create_app(
                     return success({"cancelled": True})
             dest = Path(item["path"])
             options = item["options"]
+        elif selection_token:
+            decision = body.get("decision", "cancel")
+            registry = app.extensions["import_selection_registry"]
+            try:
+                dest = registry.resolve(selection_token)
+            except SelectionExpiredError as exc:
+                raise ApiError("本地选择已过期，请重新选择文件夹", 410, "selection_expired") from exc
+            if decision == "cancel":
+                registry.consume(selection_token)
+                return success({"cancelled": True})
+            nexus = body.get("nexus_id")
+            if nexus is not None and (type(nexus) is not int or nexus < 1):
+                raise ApiError("nexus_id 必须是正整数", 400, "invalid_input")
+            options = {
+                "preferred_kind": None if body.get("type", "auto") == "auto" else body.get("type"),
+                "display_name": body.get("name") or None,
+                "nexus_id": nexus,
+            }
         elif "file" in request.files:
             uploaded = request.files["file"]
             if not uploaded or not uploaded.filename:
@@ -476,7 +497,10 @@ def create_app(
             }
             decision = body.get("decision", "cancel")
         try:
-            return success(current.install(dest, decision=decision, **options))
+            installed = current.install(dest, decision=decision, **options)
+            if selection_token:
+                app.extensions["import_selection_registry"].consume(selection_token)
+            return success(installed)
         except ModConflictError as exc:
             if dest is not None and (retry_token or dest.parent == upload_dir):
                 new_token = secrets.token_urlsafe(24)
@@ -908,7 +932,10 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
         return
 
     use_native_frame = os.environ.get("PALDECK_NATIVE_FRAME", "").strip().casefold() in {"1", "true", "yes"}
-    bridge = DesktopBridge(custom_chrome=not use_native_frame)
+    bridge = DesktopBridge(
+        custom_chrome=not use_native_frame,
+        selection_registry=application.extensions["import_selection_registry"],
+    )
     window = webview.create_window(
         "PalDeck", launch_url, js_api=bridge,
         width=1280, height=820, min_size=(960, 640),
@@ -916,7 +943,7 @@ def main(*, root: Path | None = None, data_dir: Path | None = None) -> None:
         background_color="#EEF4FF", text_select=True,
         confirm_close=False, resizable=True,
     )
-    bridge.bind(window)
+    bridge.bind(window, folder_dialog_type=webview.FOLDER_DIALOG)
     webview.start(debug=False, private_mode=False)
 
 

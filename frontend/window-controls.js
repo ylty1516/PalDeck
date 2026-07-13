@@ -8,6 +8,13 @@ export async function callWindowControl(name, host = globalThis.window) {
   return true;
 }
 
+export async function chooseModFolder(host = globalThis.window) {
+  const operation = host?.pywebview?.api?.choose_mod_folder;
+  if (typeof operation !== "function") return null;
+  const result = await operation.call(host.pywebview.api);
+  return result && Array.isArray(result.items) ? result.items : null;
+}
+
 export async function setupWindowControls(root = globalThis.document, host = globalThis.window) {
   const chrome = root?.querySelector?.(".window-chrome");
   const getState = host?.pywebview?.api?.get_state;

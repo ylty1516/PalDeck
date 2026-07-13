@@ -410,6 +410,24 @@ def test_open_mod_folder_rejects_unknown_id(app, auth_client):
     assert response.json["error_code"] == "mod_not_found"
 
 
+def test_native_selection_token_installs_once_without_client_path(app, auth_client, tmp_path):
+    archive = tmp_path / "Selected.zip"
+    archive.write_bytes(_pak_zip().getvalue())
+    grant = app.extensions["import_selection_registry"].issue([archive])[0]
+
+    installed = auth_client.post("/api/mods/import", json={
+        "selection_token": grant["selection_token"], "decision": "replace", "type": "auto",
+    })
+    assert installed.status_code == 200
+    assert installed.json["data"]["name"] == "Example"
+
+    reused = auth_client.post("/api/mods/import", json={
+        "selection_token": grant["selection_token"], "decision": "replace",
+    })
+    assert reused.status_code == 410
+    assert reused.json["error_code"] == "selection_expired"
+
+
 def test_import_conflict_returns_retry_token(auth_client):
     first = auth_client.post(
         "/api/mods/import",

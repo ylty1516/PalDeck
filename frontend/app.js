@@ -6,12 +6,13 @@ import {
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
-import { callWindowControl, initializeWindowControls } from "./window-controls.js";
-import { deriveModView } from "./ui-model.js";
+import { callWindowControl, chooseModFolder as chooseNativeModFolder, initializeWindowControls } from "./window-controls.js";
+import { createImportQueue, deriveModView, reduceImportQueue } from "./ui-model.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
-  mods: [], nexus: [], credits: [], gamePath: "", selectedModFile: null, pendingUploadToken: null,
+  mods: [], nexus: [], credits: [], gamePath: "", selectedModFile: null, selectedSelectionToken: null,
+  importQueue: [], activeImportId: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
@@ -239,21 +240,70 @@ function isSupportedModFile(file) {
   return Boolean(file && /\.(zip|pak)$/i.test(file.name || ""));
 }
 
+function renderImportQueue() {
+  const container = $("#importQueue");
+  if (!state.importQueue.length) return renderMessage(container, "尚未选择文件", "muted");
+  const fragment = document.createDocumentFragment();
+  for (const item of state.importQueue) {
+    const row = document.createElement("div");
+    row.className = `import-queue-row state-${item.status}`;
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    const status = document.createElement("span");
+    status.textContent = ({ queued: "待安装", installing: "安装中", conflict: "等待冲突处理", succeeded: "安装成功", failed: "安装失败", cancelled: "已取消" })[item.status] || item.status;
+    row.append(name, status);
+    if (item.status === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn compact";
+      retry.dataset.importRetry = item.id;
+      retry.textContent = "重试";
+      row.append(retry);
+    }
+    fragment.append(row);
+  }
+  container.replaceChildren(fragment);
+}
+
 function resetModFileSelection() {
   const reset = resetModFileSelectionState(state);
   state.pendingUploadToken = reset.pendingUploadToken;
   state.selectedModFile = reset.selectedModFile;
+  state.selectedSelectionToken = null;
+  state.activeImportId = null;
+  state.importQueue = [];
   $("#modFileInput").value = "";
   $("#selectedModFile").textContent = "尚未选择文件";
   $("#importResult").textContent = "";
+  renderImportQueue();
 }
 
-function selectModFile(file) {
-  resetModFileSelection();
-  if (file && !isSupportedModFile(file)) throw new ApiError("仅支持 ZIP 或 PAK 文件");
-  state.selectedModFile = file || null;
-  $("#selectedModFile").textContent = file ? `已选择：${file.name}` : "尚未选择文件";
-  $("#importResult").textContent = file ? `识别结果：${/\.pak$/i.test(file.name) ? "PAK 模组" : "ZIP 压缩包（安装时自动识别）"}` : "";
+function selectModFiles(files) {
+  const values = Array.from(files || []);
+  if (!values.length) return resetModFileSelection();
+  if (values.some((file) => !isSupportedModFile(file))) throw new ApiError("仅支持 ZIP 或 PAK 文件");
+  state.pendingUploadToken = null;
+  state.importQueue = createImportQueue(values.map((file) => ({ name: file.name, size: file.size, file })));
+  state.selectedModFile = null;
+  state.selectedSelectionToken = null;
+  $("#selectedModFile").textContent = `已选择 ${values.length} 个文件`;
+  $("#importResult").textContent = "队列已就绪，将按顺序安全安装。";
+  renderImportQueue();
+}
+
+function selectModFile(file) { return selectModFiles(file ? [file] : []); }
+
+async function selectNativeFolder() {
+  const items = await chooseNativeModFolder();
+  if (items === null) throw new ApiError("当前窗口不支持原生文件夹选择，请使用“选择文件”");
+  if (!items.length) { toast("所选文件夹没有顶层 ZIP 或 PAK 文件", "info"); return; }
+  state.pendingUploadToken = null;
+  state.importQueue = createImportQueue(items.map((item) => ({ ...item, name: item.name })));
+  state.selectedModFile = null;
+  state.selectedSelectionToken = null;
+  $("#selectedModFile").textContent = `文件夹中发现 ${items.length} 个可安装文件`;
+  $("#importResult").textContent = "队列已就绪，将按稳定文件名顺序安装。";
+  renderImportQueue();
 }
 
 async function executeFileOperation(operation) {
@@ -266,15 +316,22 @@ async function executeFileOperation(operation) {
   }
 }
 
-async function executeModFileSelection(file) {
-  return executeFileOperation(() => selectModFile(file));
+async function executeModFileSelection(files) {
+  return executeFileOperation(() => selectModFiles(files));
 }
 
 async function importSelected(decision = "cancel") {
   const retryToken = state.pendingUploadToken;
+  const selectionToken = state.selectedSelectionToken;
   let options;
   if (retryToken) {
     options = { method: "POST", body: { upload_token: retryToken, decision } };
+  } else if (selectionToken) {
+    options = { method: "POST", body: {
+      selection_token: selectionToken, decision, type: $("#importType").value,
+      name: $("#importName").value.trim() || undefined,
+      nexus_id: $("#importNexusId").value ? Number($("#importNexusId").value) : undefined,
+    }, timeout: 120000 };
   } else {
     if (!state.selectedModFile) throw new ApiError("请先选择 ZIP 或 PAK 文件");
     const form = new FormData();
@@ -286,15 +343,19 @@ async function importSelected(decision = "cancel") {
   }
   beginModsWrite();
   try {
-    $("#importResult").textContent = retryToken ? "正在识别并安装：应用冲突处理…" : `正在识别并安装：正在上传 ${state.selectedModFile.name}`;
+    const sourceName = state.selectedModFile?.name || state.importQueue.find((item) => item.id === state.activeImportId)?.name || "本地文件";
+    $("#importResult").textContent = retryToken || decision !== "cancel"
+      ? "正在识别并安装：应用冲突处理…"
+      : (state.selectedModFile ? `正在识别并安装：正在上传 ${state.selectedModFile.name}` : `正在识别并安装：${sourceName}`);
     const result = await request("/api/mods/import", options);
-    resetModFileSelection();
+    state.pendingUploadToken = null;
     $("#importResult").textContent = `安装成功：${result.name || result.mod?.name || "模组"} · 类型 ${result.mod_type || result.kind || "已识别"}`;
     toast("模组安装成功", "success");
     await loadMods();
+    return result;
   } catch (error) {
     const nextToken = pendingUploadTokenAfterError(retryToken, error);
-    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict" && nextToken) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "mod_conflict" && (nextToken || selectionToken)) {
       state.pendingUploadToken = nextToken;
       $("#importResult").textContent = "识别完成：发现冲突，请选择处理方式";
       renderConflict($("#conflictDetails"), error.details);
@@ -311,23 +372,73 @@ async function importSelected(decision = "cancel") {
   }
 }
 
+function transitionActiveImport(type, extra = {}) {
+  if (!state.activeImportId) return;
+  state.importQueue = reduceImportQueue(state.importQueue, { type, id: state.activeImportId, ...extra });
+  renderImportQueue();
+}
+
+async function processImportQueue() {
+  while (true) {
+    const next = state.importQueue.find((item) => item.status === "queued");
+    if (!next) {
+      state.activeImportId = null;
+      state.selectedModFile = null;
+      state.selectedSelectionToken = null;
+      $("#modFileInput").value = "";
+      return;
+    }
+    state.activeImportId = next.id;
+    state.selectedModFile = next.file || null;
+    state.selectedSelectionToken = next.selection_token || null;
+    transitionActiveImport("start");
+    try {
+      const result = await importSelected();
+      if (result === null) {
+        transitionActiveImport("conflict", { conflict: true });
+        return;
+      }
+      transitionActiveImport("succeed", { result });
+    } catch (error) {
+      transitionActiveImport("fail", { error: actionableErrorMessage(error) });
+      throw error;
+    }
+  }
+}
+
+async function resolveImportConflict(decision) {
+  const result = await importSelected(decision);
+  if (result === null) return;
+  transitionActiveImport("succeed", { result });
+  state.pendingUploadToken = null;
+  state.selectedModFile = null;
+  state.selectedSelectionToken = null;
+  $("#conflictModal").close();
+  await processImportQueue();
+}
+
 function openModal(dialog) {
   dialog.showModal();
   dialog.querySelector("[autofocus]")?.focus();
 }
 
 async function cancelImportConflict() {
-  const token = state.pendingUploadToken;
-  if (!token) { resetModFileSelection(); $("#conflictModal").close(); return; }
+  const uploadToken = state.pendingUploadToken;
+  const selectionToken = state.selectedSelectionToken;
   beginModsWrite();
   try {
-    await request("/api/mods/import", { method: "POST", body: { upload_token: token, decision: "cancel" } });
+    if (uploadToken) await request("/api/mods/import", { method: "POST", body: { upload_token: uploadToken, decision: "cancel" } });
+    else if (selectionToken) await request("/api/mods/import", { method: "POST", body: { selection_token: selectionToken, decision: "cancel" } });
   } catch (error) {
-    if (!(error instanceof ApiError && error.status === 410 && error.code === "upload_expired")) throw error;
+    if (!(error instanceof ApiError && error.status === 410 && ["upload_expired", "selection_expired"].includes(error.code))) throw error;
   } finally {
-    resetModFileSelection();
+    transitionActiveImport("cancel");
+    state.pendingUploadToken = null;
+    state.selectedModFile = null;
+    state.selectedSelectionToken = null;
     $("#conflictModal").close();
   }
+  await processImportQueue();
 }
 
 async function deletePendingMod() {
@@ -572,11 +683,12 @@ export const ACTION_HANDLERS = Object.freeze({
   filterModSource: () => filterMods(),
   filterModStatus: () => filterMods(),
   chooseModFile: () => $("#modFileInput").click(),
-  selectModFile: async (event) => executeModFileSelection(event.currentTarget.files?.[0] || null),
+  chooseModFolder: async () => selectNativeFolder(),
+  selectModFile: async (event) => executeModFileSelection(event.currentTarget.files || []),
   changeImportType: noop,
   editImportName: noop,
   editImportNexusId: noop,
-  importMod: async () => importSelected(),
+  importMod: async () => processImportQueue(),
   editNexusQuery: noop,
   searchNexus: async () => loadNexus("search", true),
   focusNexusSearch: () => $("#nexusQuery").focus(),
@@ -647,8 +759,8 @@ export const ACTION_HANDLERS = Object.freeze({
     }
   },
   cancelConflict: async () => cancelImportConflict(),
-  replaceConflict: async () => { $("#conflictModal").close(); await importSelected("replace"); },
-  keepBothConflict: async () => { $("#conflictModal").close(); await importSelected("keep_both"); },
+  replaceConflict: async () => resolveImportConflict("replace"),
+  keepBothConflict: async () => resolveImportConflict("keep_both"),
   cancelDelete: () => { state.pendingDeleteId = null; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteModal").close(); },
   approveDelete: async () => deletePendingMod(),
   cancelWorkshopDependency: () => cancelWorkshopDependency(),
@@ -730,12 +842,22 @@ async function handleDynamicAction(event) {
   }
 }
 
+function setupImportQueue() {
+  $("#importQueue").addEventListener("click", async (event) => {
+    const retry = event.target.closest("[data-import-retry]");
+    if (!retry) return;
+    state.importQueue = reduceImportQueue(state.importQueue, { type: "retry", id: retry.dataset.importRetry });
+    renderImportQueue();
+    try { await run(retry, processImportQueue); } catch { /* run displayed the error */ }
+  });
+}
+
 function setupDropzone() {
   const zone = $("#dropzone");
   for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, async (event) => {
     event.preventDefault();
     zone.classList.toggle("dragging", name === "dragenter" || name === "dragover");
-    if (name === "drop") await executeModFileSelection(event.dataTransfer?.files?.[0] || null);
+    if (name === "drop") await executeModFileSelection(event.dataTransfer?.files || []);
   });
 }
 
@@ -765,6 +887,7 @@ async function init() {
     event.preventDefault();
     cancelWorkshopDependency();
   });
+  setupImportQueue();
   setupDropzone();
   try {
     const [health, appearance, game] = await Promise.all([request("/api/health"), request("/api/appearance"), request("/api/game/status")]);

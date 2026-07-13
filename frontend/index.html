@@ -65,16 +65,17 @@
       <section id="view-import" class="view" aria-labelledby="viewTitle">
         <div class="two-column">
           <div id="dropzone" class="dropzone glass-panel">
-            <span class="drop-symbol">⇩</span><h2>拖放 ZIP / PAK</h2><p>自动识别结构并安装，无需手动解压。</p>
-            <button type="button" class="btn primary" data-action="chooseModFile">选择文件</button>
-            <input id="modFileInput" type="file" data-action="selectModFile" accept=".zip,.pak,application/zip,application/octet-stream">
+            <span class="drop-symbol">⇩</span><h2>拖放 ZIP / PAK 文件</h2><p>按顺序预检并事务安装，无需手动解压。</p>
+            <div class="button-row"><button type="button" class="btn primary" data-action="chooseModFile">选择文件</button><button type="button" class="btn" data-action="chooseModFolder">选择文件夹</button></div>
+            <input id="modFileInput" type="file" data-action="selectModFile" multiple accept=".zip,.pak,application/zip,application/octet-stream">
           </div>
           <div class="glass-panel panel">
             <label>安装类型<select id="importType" data-action="changeImportType"><option value="auto">自动识别</option><option value="pak">PAK</option><option value="logicpak">LogicMods</option><option value="ue4ss">UE4SS 脚本</option><option value="ue4ss_framework">UE4SS 框架</option><option value="workshop">Workshop</option></select></label>
             <label>显示名称<input id="importName" type="text" data-action="editImportName" placeholder="可选"></label>
             <label>N 网尾号<input id="importNexusId" type="number" data-action="editImportNexusId" min="1" placeholder="可选"></label>
+            <div id="importQueue" class="import-queue" aria-live="polite"><p class="muted">尚未选择文件</p></div>
             <p id="selectedModFile" class="muted">尚未选择文件</p>
-            <button type="button" class="btn primary" data-action="importMod">开始安装</button>
+            <button type="button" class="btn primary" data-action="importMod">开始安装队列</button>
             <div id="importResult" class="result" aria-live="polite"></div>
           </div>
         </div>

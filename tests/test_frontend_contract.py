@@ -203,8 +203,8 @@ def test_modals_and_aria_are_real_accessible_actions():
     cancel = re.search(r"async function cancelImportConflict\(\) \{(.*?)^\}", app, re.S | re.M)
     assert cancel
     assert cancel.group(1).index('await request("/api/mods/import"') < cancel.group(1).rindex('$("#conflictModal").close()')
-    assert 'importSelected("replace")' in app
-    assert 'importSelected("keep_both")' in app
+    assert 'resolveImportConflict("replace")' in app
+    assert 'resolveImportConflict("keep_both")' in app
     assert not re.search(r'case "[^"]+":\s*break;', app)
 
 
@@ -495,10 +495,10 @@ def test_import_lifecycle_and_mod_generation_contract():
     assert reset
     for token in ('state.pendingUploadToken = reset.pendingUploadToken', 'state.selectedModFile = reset.selectedModFile', '$("#modFileInput").value = ""', '$("#importResult").textContent = ""'):
         assert token in reset.group(1)
-    select = re.search(r"function selectModFile\(file\) \{(.*?)^\}", app, re.S | re.M)
-    assert select and select.group(1).index("resetModFileSelection()") < select.group(1).index("isSupportedModFile")
+    select = re.search(r"function selectModFiles\(files\) \{(.*?)^\}", app, re.S | re.M)
+    assert select and "isSupportedModFile" in select.group(1) and "createImportQueue" in select.group(1)
     assert "pendingUploadTokenAfterError" in app
-    assert "if (!token) { resetModFileSelection();" in app
+    assert "selectionToken" in app and "transitionActiveImport" in app and "processImportQueue" in app
     assert "nextModsGeneration" in app
     assert "modsRequestController.abort()" in app
     assert 'request("/api/mods", { signal: controller.signal })' in app
