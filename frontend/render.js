@@ -125,7 +125,7 @@ export function renderNexus(container, mods) {
   if (!mods.length) return renderMessage(container, "没有找到相关模组。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
-    if (mod.adultContent === true) continue;
+    if (mod.adultContent !== false) continue;
     const card = el("article", "nexus-card glass-panel");
     const image = el("div", "nexus-image");
     if (typeof mod.picture_url === "string" && /^https:\/\//i.test(mod.picture_url)) {

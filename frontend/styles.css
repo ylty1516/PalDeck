@@ -160,7 +160,19 @@ input[type="range"] { min-height: 24px; padding: 0; accent-color: var(--accent);
 .panel { display: grid; align-content: start; gap: 13px; }
 .result { min-height: 20px; color: var(--muted); overflow-wrap: anywhere; }
 hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
-.nexus-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.nexus-toolbar { margin-bottom: 14px; padding: 13px; border-radius: var(--radius); }
+.nexus-search-line { display: flex; align-items: end; gap: 9px; }
+.nexus-search-line .btn { display: inline-flex; align-items: center; gap: 7px; }
+.nexus-sort-tabs { display: flex; gap: 8px; margin-top: 11px; }
+.nexus-source-status { margin: 10px 2px 0; font-size: 11px; }
+.nexus-catalog-layout { display: grid; grid-template-columns: minmax(0, 1fr) 238px; align-items: start; gap: 13px; }
+.nexus-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.nexus-side-rail { display: grid; gap: 12px; }
+.side-card { padding: 16px; border-radius: var(--radius); box-shadow: 0 8px 24px rgba(36, 78, 128, .1); }
+.side-card h2 { margin-bottom: 8px; font-size: 15px; }
+.side-card p, .side-card li { color: var(--muted); font-size: 11px; line-height: 1.65; }
+.side-card ul { margin: 0; padding-left: 18px; }
+.side-card .btn { width: 100%; margin-top: 8px; }
 .credits-intro { margin-bottom: 14px; padding: 18px 20px; border-radius: var(--radius); }
 .credits-intro p { margin-bottom: 0; color: var(--muted); }
 .credits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
@@ -241,6 +253,9 @@ dialog::backdrop { background: rgba(8, 15, 28, .55); backdrop-filter: blur(4px);
   .mod-identity { grid-area: identity; }.mod-source-cell { grid-area: source; }.mod-version-cell { grid-area: version; text-align: right; }.mod-state-cell { grid-area: state; }.mod-actions { grid-area: actions; }
   .mod-state-cell small { white-space: normal; }
   .mod-row-path { left: 14px; }
+  .nexus-catalog-layout { grid-template-columns: 1fr; }
+  .nexus-side-rail { grid-template-columns: repeat(3, 1fr); }
+  .nexus-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .status-icon { font-size: 21px; }
 }
 @media (max-width: 959px) {

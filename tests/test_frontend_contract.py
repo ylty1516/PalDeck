@@ -242,7 +242,7 @@ def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_skips_adult_
         assert f'data-action="{action}"' in html
     assert "result.source" in app and "result.fetched_at" in app and "result.warning" in app
     assert "force=1" in app
-    assert "if (mod.adultContent === true) continue;" in render
+    assert "if (mod.adultContent !== false) continue;" in render
     for forbidden in ("adultCardData", "revealAdult", "显示成人内容"):
         assert forbidden not in render and forbidden not in app
     assert 'addEventListener("error"' in render
@@ -254,6 +254,18 @@ def test_nexus_catalog_ui_contract_has_sources_tabs_safe_images_and_skips_adult_
     readme = ROOT.joinpath("README.md").read_text(encoding="utf-8")
     assert "Nexus 成人内容会被彻底过滤" in readme
     assert "显示成人内容" not in readme
+
+
+def test_v22_nexus_page_has_read_only_layout_and_no_fake_actions():
+    html = HTML.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    assert 'class="nexus-catalog-layout"' in html
+    assert 'class="nexus-side-rail"' in html
+    assert "匿名只读" in html and "成人内容已过滤" in html
+    assert "打开 N 网" in render and "复制尾号" in render
+    assert "mod.adultContent !== false" in render
+    for forbidden in ("加入收藏", "一键安装", "编辑精选", "Nexus 登录"):
+        assert forbidden not in html + render
 
 
 def test_nexus_url_validator_executable_contract():

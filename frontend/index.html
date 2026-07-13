@@ -81,16 +81,19 @@
       </section>
 
       <section id="view-nexus" class="view" aria-labelledby="viewTitle">
-        <div class="toolbar glass-panel">
-          <label class="grow">搜索 N 网<input id="nexusQuery" type="search" data-action="editNexusQuery" placeholder="名称或模组尾号"></label>
-          <button type="button" class="btn primary" data-action="searchNexus">搜索</button>
-          <button type="button" class="btn" data-action="downloadsNexus">总下载</button>
-          <button type="button" class="btn" data-action="endorsementsNexus">推荐</button>
-          <button type="button" class="btn" data-action="latestNexus">最新</button>
-          <button type="button" class="btn" data-action="refreshNexus">刷新</button>
+        <div class="nexus-toolbar glass-panel">
+          <div class="nexus-search-line"><label class="search-field grow"><span class="search-icon" data-icon="search"></span><span class="sr-only">搜索 N 网</span><input id="nexusQuery" type="search" data-action="editNexusQuery" placeholder="搜索名称、作者或 N 网尾号"></label><button type="button" class="btn primary" data-action="searchNexus">搜索</button><button type="button" class="btn" data-action="refreshNexus"><span data-icon="refresh"></span>刷新</button></div>
+          <div class="nexus-sort-tabs" role="group" aria-label="Nexus 排序"><button type="button" class="btn primary" data-action="downloadsNexus">下载最多</button><button type="button" class="btn" data-action="endorsementsNexus">推荐最高</button><button type="button" class="btn" data-action="latestNexus">最新发布</button></div>
+          <p id="nexusStatus" class="nexus-source-status muted">等待加载</p>
         </div>
-        <p id="nexusStatus" class="muted">等待加载</p>
-        <div id="nexusGrid" class="nexus-grid"></div>
+        <div class="nexus-catalog-layout">
+          <div id="nexusGrid" class="nexus-grid" aria-live="polite"></div>
+          <aside class="nexus-side-rail">
+            <article class="glass-panel side-card"><h2>快速直达</h2><p>在上方输入纯数字 N 网尾号，可直接查询 Palworld 模组详情。</p><button type="button" class="btn primary" data-action="focusNexusSearch">输入尾号</button></article>
+            <article class="glass-panel side-card"><h2>浏览说明</h2><ul><li>匿名只读，不登录 Nexus 账户</li><li>成人内容已过滤，无法关闭</li><li>不提供下载、收藏或自动安装</li></ul></article>
+            <article class="glass-panel side-card"><h2>数据来源</h2><p>优先显示 Nexus 实时目录；连接失败时会明确标记缓存或过期缓存。</p></article>
+          </aside>
+        </div>
       </section>
 
       <section id="view-settings" class="view" aria-labelledby="viewTitle">

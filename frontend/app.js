@@ -572,6 +572,7 @@ export const ACTION_HANDLERS = Object.freeze({
   importMod: async () => importSelected(),
   editNexusQuery: noop,
   searchNexus: async () => loadNexus("search", true),
+  focusNexusSearch: () => $("#nexusQuery").focus(),
   downloadsNexus: async () => loadNexus("downloads", true),
   endorsementsNexus: async () => loadNexus("endorsements", true),
   refreshNexus: async () => loadNexus(state.nexusMode, true),
