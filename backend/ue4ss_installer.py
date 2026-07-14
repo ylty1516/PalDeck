@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from io import BytesIO
@@ -13,9 +14,10 @@ from typing import Any
 
 from .archive_utils import extract_archive_safely
 from .domain import ArchivePolicy
-from .game_detector import get_mod_directories, has_ue4ss
+from .game_detector import get_mod_directories, has_ue4ss, is_ue4ss_framework_mod
 from .manifest_store import validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
+from .ue4ss_config import merge_missing_entries
 
 UE4SS_ARCHIVE_POLICY = ArchivePolicy(
     max_files=256,
@@ -29,6 +31,14 @@ PALWORLD_REQUIRED_FILES = {
     "ue4ss/UE4SS-settings.ini",
     "ue4ss/MemberVariableLayout.ini",
 }
+MUTABLE_FRAMEWORK_FILES = frozenset({
+    "ue4ss/ue4ss-settings.ini",
+    "ue4ss/mods/mods.txt",
+    "ue4ss/mods/mods.json",
+    "ue4ss-settings.ini",
+    "mods/mods.txt",
+    "mods/mods.json",
+})
 
 
 class Ue4ssConflictError(Exception):
@@ -43,6 +53,14 @@ class Ue4ssGameRunningError(RuntimeError):
 
 def _win64(game_root: Path | str) -> Path:
     return Path(game_root) / "Pal" / "Binaries" / "Win64"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def status(game_root: Path | str) -> dict[str, Any]:
@@ -133,6 +151,24 @@ def _find_package_root(extract_dir: Path) -> Path:
     return extract_dir
 
 
+def _patched_settings_bytes(data: bytes, filename: str) -> tuple[bytes, list[str]]:
+    text = data.decode("utf-8", errors="ignore")
+    new = text
+    actions: list[str] = []
+    if re.search(r"bUseUObjectArrayCache\s*=\s*true", new, re.I):
+        new = re.sub(
+            r"bUseUObjectArrayCache\s*=\s*true",
+            "bUseUObjectArrayCache = false",
+            new,
+            flags=re.I,
+        )
+        actions.append(f"set bUseUObjectArrayCache=false in {filename}")
+    elif not re.search(r"bUseUObjectArrayCache", new, re.I):
+        new = new.rstrip() + "\n\n[General]\nbUseUObjectArrayCache = false\n"
+        actions.append(f"append bUseUObjectArrayCache=false to {filename}")
+    return new.encode("utf-8"), actions
+
+
 def _patch_settings(win64: Path) -> list[str]:
     actions: list[str] = []
     for settings in (
@@ -141,21 +177,11 @@ def _patch_settings(win64: Path) -> list[str]:
     ):
         if not settings.is_file():
             continue
-        text = settings.read_text(encoding="utf-8", errors="ignore")
-        new = text
-        if re.search(r"bUseUObjectArrayCache\s*=\s*true", new, re.I):
-            new = re.sub(
-                r"bUseUObjectArrayCache\s*=\s*true",
-                "bUseUObjectArrayCache = false",
-                new,
-                flags=re.I,
-            )
-            actions.append(f"set bUseUObjectArrayCache=false in {settings.name}")
-        elif not re.search(r"bUseUObjectArrayCache", new, re.I):
-            new = new.rstrip() + "\n\n[General]\nbUseUObjectArrayCache = false\n"
-            actions.append(f"append bUseUObjectArrayCache=false to {settings.name}")
-        if new != text:
-            settings.write_text(new, encoding="utf-8")
+        current = settings.read_bytes()
+        updated, changes = _patched_settings_bytes(current, settings.name)
+        actions.extend(changes)
+        if updated != current:
+            settings.write_bytes(updated)
     return actions
 
 
@@ -166,6 +192,7 @@ def install_from_zip(
     *,
     confirm_replace: bool = False,
     require_palworld_layout: bool = False,
+    preserve_mutable: bool = False,
 ) -> dict[str, Any]:
     """Transactionally install a local UE4SS ZIP (including legacy layouts)."""
     archive = Path(zip_path)
@@ -176,6 +203,7 @@ def install_from_zip(
     return _install_archive(
         game_root, archive, policy=policy, confirm_replace=confirm_replace,
         require_palworld_layout=require_palworld_layout,
+        preserve_mutable=preserve_mutable,
     )
 
 
@@ -186,6 +214,7 @@ def install_from_bytes(
     *,
     confirm_replace: bool = False,
     require_palworld_layout: bool = False,
+    preserve_mutable: bool = False,
 ) -> dict[str, Any]:
     """Install an immutable verified snapshot without reopening its source path."""
     if not isinstance(archive_bytes, bytes):
@@ -193,6 +222,7 @@ def install_from_bytes(
     return _install_archive(
         game_root, None, archive_bytes=archive_bytes, policy=policy,
         confirm_replace=confirm_replace, require_palworld_layout=require_palworld_layout,
+        preserve_mutable=preserve_mutable,
     )
 
 
@@ -217,6 +247,7 @@ def _install_archive(
     policy: ArchivePolicy | None = None,
     confirm_replace: bool = False,
     require_palworld_layout: bool = False,
+    preserve_mutable: bool = False,
 ) -> dict[str, Any]:
     root = Path(game_root)
     if is_palworld_running():
@@ -265,11 +296,23 @@ def _install_archive(
         package_files = [path for path in pkg.rglob("*") if path.is_file()]
         if not package_files:
             raise ValueError("UE4SS 压缩包不包含可安装文件")
-        planned: list[tuple[Path, Path]] = []
+        framework_mods: set[str] = set()
+        planned: list[tuple[Path, Path, str, bool]] = []
         for source in package_files:
-            destination = win64 / source.relative_to(pkg)
+            relative_path = source.relative_to(pkg)
+            relative = relative_path.as_posix()
+            destination = win64 / relative_path
             validate_no_reparse_ancestors(destination)
-            planned.append((source, destination))
+            parts = relative_path.parts
+            for part_index, part in enumerate(parts[:-1]):
+                if part.casefold() == "mods" and part_index + 1 < len(parts):
+                    name = parts[part_index + 1]
+                    if is_ue4ss_framework_mod(name):
+                        framework_mods.add(name)
+                    break
+            planned.append(
+                (source, destination, relative, relative.casefold() in MUTABLE_FRAMEWORK_FILES)
+            )
 
         legacy = win64 / "xinput1_3.dll"
         if legacy.is_file():
@@ -279,21 +322,41 @@ def _install_archive(
             replaced.append((backup, legacy))
             removed_legacy = True
 
-        for index, (source, destination) in enumerate(planned):
+        for index, (source, destination, relative, mutable) in enumerate(planned):
             missing = [parent for parent in reversed(destination.parents) if parent != win64 and parent.is_relative_to(win64) and not parent.exists()]
             for directory in missing:
                 directory.mkdir(exist_ok=True)
                 created_dirs.append(directory)
+            if destination.exists() and not destination.is_file():
+                raise ValueError(f"安装目标不是普通文件：{destination}")
+
+            staged = temp / "publish" / str(index) / destination.name
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            if preserve_mutable and mutable and destination.is_file():
+                current = destination.read_bytes()
+                relative_key = relative.casefold()
+                if relative_key.endswith("ue4ss-settings.ini"):
+                    desired, changes = _patched_settings_bytes(current, destination.name)
+                    actions.extend(changes)
+                elif relative_key.endswith("mods/mods.txt"):
+                    desired = merge_missing_entries(
+                        current,
+                        source.read_bytes(),
+                        framework_mods,
+                    )
+                else:
+                    desired = current
+                if desired == current:
+                    continue
+                staged.write_bytes(desired)
+            else:
+                shutil.copy2(source, staged)
+
             if destination.exists():
-                if not destination.is_file():
-                    raise ValueError(f"安装目标不是普通文件：{destination}")
                 backup = backups / str(index) / destination.name
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(destination, backup)
                 replaced.append((backup, destination))
-            staged = temp / "publish" / str(index) / destination.name
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, staged)
             os.replace(staged, destination)
             published.append(destination)
 
@@ -301,10 +364,22 @@ def _install_archive(
         if not mods.exists():
             mods.mkdir(parents=True)
             created_dirs.append(mods)
+        installed_files = [
+            {
+                "relative_path": relative,
+                "size": destination.stat().st_size,
+                "sha256": _sha256(destination),
+                "mutable": mutable,
+            }
+            for _source, destination, relative, mutable in planned
+            if destination.is_file()
+        ]
         st = status(root)
         return {
             "ok": True,
             "installed": st["installed"],
+            "installed_files": installed_files,
+            "framework_mods": sorted(framework_mods, key=str.casefold),
             "win64": str(win64),
             "files_copied": len(published),
             "removed_xinput1_3": removed_legacy,

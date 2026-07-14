@@ -578,6 +578,69 @@ def test_installer_stages_transaction_on_game_volume_before_atomic_publish(
     assert not any(path.name.startswith(".paldeck-ue4ss-") for path in win64.iterdir())
 
 
+def _palworld_archive_with_mutable_config() -> bytes:
+    payload = io.BytesIO()
+    files = {
+        "dwmapi.dll": b"proxy",
+        "ue4ss/UE4SS.dll": b"dll",
+        "ue4ss/UE4SS-settings.ini": b"[General]\nbUseUObjectArrayCache = true\nBundled = 1\n",
+        "ue4ss/MemberVariableLayout.ini": b"layout",
+        "ue4ss/Mods/mods.txt": b"BPModLoaderMod : 1\nKeybinds : 1\n",
+        "ue4ss/Mods/mods.json": b'{"bundled": true}',
+        "ue4ss/Mods/BPModLoaderMod/Scripts/main.lua": b"framework",
+        "ue4ss/Mods/Keybinds/Scripts/main.lua": b"keys",
+    }
+    with zipfile.ZipFile(payload, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return payload.getvalue()
+
+
+def test_repair_preserves_user_config_and_reports_owned_files(
+    fake_game_root, monkeypatch
+):
+    monkeypatch.setattr(ue4ss_installer, "is_palworld_running", lambda: False)
+    win64 = fake_game_root / "Pal/Binaries/Win64"
+    settings = win64 / "ue4ss/UE4SS-settings.ini"
+    mods_txt = win64 / "ue4ss/Mods/mods.txt"
+    mods_json = win64 / "ue4ss/Mods/mods.json"
+    settings.parent.mkdir(parents=True)
+    mods_txt.parent.mkdir(parents=True)
+    settings.write_text(
+        "[General]\nCustomValue = 7\nbUseUObjectArrayCache = true\n", encoding="utf-8"
+    )
+    mods_txt.write_text("UserMod : 1\nBPModLoaderMod : 0\n", encoding="utf-8")
+    mods_json.write_text('{"user": true}', encoding="utf-8")
+
+    result = ue4ss_installer.install_from_bytes(
+        fake_game_root,
+        _palworld_archive_with_mutable_config(),
+        confirm_replace=True,
+        require_palworld_layout=True,
+        preserve_mutable=True,
+    )
+
+    assert "CustomValue = 7" in settings.read_text(encoding="utf-8")
+    assert "bUseUObjectArrayCache = false" in settings.read_text(encoding="utf-8")
+    assert "Bundled = 1" not in settings.read_text(encoding="utf-8")
+    assert "UserMod : 1" in mods_txt.read_text(encoding="utf-8")
+    assert "BPModLoaderMod : 0" in mods_txt.read_text(encoding="utf-8")
+    assert "Keybinds : 1" in mods_txt.read_text(encoding="utf-8")
+    assert mods_json.read_text(encoding="utf-8") == '{"user": true}'
+    assert set(result["framework_mods"]) == {"BPModLoaderMod", "Keybinds"}
+    assert len(result["installed_files"]) == 8
+    assert all(
+        {"relative_path", "size", "sha256", "mutable"} == set(item)
+        for item in result["installed_files"]
+    )
+    mutable = {item["relative_path"] for item in result["installed_files"] if item["mutable"]}
+    assert mutable == {
+        "ue4ss/UE4SS-settings.ini",
+        "ue4ss/Mods/mods.txt",
+        "ue4ss/Mods/mods.json",
+    }
+
+
 def test_bundled_bytes_use_same_in_memory_snapshot_and_strict_policy(
     fake_game_root, monkeypatch
 ):
