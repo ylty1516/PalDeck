@@ -26,6 +26,7 @@ from .game_detector import (
 from .game_lock import game_write_lock
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
+from .ue4ss_config import enabled_state, parse_entry, remove_entry, update_entry
 
 _SIDECARS = (".pak", ".utoc", ".ucas")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -252,50 +253,11 @@ class ModService:
 
     @staticmethod
     def _mods_entry(line: str) -> tuple[str, str] | None:
-        candidate = line[1:] if line.startswith("\ufeff") else line
-        match = re.match(r"^(?P<prefix>\s*)(?P<name>[^:#;]+?)(?P<separator>\s*:\s*)(?P<value>[01])(?P<tail>\s*(?:[#;].*)?)$", candidate)
-        if not match:
-            return None
-        return match.group("name").strip(), match.group("value")
+        return parse_entry(line)
 
-    @classmethod
-    def _updated_mods_bytes(cls, data: bytes, name: str, enabled: bool | None) -> bytes:
-        text = data.decode("utf-8")
-        lines = text.splitlines(keepends=True)
-        newline = next(
-            (
-                "\r\n" if line.endswith("\r\n") else line[-1]
-                for line in lines
-                if line.endswith(("\r\n", "\n", "\r"))
-            ),
-            "\n",
-        )
-        wanted = name.casefold()
-        found = False
-        output: list[str] = []
-        for line in lines:
-            if line.endswith("\r\n"):
-                content, ending = line[:-2], "\r\n"
-            elif line.endswith(("\n", "\r")):
-                content, ending = line[:-1], line[-1]
-            else:
-                content, ending = line, ""
-            entry = cls._mods_entry(content)
-            if entry is None or entry[0].casefold() != wanted:
-                output.append(line)
-                continue
-            if found or enabled is None:
-                continue
-            output.append(
-                re.sub(r"(\s*:\s*)[01]", rf"\g<1>{int(enabled)}", content, count=1)
-                + ending
-            )
-            found = True
-        if enabled is not None and not found:
-            if output and not output[-1].endswith(("\r\n", "\n", "\r")):
-                output[-1] += newline
-            output.append(f"{name} : {int(enabled)}{newline}")
-        return "".join(output).encode("utf-8")
+    @staticmethod
+    def _updated_mods_bytes(data: bytes, name: str, enabled: bool | None) -> bytes:
+        return remove_entry(data, name) if enabled is None else update_entry(data, name, enabled)
 
     def _write_mods_txt(self, path: Path, data: bytes) -> None:
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -305,15 +267,9 @@ class ModService:
         finally:
             temporary.unlink(missing_ok=True)
 
-    @classmethod
-    def _mods_enabled(cls, path: Path, name: str) -> bool | None:
-        if not path.is_file():
-            return None
-        for line in path.read_bytes().decode("utf-8").splitlines():
-            entry = cls._mods_entry(line)
-            if entry is not None and entry[0].casefold() == name.casefold():
-                return entry[1] == "1"
-        return None
+    @staticmethod
+    def _mods_enabled(path: Path, name: str) -> bool | None:
+        return enabled_state(path.read_bytes(), name) if path.is_file() else None
 
     def _audit(self, manifest: ModManifest) -> ManifestAudit:
         audit = self.store.audit(manifest)
