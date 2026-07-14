@@ -25,7 +25,8 @@ from .game_detector import (
 )
 from .game_lock import game_write_lock
 from .ignored_mod_store import IgnoredIdentity, IgnoredModStore
-from .manifest_store import ManifestStore, validate_no_reparse_ancestors
+from .manifest_store import ManifestStore, _relative_path_key, validate_no_reparse_ancestors
+from .mod_value_service import ModValueConflict, ModValueService
 from .process_utils import check_directory_writable, is_palworld_running
 from .trash_service import TrashService
 from .ue4ss_config import enabled_state, parse_entry, remove_entry, update_entry
@@ -108,6 +109,7 @@ class ModService:
             self.game_root, self.data_dir, game_running=self.game_running,
         )
         self.ignored_store = IgnoredModStore(self.data_dir / "ignored-mods-v1.json")
+        self.value_service = ModValueService()
         self._migrate_legacy_once()
 
     def _transaction_lock(self, timeout: float = 10.0):
@@ -261,7 +263,11 @@ class ModService:
         displayed = manifest
         if manifest.kind is ModKind.UE4SS and audit.status in (AuditStatus.ENABLED, AuditStatus.DISABLED):
             displayed = replace(manifest, enabled=audit.status is AuditStatus.ENABLED)
-        return self._serialize_manifest(displayed, audit)
+        value = self._serialize_manifest(displayed, audit)
+        capability = self.value_service.inspect_manifest(manifest)
+        value["adjustable_values"] = capability is not None
+        value["adjustable_value_count"] = len(capability.fields) if capability else 0
+        return value
 
     @staticmethod
     def _mods_entry(line: str) -> tuple[str, str] | None:
@@ -1022,6 +1028,73 @@ class ModService:
                     raise
                 tracked_roots.add(str(candidate.resolve()).casefold())
         return self.list_mods()
+
+    def get_mod_values(self, manifest_id: str) -> dict[str, object]:
+        with self._transaction_lock():
+            manifest = self.store.get(manifest_id)
+            return self.value_service.read_values(manifest)
+
+    def _assert_value_edit_files_safe(
+        self, manifest: ModManifest, config_relative_path: str
+    ) -> None:
+        config_key = _relative_path_key(config_relative_path)
+        conflicts: list[str] = []
+        for item in manifest.files:
+            if _relative_path_key(item.relative_path) == config_key:
+                continue
+            path = validate_no_reparse_ancestors(
+                manifest.install_root / item.relative_path
+            )
+            if (
+                not path.is_file()
+                or _is_reparse(path)
+                or path.stat().st_size != item.size
+                or _sha256(path) != item.sha256
+            ):
+                conflicts.append(item.relative_path)
+        if conflicts:
+            raise ModValueConflict(
+                "Mod 的非配置文件存在异常，已拒绝调整数值",
+                {"files": conflicts[:20], "file_count": len(conflicts)},
+            )
+
+    @_locked_write
+    def update_mod_values(
+        self,
+        manifest_id: str,
+        values: dict[str, object],
+        revision: str,
+    ) -> dict[str, object]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        manifest = self.store.get(manifest_id)
+        capability = self.value_service.inspect_manifest(manifest)
+        if capability is None:
+            return self.value_service.read_values(manifest)
+        self._assert_value_edit_files_safe(
+            manifest, capability.config_relative_path
+        )
+        manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
+        manifest_before = manifest_path.read_bytes()
+        try:
+            _changed, result = self.value_service.update_values(
+                manifest, values, revision, self.store.save
+            )
+            return result
+        except BaseException:
+            try:
+                if manifest_path.read_bytes() != manifest_before:
+                    rollback = manifest_path.with_name(
+                        f".{manifest_path.name}.{uuid.uuid4().hex}.rollback.tmp"
+                    )
+                    rollback.write_bytes(manifest_before)
+                    os.replace(rollback, manifest_path)
+            except OSError as rollback_error:
+                raise ModValueConflict(
+                    "Mod 清单回滚失败",
+                    {"rollback_error": type(rollback_error).__name__},
+                ) from rollback_error
+            raise
 
     def folder_for(self, mod_id: str | None = None) -> Path:
         """Return only a configured mod root or a managed manifest's install root."""
