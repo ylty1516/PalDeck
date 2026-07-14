@@ -1,11 +1,11 @@
 {
   "view": "mods",
   "api": {
-    "/api/health": {"version": "2.3.0-fixture"},
+    "/api/health": {"version": "2.3.1-fixture"},
     "/api/appearance": {"theme": "aurora-glass", "mask": 0.35, "blur": 0, "position": "center", "petals": "off", "petal_style": "natural", "background": "default"},
     "/api/game/status": {"configured": true, "valid": true, "path": "D:\\SteamLibrary\\steamapps\\common\\Palworld", "has_ue4ss": true},
     "/api/mods": [
-      {"id": "better-pal", "externally_discovered": false, "name": "Better Pal Utilities", "mod_type": "pak", "status": "enabled", "enabled": true, "size_bytes": 5242880, "nexus_id": 101, "author": "Aiko", "manifest_files": ["BetterPal.pak"], "install_path": "Pal\\Content\\Paks\\~mods"},
+      {"id": "better-pal", "externally_discovered": false, "adjustable_values": true, "adjustable_value_count": 3, "name": "Configurable Chest Slots", "mod_type": "ue4ss", "status": "enabled", "enabled": true, "size_bytes": 5242880, "nexus_id": 101, "author": "Aiko", "manifest_files": ["Scripts/main.lua", "config.json", "palmod_config.json"], "install_path": "Pal\\Binaries\\Win64\\ue4ss\\Mods\\ConfigurableChestSlots"},
       {"workshop_id": "334455", "source": "steam_workshop", "name": "Sakura Base Builder", "author": "Mori", "version": "1.4.2", "enabled": true, "valid": true, "global_enabled": true, "deployed": true, "can_toggle": true, "install_types": ["logicpak", "ue4ss"], "dependencies": ["991122"], "source_dir": "SteamWorkshop\\334455"},
       {"id": "old-map", "externally_discovered": true, "name": "Old Map Markers", "mod_type": "ue4ss", "status": "missing", "enabled": false, "size_bytes": 98304, "author": "Ren", "manifest_files": ["main.lua", "config.lua"], "install_path": "Pal\\Binaries\\Win64\\Mods\\OldMap"}
     ],

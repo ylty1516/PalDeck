@@ -187,7 +187,8 @@ PalDeck v$version - Windows 便携版
 8. 内置 Palworld 专用 UE4SS 来自 Okaetsu/RE-UE4SS（MIT）；许可证与致谢随程序分发，并可在“致谢”页查看。
 9. 本地受管 Mod 删除进入 PalDeck 自有回收站并保留 30 天，可恢复或手动彻底删除。
 10. 外部发现 Mod 可取消管理并保留文件；UE4SS 修复与卸载会保护用户 Mod 和可变配置。
-11. 不支持 Xbox/Microsoft Store 或专用服务器 Mod 管理。
+11. 仅对受管 UE4SS Mod 的根级 config.json 提供安全数值调整，不扫描或改写 Lua 代码中的数字。
+12. 不支持 Xbox/Microsoft Store 或专用服务器 Mod 管理。
 
 项目说明见：https://github.com/ylty1516/PalDeck
 Source commit: $sourceCommit

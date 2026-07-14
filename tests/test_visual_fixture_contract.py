@@ -34,7 +34,7 @@ def test_fixture_files_are_fixed_safe_json_for_all_views():
         assert fixture["view"] == view
         assert isinstance(fixture["api"], dict)
         assert all(path.startswith("/api/") for path in fixture["api"])
-        assert fixture["api"]["/api/health"]["version"] == "2.3.0-fixture"
+        assert fixture["api"]["/api/health"]["version"] == "2.3.1-fixture"
         assert "/api/trash" in fixture["api"]
 
         assert list(_walk(fixture)), "fixture must contain deterministic content"
@@ -43,6 +43,11 @@ def test_fixture_files_are_fixed_safe_json_for_all_views():
     local = [item for item in mods["api"]["/api/mods"] if item.get("source") != "steam_workshop"]
     assert any(item.get("externally_discovered") is True for item in local)
     assert any(item.get("externally_discovered") is False for item in local)
+    assert any(
+        item.get("adjustable_values") is True
+        and item.get("adjustable_value_count", 0) > 0
+        for item in local
+    )
     trash = mods["api"]["/api/trash"]
     assert trash["items"] and all("payload" not in key.casefold() for item in trash["items"] for key in item)
 

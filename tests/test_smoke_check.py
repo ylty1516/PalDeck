@@ -60,6 +60,7 @@ def test_http_smoke_uses_real_cookie_session_and_records_all_checks(tmp_path, mo
         "external_mod_markers",
         "ue4ss_lifecycle_markers",
         "paldeck_update_origin",
+        "mod_value_editor_markers",
         "health",
         "fresh_data_no_game_path",
         "workshop_empty_state",

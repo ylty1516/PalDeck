@@ -163,6 +163,16 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             "repo": TRUSTED_GITHUB_REPO,
         })
 
+        value_markers = (
+            'actionButton("调整数值 ▼", "toggleModValues"',
+            "renderModValueEditor",
+            'input.type = "number"',
+            'actionButton("保存并应用", "saveModValues"',
+        )
+        if any(marker not in render_source for marker in value_markers):
+            raise AssertionError("Mod value editor markers missing")
+        passed("mod_value_editor_markers", {"markers": value_markers})
+
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:
             raise AssertionError(f"health mismatch: {health}")
