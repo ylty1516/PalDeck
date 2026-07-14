@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $false)]
     [string[]]$Views = @("mods", "import", "nexus", "settings", "credits"),
     [Parameter(Mandatory = $false)]
-    [string[]]$Sizes = @("1600x1000", "1280x820", "960x640"),
+    [string[]]$Sizes = @("1600x1000", "1280x820", "1236x771", "960x640"),
     [Parameter(Mandatory = $false)]
     [ValidateRange(5, 120)]
     [int]$TimeoutSeconds = 30
@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $fixtureServer = Join-Path $repoRoot "tests\visual\fixture_server.py"
 $allowedViews = @("mods", "import", "nexus", "settings", "credits")
-$allowedSizes = @("1600x1000", "1280x820", "960x640")
+$allowedSizes = @("1600x1000", "1280x820", "1236x771", "960x640")
 foreach ($view in $Views) {
     if ($allowedViews -notcontains $view) { throw "Unknown view: $view" }
 }

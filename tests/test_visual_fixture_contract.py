@@ -110,8 +110,10 @@ def test_capture_script_covers_matrix_ready_handshake_timeout_and_process_tree_c
     source = (ROOT / "scripts" / "capture_ui.ps1").read_text(encoding="utf-8-sig")
     for view in VIEWS:
         assert f'"{view}"' in source
-    for size in ("1600x1000", "1280x820", "960x640"):
+    compare = (ROOT / "scripts" / "compare_ui_screenshots.py").read_text(encoding="utf-8")
+    for size in ("1600x1000", "1280x820", "1236x771", "960x640"):
         assert size in source
+        assert size in compare
     for token in (
         "msedge.exe", "--headless", "--virtual-time-budget=3000", "finally",
         "fixture_server.py", "OutputPath", "--ready-dir", "capture=", ".ready",

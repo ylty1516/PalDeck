@@ -34,11 +34,11 @@ button:hover:not(:disabled), .btn:hover:not(:disabled) { transform: translateY(-
 button:active:not(:disabled), .btn:active:not(:disabled) { transform: translateY(1px) scale(.98); }
 :focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 72%, white); outline-offset: 3px; }
 
-.background-layer { position: fixed; inset: calc(-1 * var(--background-blur)); z-index: -3; background-color: var(--bg); background-image: var(--background-url); background-size: cover; background-repeat: no-repeat; background-position: var(--background-position); filter: blur(var(--background-blur)); transform: scale(1.03); }
+.background-layer { position: fixed; inset: calc(-1 * var(--background-blur)); z-index: 0; background-color: var(--bg); background-image: var(--background-url); background-size: cover; background-repeat: no-repeat; background-position: var(--background-position); filter: blur(var(--background-blur)); transform: scale(1.03); }
 .background-layer::after { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) calc(var(--background-mask) * 100%), transparent); backdrop-filter: saturate(.9); }
 #petalCanvas { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
 
-.app-shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--statusbar-height); width: 100vw; height: 100vh; padding: 14px; gap: var(--shell-gap); overflow: hidden; }
+.app-shell { position: relative; z-index: 1; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--statusbar-height); width: 100vw; height: 100vh; padding: 14px; gap: var(--shell-gap); overflow: hidden; }
 .glass-panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(20px) saturate(1.15); }
 .sidebar { grid-row: 1 / -1; border-radius: 26px; padding: 22px 14px; display: flex; flex-direction: column; min-height: 0; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 2px 10px 28px; }
@@ -77,10 +77,11 @@ nav { display: grid; gap: 8px; }
 .status-segment small { display: block; margin-bottom: 2px; color: var(--muted); font-size: 11px; }
 .status-segment strong { font-size: 12px; }
 .status-icon { flex: 0 0 auto; color: var(--accent); font-size: 25px; }
-.status-path .compact { margin-left: auto; padding: 6px 16px; }
+.status-path > span { flex: 1 1 auto; min-width: 0; }
+.status-path .compact { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; min-width: 52px; min-height: 34px; margin-left: auto; padding: 0 12px; line-height: 1; text-align: center; }
 .status-config { cursor: pointer; }
 .status-config > :last-child { margin-left: auto; font-size: 22px; color: var(--muted); }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 8px 16px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 8px 8px 16px; }
 h1 { margin: 0; font-size: clamp(22px, 3vw, 30px); }
 h2 { margin: 0 0 14px; font-size: 18px; }
 h3 { margin: 0; }
@@ -127,7 +128,7 @@ p { line-height: 1.55; }
 .mod-source-cell small, .mod-state-cell small { max-width: 100%; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .mod-version-cell { color: var(--muted); font-size: 12px; }
 .state-label { font-size: 12px; }.state-enabled { color: #18a876; }.state-disabled { color: #7c8a9f; }.state-modified, .state-missing, .state-conflict { color: var(--danger); }
-.mod-actions { justify-content: flex-end; flex-wrap: nowrap; }
+.mod-actions { min-width: 0; justify-content: flex-end; flex-wrap: wrap; }
 .btn.compact { padding: 7px 10px; font-size: 11px; white-space: nowrap; }
 .mod-row-path { position: absolute; left: 71px; right: 14px; bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .72; }
 label { display: grid; gap: 6px; color: var(--muted); }
@@ -177,7 +178,7 @@ hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
 .nexus-toolbar { margin-bottom: 14px; padding: 13px; border-radius: var(--radius); }
 .nexus-search-line { display: flex; align-items: end; gap: 9px; }
 .nexus-search-line .btn { display: inline-flex; align-items: center; gap: 7px; }
-.nexus-sort-tabs { display: flex; gap: 8px; margin-top: 11px; }
+.nexus-sort-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
 .nexus-source-status { margin: 10px 2px 0; font-size: 11px; }
 .nexus-catalog-layout { display: grid; grid-template-columns: minmax(0, 1fr) 238px; align-items: start; gap: 13px; }
 .nexus-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
@@ -252,6 +253,17 @@ dialog::backdrop { background: rgba(8, 15, 28, .55); backdrop-filter: blur(4px);
   .app-shell { padding: 22px; }
   .nav-item { padding: 15px 18px; font-size: 16px; }
 }
+@media (max-width: 1350px) {
+  .mod-list-header { display: none; }
+  .mod-row { grid-template-columns: minmax(0, 1fr) minmax(150px, .72fr) auto; grid-template-areas: "identity state actions" "source version actions"; align-items: start; padding-bottom: 22px; }
+  .mod-identity { grid-area: identity; }
+  .mod-source-cell { grid-area: source; }
+  .mod-version-cell { grid-area: version; text-align: right; }
+  .mod-state-cell { grid-area: state; }
+  .mod-actions { grid-area: actions; justify-self: end; max-width: 240px; flex-wrap: wrap; }
+  .mod-state-cell small { white-space: normal; }
+  .mod-row-path { left: 14px; }
+}
 @media (min-width: 1100px) and (max-width: 1439px) {
   :root { --sidebar-width: 236px; --statusbar-height: 62px; }
 }
@@ -270,11 +282,6 @@ dialog::backdrop { background: rgba(8, 15, 28, .55); backdrop-filter: blur(4px);
   .mod-search-row { align-items: stretch; flex-wrap: wrap; }
   .compact-filter { flex: 1; }
   .mod-stats { grid-template-columns: repeat(2, 1fr); }
-  .mod-list-header { display: none; }
-  .mod-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "identity actions" "source version" "state state"; align-items: start; padding-bottom: 22px; }
-  .mod-identity { grid-area: identity; }.mod-source-cell { grid-area: source; }.mod-version-cell { grid-area: version; text-align: right; }.mod-state-cell { grid-area: state; }.mod-actions { grid-area: actions; }
-  .mod-state-cell small { white-space: normal; }
-  .mod-row-path { left: 14px; }
   .nexus-catalog-layout { grid-template-columns: 1fr; }
   .nexus-side-rail { grid-template-columns: repeat(3, 1fr); }
   .nexus-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

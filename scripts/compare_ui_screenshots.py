@@ -11,8 +11,8 @@ from PIL import Image, ImageChops, ImageStat
 
 # Pillow is reproducibly pinned by requirements-lock.txt (currently 12.3.0).
 VIEWS = ("mods", "import", "nexus", "settings", "credits")
-SIZES = ("1600x1000", "1280x820", "960x640")
-IMAGE_NAME = re.compile(r"^(mods|import|nexus|settings|credits)-(1600x1000|1280x820|960x640)\.png$")
+SIZES = ("1600x1000", "1280x820", "1236x771", "960x640")
+IMAGE_NAME = re.compile(r"^(mods|import|nexus|settings|credits)-(1600x1000|1280x820|1236x771|960x640)\.png$")
 
 
 def normalized(image: Image.Image) -> Image.Image:

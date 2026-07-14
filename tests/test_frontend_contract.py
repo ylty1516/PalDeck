@@ -673,6 +673,19 @@ def test_v22_shell_has_brand_sidebar_workspace_statusbar_and_three_breakpoints()
     assert 'data-action="showSettingsStatus"' in html
 
 
+def test_restored_window_layout_wraps_mod_actions_and_centers_status_open_button():
+    css = CSS.read_text(encoding="utf-8")
+    assert "@media (max-width: 1350px)" in css
+    assert 'grid-template-areas: "identity state actions" "source version actions"' in css
+    assert ".mod-actions { grid-area: actions; justify-self: end; max-width: 240px; flex-wrap: wrap; }" in css
+    assert ".mod-list-header { display: none; }" in css
+    assert ".status-path > span" in css and "min-width: 0" in css
+    button = re.search(r"\.status-path \.compact \{(.*?)\}", css, re.S)
+    assert button
+    for token in ("inline-flex", "align-items: center", "justify-content: center", "min-width: 52px", "line-height: 1"):
+        assert token in button.group(1)
+
+
 def test_v22_custom_window_chrome_is_accessible_and_has_native_frame_fallback():
     html = HTML.read_text(encoding="utf-8")
     css = CSS.read_text(encoding="utf-8")
