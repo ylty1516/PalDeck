@@ -319,10 +319,105 @@ def test_first_mod_listing_discovers_preinstalled_mods_across_supported_layouts(
 
 
 def test_ue4ss_endpoints_require_authentication(app):
-    for path in ("/api/ue4ss/install-bundled", "/api/ue4ss/check-upstream", "/api/ue4ss/install-upstream"):
+    for path in (
+        "/api/ue4ss/install-bundled",
+        "/api/ue4ss/check-upstream",
+        "/api/ue4ss/install-upstream",
+        "/api/ue4ss/repair",
+        "/api/ue4ss/uninstall",
+    ):
         response = app.test_client().post(path, json={})
         assert response.status_code == 403
         assert response.json["error_code"] == "invalid_session"
+
+
+class FakeUe4ssLifecycleManager:
+    def __init__(self):
+        self.calls = []
+
+    def state(self):
+        return {
+            "installed": True,
+            "managed": True,
+            "integrity": "healthy",
+            "owned_files": 4,
+            "missing_files": 0,
+            "modified_files": 0,
+            "repair_available": True,
+            "uninstall_available": True,
+        }
+
+    def repair(self, *, confirm_replace=False):
+        self.calls.append(("repair", confirm_replace))
+        return {"ok": True, "operation": "repair", "confirmed": confirm_replace}
+
+    def uninstall(self, *, confirm_modified=False):
+        self.calls.append(("uninstall", confirm_modified))
+        return {"ok": True, "operation": "uninstall", "confirmed": confirm_modified}
+
+
+def test_ue4ss_lifecycle_status_and_strict_boolean_routes(app, auth_client):
+    manager = FakeUe4ssLifecycleManager()
+    app.extensions["ue4ss_framework_manager"] = manager
+
+    status = auth_client.get("/api/ue4ss/status")
+    repair = auth_client.post("/api/ue4ss/repair", json={"confirm_replace": True})
+    uninstall = auth_client.post("/api/ue4ss/uninstall", json={"confirm_modified": True})
+
+    assert status.json["data"]["integrity"] == "healthy"
+    assert repair.json["data"]["operation"] == "repair"
+    assert uninstall.json["data"]["operation"] == "uninstall"
+    assert manager.calls == [("repair", True), ("uninstall", True)]
+
+    for path, invalid in (
+        ("/api/ue4ss/repair", {"confirm_replace": "true"}),
+        ("/api/ue4ss/repair", {"url": "https://evil.example"}),
+        ("/api/ue4ss/uninstall", {"confirm_modified": "true"}),
+        ("/api/ue4ss/uninstall", {"path": "C:/bad"}),
+    ):
+        response = auth_client.post(path, json=invalid)
+        assert response.status_code == 400
+        assert response.json["error_code"] == "invalid_input"
+
+
+def test_ue4ss_lifecycle_conflicts_have_fixed_error_codes(
+    app, auth_client, monkeypatch
+):
+    manager = app.extensions["ue4ss_framework_manager"]
+    manager.provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
+    manager.game_running = lambda: False
+    monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
+    manager.install_bundled()
+    dll = manager.win64 / "ue4ss/UE4SS.dll"
+    dll.write_bytes(b"modified")
+
+    repair = auth_client.post("/api/ue4ss/repair", json={})
+    uninstall = auth_client.post("/api/ue4ss/uninstall", json={})
+
+    assert repair.status_code == 409
+    assert repair.json["error_code"] == "ue4ss_repair_conflict"
+    assert uninstall.status_code == 409
+    assert uninstall.json["error_code"] == "ue4ss_modified_files"
+
+
+def test_ue4ss_repair_checks_workshop_conflict_but_uninstall_does_not(
+    app, auth_client, monkeypatch
+):
+    manager = FakeUe4ssLifecycleManager()
+    app.extensions["ue4ss_framework_manager"] = manager
+    monkeypatch.setattr(
+        app.extensions["workshop_service"],
+        "active_ue4ss_mods",
+        lambda: [{"workshop_id": "123"}],
+    )
+
+    repair = auth_client.post("/api/ue4ss/repair", json={})
+    uninstall = auth_client.post("/api/ue4ss/uninstall", json={})
+
+    assert repair.status_code == 409
+    assert repair.json["error_code"] == "ue4ss_conflict"
+    assert uninstall.status_code == 200
+    assert manager.calls == [("uninstall", False)]
 
 
 @pytest.mark.parametrize("mod_operation", ["install", "set_enabled"])
@@ -354,8 +449,9 @@ def test_mod_service_and_ue4ss_install_share_game_write_lock(
     provider = FakeUe4ssProvider(_ue4ss_zip_bytes())
     app.extensions["ue4ss_provider"] = provider
     monkeypatch.setattr(
-        "backend.ue4ss_installer.install_from_bytes",
-        lambda *_a, **_k: entered_ue4ss.set() or {"ok": True},
+        app.extensions["ue4ss_framework_manager"],
+        "install_bundled",
+        lambda **_k: entered_ue4ss.set() or {"ok": True},
     )
 
     def run_mod():
@@ -388,7 +484,7 @@ def test_all_ue4ss_write_routes_share_one_game_lock(app, monkeypatch):
     zip_entered = threading.Event()
     responses = []
 
-    def blocking_bytes(*_args, **_kwargs):
+    def blocking_bytes(**_kwargs):
         entered.set()
         assert release.wait(5)
         return {"ok": True}
@@ -397,8 +493,9 @@ def test_all_ue4ss_write_routes_share_one_game_lock(app, monkeypatch):
         zip_entered.set()
         return {"ok": True}
 
-    monkeypatch.setattr("backend.ue4ss_installer.install_from_bytes", blocking_bytes)
-    monkeypatch.setattr("backend.ue4ss_installer.install_from_zip", observing_zip)
+    manager = app.extensions["ue4ss_framework_manager"]
+    monkeypatch.setattr(manager, "install_bundled", blocking_bytes)
+    monkeypatch.setattr(manager, "install_local_zip", observing_zip)
 
     def bundled_request():
         client = app.test_client(); client.get("/?token=test-token")
@@ -1317,12 +1414,16 @@ def test_concurrent_workshop_ue4ss_enable_and_bundled_install_never_both_succeed
     monkeypatch.setattr("backend.ue4ss_installer.is_palworld_running", lambda: False)
 
     installed = []
-    def install_manual(root, *_args, **_kwargs):
-        win64 = Path(root) / "Pal" / "Binaries" / "Win64"
+    def install_manual(**_kwargs):
+        win64 = game_root / "Pal" / "Binaries" / "Win64"
         (win64 / "dwmapi.dll").write_bytes(b"manual")
         installed.append(True)
         return {"installed": True}
-    monkeypatch.setattr("backend.ue4ss_installer.install_from_bytes", install_manual)
+    monkeypatch.setattr(
+        app.extensions["ue4ss_framework_manager"],
+        "install_bundled",
+        install_manual,
+    )
 
     barrier = threading.Barrier(2)
     responses = []

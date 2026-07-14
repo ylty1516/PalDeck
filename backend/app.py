@@ -41,7 +41,12 @@ from backend.trash_service import (
     TrashPayloadMissing,
     TrashPayloadModified,
 )
-from backend.ue4ss_manager import Ue4ssFrameworkManager, Ue4ssLifecycleError
+from backend.ue4ss_manager import (
+    Ue4ssFrameworkManager,
+    Ue4ssLifecycleError,
+    Ue4ssModifiedFiles,
+    Ue4ssRepairConflict,
+)
 from backend.ue4ss_provider import Ue4ssProvider
 from backend.version import APP_VERSION
 
@@ -286,6 +291,18 @@ def create_app(
     @app.errorhandler(ue4ss_installer.Ue4ssConflictError)
     def handle_ue4ss_conflict(exc: ue4ss_installer.Ue4ssConflictError):
         return failure("检测到已有 UE4SS 安装，确认后可替换", 409, "ue4ss_conflict", exc.details)
+
+    @app.errorhandler(Ue4ssRepairConflict)
+    def handle_ue4ss_repair_conflict(exc: Ue4ssRepairConflict):
+        return failure(str(exc), 409, "ue4ss_repair_conflict", exc.details)
+
+    @app.errorhandler(Ue4ssModifiedFiles)
+    def handle_ue4ss_modified(exc: Ue4ssModifiedFiles):
+        return failure(str(exc), 409, "ue4ss_modified_files", exc.details)
+
+    @app.errorhandler(Ue4ssLifecycleError)
+    def handle_ue4ss_lifecycle(exc: Ue4ssLifecycleError):
+        return failure(str(exc), 409, "ue4ss_lifecycle_conflict", exc.details)
 
     @app.errorhandler(PermissionError)
     def handle_permission(_exc: PermissionError):
@@ -733,14 +750,17 @@ def create_app(
     def ensure_folders():
         return success(game_detector.ensure_mod_folders(service().game_root))
 
-    def ue4ss_install_body() -> bool:
+    def strict_boolean_body(field: str, operation: str) -> bool:
         body = request.get_json(silent=True)
-        if not isinstance(body, dict) or not set(body) <= {"confirm_replace"}:
-            raise ApiError("UE4SS 安装请求仅接受 confirm_replace", 400, "invalid_input")
-        confirm = body.get("confirm_replace", False)
-        if not isinstance(confirm, bool):
-            raise ApiError("confirm_replace 必须是布尔值", 400, "invalid_input")
-        return confirm
+        if not isinstance(body, dict) or not set(body) <= {field}:
+            raise ApiError(f"{operation}请求仅接受 {field}", 400, "invalid_input")
+        value = body.get(field, False)
+        if type(value) is not bool:
+            raise ApiError(f"{field} 必须是布尔值", 400, "invalid_input")
+        return value
+
+    def ue4ss_install_body() -> bool:
+        return strict_boolean_body("confirm_replace", "UE4SS 安装")
 
     def serialized_asset(asset):
         return asdict(asset) if asset is not None else None
@@ -763,7 +783,7 @@ def create_app(
 
     @app.get("/api/ue4ss/status")
     def ue4ss_status():
-        result = ue4ss_installer.status(service().game_root)
+        result = dict(ue4ss_framework_manager().state())
         bundled = app.extensions["ue4ss_provider"].bundled_status()
         result["bundled"] = {
             **bundled,
@@ -771,24 +791,44 @@ def create_app(
         }
         return success(result)
 
+    @app.post("/api/ue4ss/repair")
+    def ue4ss_repair():
+        confirm = strict_boolean_body("confirm_replace", "UE4SS 修复")
+        with ue4ss_game_lock(service().game_root):
+            reject_active_workshop_ue4ss()
+            return success(
+                ue4ss_framework_manager().repair(confirm_replace=confirm)
+            )
+
+    @app.post("/api/ue4ss/uninstall")
+    def ue4ss_uninstall():
+        confirm = strict_boolean_body("confirm_modified", "UE4SS 卸载")
+        with ue4ss_game_lock(service().game_root):
+            return success(
+                ue4ss_framework_manager().uninstall(confirm_modified=confirm)
+            )
+
     @app.post("/api/ue4ss/install-bundled")
     def ue4ss_bundled():
         confirm = ue4ss_install_body()
         current = service()
         provider = app.extensions["ue4ss_provider"]
+        manager = ue4ss_framework_manager()
+        manager.provider = provider
         with ue4ss_game_lock(current.game_root):
             reject_active_workshop_ue4ss()
             try:
-                payload = provider.bundled_archive()
+                return success(manager.install_bundled(confirm_replace=confirm))
+            except (
+                ue4ss_installer.Ue4ssConflictError,
+                ue4ss_installer.Ue4ssGameRunningError,
+            ):
+                raise
             except Exception as exc:
                 app.logger.error("Bundled UE4SS validation failed", exc_info=exc)
                 raise ApiError(
                     "内置 UE4SS 资源损坏或不可用", 500, "bundled_resource_invalid"
                 ) from exc
-            return success(ue4ss_installer.install_from_bytes(
-                current.game_root, payload, confirm_replace=confirm,
-                require_palworld_layout=True,
-            ))
 
     @app.post("/api/ue4ss/check-upstream")
     def ue4ss_check_upstream():
@@ -839,9 +879,12 @@ def create_app(
                         "ue4ss_check_expired",
                     )
                 try:
-                    result = ue4ss_installer.install_from_zip(
-                        current.game_root, archive, confirm_replace=confirm,
-                        require_palworld_layout=True,
+                    manager = ue4ss_framework_manager()
+                    manager.provider = provider
+                    result = manager.install_upstream(
+                        pending_asset["asset"],
+                        archive,
+                        confirm_replace=confirm,
                     )
                 except ue4ss_installer.Ue4ssConflictError:
                     with app.extensions["ue4ss_pending_lock"]:
@@ -876,9 +919,14 @@ def create_app(
         try:
             with ue4ss_game_lock(current.game_root):
                 reject_active_workshop_ue4ss()
-                return success(ue4ss_installer.install_from_zip(
-                    current.game_root, dest, confirm_replace=confirm_raw == "true"
-                ))
+                manager = ue4ss_framework_manager()
+                manager.provider = app.extensions["ue4ss_provider"]
+                return success(
+                    manager.install_local_zip(
+                        dest,
+                        confirm_replace=confirm_raw == "true",
+                    )
+                )
         finally:
             dest.unlink(missing_ok=True)
 
