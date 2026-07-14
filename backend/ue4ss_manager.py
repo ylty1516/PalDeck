@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -120,6 +121,7 @@ class Ue4ssFrameworkManager:
         asset_name: str,
         asset_sha256: str,
         repair: bool,
+        require_palworld_layout: bool = True,
     ) -> dict[str, object]:
         self._assert_stopped()
         with game_write_lock(self.data_dir):
@@ -127,7 +129,7 @@ class Ue4ssFrameworkManager:
                 self.game_root,
                 payload,
                 confirm_replace=repair,
-                require_palworld_layout=True,
+                require_palworld_layout=require_palworld_layout,
                 preserve_mutable=repair,
             )
             files = tuple(OwnedFrameworkFile(**item) for item in result["installed_files"])
@@ -159,6 +161,27 @@ class Ue4ssFrameworkManager:
             asset_name=asset.name,
             asset_sha256=asset.sha256,
             repair=False,
+        )
+
+    def install_local_zip(self, zip_path: str | os.PathLike[str]) -> dict[str, object]:
+        current = self.state()
+        if current["status"] == "external":
+            raise Ue4ssLifecycleError("检测到外部 UE4SS，PalDeck 不会接管或覆盖")
+        if current["status"] == "managed":
+            raise Ue4ssLifecycleError("UE4SS 已由 PalDeck 管理，请使用修复")
+        archive = Path(zip_path)
+        if not archive.is_file() or archive.suffix.casefold() != ".zip":
+            raise ValueError("UE4SS 安装仅支持本地 .zip")
+        if archive.stat().st_size > ue4ss_installer.UE4SS_ARCHIVE_POLICY.max_total_bytes:
+            raise ValueError("UE4SS ZIP 超过安全大小限制")
+        payload = archive.read_bytes()
+        return self._install_payload(
+            payload,
+            source="local_zip",
+            asset_name=archive.name,
+            asset_sha256=hashlib.sha256(payload).hexdigest(),
+            repair=False,
+            require_palworld_layout=False,
         )
 
     def repair(self) -> dict[str, object]:

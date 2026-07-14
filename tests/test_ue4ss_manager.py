@@ -81,6 +81,22 @@ def test_bundled_install_creates_owned_auditable_record(fake_game_root, tmp_path
     assert state["owned_files"] == 6
 
 
+def test_local_zip_install_is_owned_but_not_claimed_as_bundled(
+    fake_game_root, tmp_path
+):
+    archive = tmp_path / "custom-ue4ss.zip"
+    archive.write_bytes(archive_bytes())
+    service = manager(fake_game_root, tmp_path)
+
+    service.install_local_zip(archive)
+
+    state = service.state()
+    assert state["ownership"] == "PalDeck"
+    assert state["source"] == "local_zip"
+    assert state["asset_name"] == "custom-ue4ss.zip"
+    assert state["asset_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
 def test_modified_core_requires_repair_and_repair_preserves_mutable_config(
     fake_game_root, tmp_path
 ):
