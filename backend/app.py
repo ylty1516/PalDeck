@@ -30,6 +30,7 @@ from backend.import_selection import SelectionExpiredError, SelectionRegistry
 from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
 from backend.storage import JsonStore
+from backend.ue4ss_manager import Ue4ssFrameworkManager, Ue4ssLifecycleError
 from backend.ue4ss_provider import Ue4ssProvider
 from backend.version import APP_VERSION
 
@@ -121,6 +122,11 @@ def create_app(
         app.extensions["trash_service"] = mod_service.trash_service
         app.extensions["ignored_mod_store"] = mod_service.ignored_store
         app.extensions["workshop_service"] = workshop_service
+        app.extensions["ue4ss_framework_manager"] = Ue4ssFrameworkManager(
+            path,
+            writable,
+            provider=app.extensions["ue4ss_provider"],
+        )
         app.extensions["trash_cleanup"] = mod_service.purge_expired_trash()
         return mod_service
 
@@ -184,6 +190,14 @@ def create_app(
 
     def workshop_service(required: bool = True) -> SteamWorkshopService | None:
         current = app.extensions.get("workshop_service")
+        if current is None and required:
+            raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
+        return current
+
+    def ue4ss_framework_manager(
+        required: bool = True,
+    ) -> Ue4ssFrameworkManager | None:
+        current = app.extensions.get("ue4ss_framework_manager")
         if current is None and required:
             raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
         return current

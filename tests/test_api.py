@@ -118,6 +118,9 @@ def test_game_services_share_data_scope_and_rebuild_for_a_new_game(
     assert first.ignored_store.path == Path(app.config["DATA_DIR"]) / "ignored-mods-v1.json"
     assert app.extensions["trash_service"] is first.trash_service
     assert app.extensions["ignored_mod_store"] is first.ignored_store
+    framework = app.extensions["ue4ss_framework_manager"]
+    assert framework.data_dir == Path(app.config["DATA_DIR"])
+    assert framework.game_root == first.game_root
     first_fingerprint = first.trash_service.game_fingerprint
 
     second_root = tmp_path / "SecondPalworld"
@@ -135,6 +138,8 @@ def test_game_services_share_data_scope_and_rebuild_for_a_new_game(
     assert app.extensions["trash_service"] is second.trash_service
     assert app.extensions["ignored_mod_store"] is second.ignored_store
     assert app.extensions["workshop_service"].game_root == second_root
+    assert app.extensions["ue4ss_framework_manager"].game_root == second_root
+    assert app.extensions["ue4ss_framework_manager"] is not framework
 
 
 def test_mods_success_uses_standard_envelope(auth_client):
