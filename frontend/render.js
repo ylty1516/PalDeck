@@ -35,7 +35,51 @@ const MOD_STATUS = Object.freeze({
   conflict: { label: "文件冲突", integrity: "完整性异常" },
 });
 
-export function renderMods(container, mods) {
+export function renderModValueEditor(capability, id, { loading = false, error = "" } = {}) {
+  const editor = el("section", "mod-value-editor");
+  editor.dataset.modId = String(id);
+  editor.setAttribute("aria-label", "Mod 数值调整");
+  const heading = el("div", "mod-value-heading");
+  heading.append(el("h4", "", capability?.display_name || "调整数值"));
+  if (capability?.description) heading.append(el("p", "muted", capability.description));
+  editor.append(heading);
+  const result = el("div", `mod-value-result${error ? " error" : ""}`, error || (loading ? "正在读取安全配置…" : ""));
+  result.setAttribute("aria-live", "polite");
+  editor.append(result);
+  if (loading || !capability) return editor;
+
+  editor.dataset.revision = String(capability.revision || "");
+  const fields = el("div", "mod-value-fields");
+  for (const [index, field] of (Array.isArray(capability.fields) ? capability.fields : []).entries()) {
+    const wrapper = el("label", "mod-value-field");
+    const inputId = `mod-value-${id}-${index}`;
+    const label = el("span", "mod-value-label", field.label || field.key);
+    const input = el("input", "mod-value-input");
+    input.id = inputId;
+    input.type = "number";
+    input.value = String(field.value);
+    input.min = String(field.min);
+    input.max = String(field.max);
+    input.step = field.step == null ? "any" : String(field.step);
+    input.dataset.key = String(field.key || "");
+    input.dataset.valueType = String(field.type || "float");
+    const range = el("small", "mod-value-range", `范围 ${field.min} – ${field.max}${field.step == null ? "" : ` · 步长 ${field.step}`}`);
+    wrapper.htmlFor = inputId;
+    wrapper.append(label, input, range);
+    if (field.description) wrapper.append(el("small", "mod-value-description", field.description));
+    fields.append(wrapper);
+  }
+  const actions = el("div", "button-row mod-value-actions");
+  const cancel = actionButton("取消", "cancelModValues", "btn");
+  cancel.dataset.id = String(id);
+  const save = actionButton("保存并应用", "saveModValues", "btn primary");
+  save.dataset.id = String(id);
+  actions.append(cancel, save);
+  editor.append(fields, actions);
+  return editor;
+}
+
+export function renderMods(container, mods, options = {}) {
   if (!mods.length) return renderMessage(container, "没有符合当前条件的模组。", "empty-state glass-panel");
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
@@ -90,6 +134,7 @@ export function renderMods(container, mods) {
       if (!toggleAllowed) state.append(el("small", "repair-hint", "请修复文件或重扫；异常状态不可启停。"));
     }
 
+    const expanded = !workshop && String(options.expandedId || "") === id;
     const actions = el("div", "button-row mod-actions");
     if (workshop) {
       const toggle = actionButton(mod.enabled ? "禁用" : "启用", "toggleWorkshop", "btn compact");
@@ -122,11 +167,25 @@ export function renderMods(container, mods) {
         actions.append(rescan);
       }
       actions.append(remove);
+      if (mod.adjustable_values === true) {
+        const valueToggle = actionButton("调整数值 ▼", "toggleModValues", "btn compact value-toggle");
+        valueToggle.dataset.id = id;
+        valueToggle.textContent = expanded ? "调整数值 ▲" : "调整数值 ▼";
+        valueToggle.setAttribute("aria-expanded", String(expanded));
+        actions.append(valueToggle);
+      }
     }
 
     const path = el("p", "mod-path mod-row-path", mod.source_dir || mod.install_path || "");
     path.title = path.textContent;
     card.append(identity, source, version, state, actions, path);
+    if (expanded) {
+      card.classList.add("has-value-editor");
+      card.append(renderModValueEditor(options.capability, id, {
+        loading: options.loading === true,
+        error: options.error || "",
+      }));
+    }
     fragment.append(card);
   }
   container.replaceChildren(fragment);

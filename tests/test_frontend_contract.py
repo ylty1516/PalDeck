@@ -21,7 +21,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "unmanageMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "restoreTrash", "purgeTrash", "useGamePath", "openNexus", "copyNexusId"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "unmanageMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "restoreTrash", "purgeTrash", "toggleModValues", "saveModValues", "cancelModValues", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -53,6 +53,34 @@ def parsed_html() -> ContractParser:
     parser = ContractParser()
     parser.feed(HTML.read_text(encoding="utf-8"))
     return parser
+
+
+def test_mod_value_button_and_inline_editor_use_safe_dynamic_contract():
+    render = RENDER.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    assert "mod.adjustable_values === true" in render
+    assert 'actionButton("调整数值 ▼", "toggleModValues"' in render
+    assert 'valueToggle.setAttribute("aria-expanded"' in render
+    assert "export function renderModValueEditor" in render
+    assert 'input.type = "number"' in render
+    assert "mod-value-input" in render
+    assert 'actionButton("保存并应用", "saveModValues"' in render
+    assert 'actionButton("取消", "cancelModValues"' in render
+    assert 'case "toggleModValues":' in app
+    assert 'case "saveModValues":' in app
+    assert 'case "cancelModValues":' in app
+    assert 'request(`/api/mods/${encodeURIComponent(id)}/values`' in app
+    assert "mod_values_stale" in app
+    assert ".mod-value-editor" in css
+    assert "@media (max-width: 959px)" in css
+    assert "innerHTML" not in render
+
+
+def test_mod_value_button_is_rendered_after_other_local_actions_at_lower_right():
+    render = RENDER.read_text(encoding="utf-8")
+    assert render.index('actionButton("移入回收站"') < render.index('actionButton("调整数值 ▼"')
+    assert "valueToggle.dataset.id = id" in render
 
 
 def test_v23_mod_cards_expose_safe_trash_and_external_actions():

@@ -16,6 +16,7 @@ const state = {
   importQueue: [], activeImportId: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   trash: { items: [], invalid_records: [] }, ue4ssUpdateAvailable: false,
+  expandedModValueId: null, modValueCapability: null, modValueLoading: false, modValueError: "",
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", petal_style: "natural", background: "default" },
@@ -234,7 +235,12 @@ function filterMods() {
   });
   renderModStats(view.stats);
   $("#modResultCount").textContent = `${view.items.length} 项`;
-  renderMods($("#modList"), view.items);
+  renderMods($("#modList"), view.items, {
+    expandedId: state.expandedModValueId,
+    capability: state.modValueCapability,
+    loading: state.modValueLoading,
+    error: state.modValueError,
+  });
 }
 
 async function loadTrash({ open = false } = {}) {
@@ -277,6 +283,75 @@ async function unmanageMod(id) {
   await request(`/api/mods/${encodeURIComponent(id)}/unmanage`, { method: "POST", body: {} });
   await Promise.all([loadMods(), loadIgnoredMods()]);
   toast("已取消管理并保留游戏文件", "success");
+}
+
+function closeModValues() {
+  state.expandedModValueId = null;
+  state.modValueCapability = null;
+  state.modValueLoading = false;
+  state.modValueError = "";
+  filterMods();
+}
+
+async function toggleModValues(id) {
+  if (state.expandedModValueId === id) {
+    closeModValues();
+    return;
+  }
+  state.expandedModValueId = id;
+  state.modValueCapability = null;
+  state.modValueLoading = true;
+  state.modValueError = "";
+  filterMods();
+  try {
+    const capability = await request(`/api/mods/${encodeURIComponent(id)}/values`);
+    if (state.expandedModValueId !== id) return;
+    state.modValueCapability = capability;
+    state.modValueLoading = false;
+    filterMods();
+    document.querySelector(`.mod-row[data-id="${CSS.escape(id)}"] .mod-value-input`)?.focus();
+  } catch (error) {
+    if (state.expandedModValueId === id) {
+      state.modValueLoading = false;
+      state.modValueError = actionableErrorMessage(error);
+      filterMods();
+    }
+    throw error;
+  }
+}
+
+async function saveModValues(id, target) {
+  const card = target.closest(".mod-row");
+  const editor = card?.querySelector(".mod-value-editor");
+  if (!editor || state.expandedModValueId !== id || !state.modValueCapability) {
+    throw new ApiError("数值编辑器状态已失效，请重新展开");
+  }
+  const values = {};
+  for (const input of editor.querySelectorAll(".mod-value-input")) {
+    if (!input.dataset.key || input.value.trim() === "") throw new ApiError("请填写所有数值字段");
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) throw new ApiError("数值必须是有限数字");
+    values[input.dataset.key] = value;
+  }
+  const resultNode = editor.querySelector(".mod-value-result");
+  resultNode.textContent = "正在验证并原子保存配置…";
+  try {
+    const saved = await request(`/api/mods/${encodeURIComponent(id)}/values`, {
+      method: "POST",
+      body: { revision: state.modValueCapability.revision, values },
+      timeout: 120000,
+    });
+    state.modValueCapability = saved;
+    state.modValueError = "";
+    await loadMods();
+    toast("Mod 数值已保存并更新清单", "success");
+  } catch (error) {
+    state.modValueError = error instanceof ApiError && error.code === "mod_values_stale"
+      ? "配置已被其他程序修改，请收起后重新加载当前值。"
+      : actionableErrorMessage(error);
+    filterMods();
+    throw error;
+  }
 }
 
 function isSupportedModFile(file) {
@@ -991,6 +1066,9 @@ async function handleDynamicAction(event) {
       case "unmanageMod": await unmanageMod(id); break;
       case "restoreTrash": await restoreTrash(id); break;
       case "purgeTrash": await purgeTrash(id); break;
+      case "toggleModValues": await toggleModValues(id); break;
+      case "saveModValues": await saveModValues(id, target); break;
+      case "cancelModValues": closeModValues(); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
       case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;

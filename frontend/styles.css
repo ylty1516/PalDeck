@@ -132,6 +132,21 @@ p { line-height: 1.55; }
 .mod-actions { min-width: 0; justify-content: flex-end; flex-wrap: wrap; }
 .btn.compact { padding: 7px 10px; font-size: 11px; white-space: nowrap; }
 .mod-row-path { position: absolute; left: 71px; right: 14px; bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .72; }
+.mod-row.has-value-editor { padding-bottom: 14px; }
+.mod-row.has-value-editor .mod-row-path { position: static; grid-column: 1 / -1; margin-top: 2px; }
+.value-toggle { margin-left: auto; }
+.mod-value-editor { grid-column: 1 / -1; min-width: 0; margin-top: 2px; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: color-mix(in srgb, var(--panel-solid) 78%, transparent); }
+.mod-value-heading h4 { margin: 0; font-size: 14px; }
+.mod-value-heading p { margin: 4px 0 0; font-size: 11px; }
+.mod-value-result { min-height: 18px; margin: 7px 0; color: var(--muted); font-size: 11px; }
+.mod-value-result.error { color: var(--danger); }
+.mod-value-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.mod-value-field { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: color-mix(in srgb, var(--panel-solid) 72%, transparent); }
+.mod-value-label { color: var(--text); font-weight: 700; }
+.mod-value-input { min-width: 0; }
+.mod-value-range, .mod-value-description { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.mod-value-description { white-space: normal; overflow-wrap: anywhere; }
+.mod-value-actions { justify-content: flex-end; margin-top: 12px; }
 label { display: grid; gap: 6px; color: var(--muted); }
 input, select { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 11px; padding: 8px 11px; background: color-mix(in srgb, var(--panel-solid) 88%, transparent); }
 input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -284,6 +299,7 @@ dialog::backdrop { background: rgba(8, 15, 28, .55); backdrop-filter: blur(4px);
   .mod-actions { grid-area: actions; justify-self: end; max-width: 320px; flex-wrap: wrap; }
   .mod-state-cell small { white-space: normal; }
   .mod-row-path { left: 14px; }
+  .mod-value-fields { grid-template-columns: 1fr; }
 }
 @media (min-width: 1100px) and (max-width: 1439px) {
   :root { --sidebar-width: 236px; --statusbar-height: 62px; }
