@@ -22,7 +22,7 @@ from .version import APP_VERSION
 
 USER_AGENT = f"PalworldModManager/{APP_VERSION}"
 TRUSTED_GITHUB_OWNER = "ylty1516"
-TRUSTED_GITHUB_REPO = "palworld-mod-manager"
+TRUSTED_GITHUB_REPO = "PalDeck"
 _CHECKSUM_LINE = re.compile(r"^([0-9a-fA-F]{64})  ([^\r\n]+)\r?\n?$")
 
 
