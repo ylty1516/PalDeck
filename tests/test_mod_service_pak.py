@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from backend.domain import AuditStatus, ModKind
-from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
+from backend.mod_service import (
+    GameRunningError,
+    ModConflictError,
+    ModifiedFilesError,
+    ModService,
+    NotExternalModError,
+)
 from backend.process_utils import (
     ProcessCheckError,
     is_directory_writable,
@@ -555,6 +561,61 @@ def test_initial_discovery_defers_while_game_runs_and_retries_later(fake_game_ro
     assert found["name"] == "BeforePalDeck"
     assert service._discovery_marker().is_file()
     assert service.discover_existing_once()[0]["id"] == found["id"]
+
+
+def test_external_rescan_mod_can_be_unmanaged_ignored_and_rediscovered(
+    fake_game_root, tmp_path
+):
+    live = _live(fake_game_root)
+    live.mkdir(parents=True, exist_ok=True)
+    existing = live / "BeforePalDeck.pak"
+    existing.write_bytes(b"external")
+    service = _service(fake_game_root, tmp_path)
+    [found] = service.rescan()
+    assert found["externally_discovered"] is True
+
+    result = service.unmanage(found["id"])
+
+    assert result == {"ok": True, "unmanaged": found["id"]}
+    assert existing.read_bytes() == b"external"
+    assert service.list_mods() == []
+    assert service.rescan() == []
+    assert service.ignored_summary()["count"] == 1
+
+    rediscovered = service.reset_ignored_and_rescan()
+    assert len(rediscovered) == 1
+    assert rediscovered[0]["name"] == "BeforePalDeck"
+    assert rediscovered[0]["externally_discovered"] is True
+
+
+def test_paldeck_installed_mod_cannot_be_unmanaged(fake_game_root, tmp_path):
+    source = tmp_path / "Managed.pak"
+    source.write_bytes(b"managed")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+
+    with pytest.raises(NotExternalModError):
+        service.unmanage(installed["id"])
+
+    assert (_live(fake_game_root) / source.name).read_bytes() == b"managed"
+
+
+def test_ignored_reset_while_game_runs_keeps_entries(fake_game_root, tmp_path):
+    live = _live(fake_game_root)
+    live.mkdir(parents=True, exist_ok=True)
+    (live / "Running.pak").write_bytes(b"external")
+    running = {"value": False}
+    service = ModService(
+        fake_game_root, tmp_path / "data", game_running=lambda: running["value"]
+    )
+    [found] = service.rescan()
+    service.unmanage(found["id"])
+    running["value"] = True
+
+    with pytest.raises(GameRunningError):
+        service.reset_ignored_and_rescan()
+
+    assert service.ignored_summary()["count"] == 1
 
 
 def test_list_mods_returns_real_audit(fake_game_root, tmp_path):

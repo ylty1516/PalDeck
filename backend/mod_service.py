@@ -24,6 +24,7 @@ from .game_detector import (
     is_ue4ss_framework_mod,
 )
 from .game_lock import game_write_lock
+from .ignored_mod_store import IgnoredIdentity, IgnoredModStore
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
 from .trash_service import TrashService
@@ -56,6 +57,11 @@ class ModifiedFilesError(RuntimeError):
     def __init__(self, files: Iterable[Path | str]):
         self.details = {"files": [str(path) for path in files]}
         super().__init__("模组文件已修改")
+
+
+class NotExternalModError(RuntimeError):
+    """A PalDeck-installed mod cannot be removed from management only."""
+
 
 
 def _sha256(path: Path) -> str:
@@ -101,6 +107,7 @@ class ModService:
         self.trash_service = TrashService(
             self.game_root, self.data_dir, game_running=self.game_running,
         )
+        self.ignored_store = IgnoredModStore(self.data_dir / "ignored-mods-v1.json")
         self._migrate_legacy_once()
 
     def _transaction_lock(self, timeout: float = 10.0):
@@ -240,6 +247,7 @@ class ModService:
         value["files"] = [item.relative_path for item in manifest.files]
         value["size_bytes"] = sum(item.size for item in manifest.files)
         value["notes"] = "由 Palworld Mod Manager 管理"
+        value["externally_discovered"] = manifest.source_name == "rescan"
         if manifest.ue4ss_enabled_txt is not None:
             value["ue4ss_enabled_txt"] = asdict(manifest.ue4ss_enabled_txt)
         value["audit"] = {
@@ -757,6 +765,135 @@ class ModService:
     def purge_expired_trash(self) -> dict[str, object]:
         return self.trash_service.purge_expired()
 
+    def _ignored_identity(self, manifest: ModManifest) -> IgnoredIdentity:
+        if manifest.kind is ModKind.PAK:
+            key = next(
+                (item.relative_path for item in manifest.files if Path(item.relative_path).suffix.casefold() == ".pak"),
+                manifest.files[0].relative_path,
+            )
+            return IgnoredIdentity("pak", "tilde_mods", Path(key).name)
+        if manifest.kind is ModKind.LOGICPAK:
+            key = next(
+                (item.relative_path for item in manifest.files if Path(item.relative_path).suffix.casefold() == ".pak"),
+                manifest.files[0].relative_path,
+            )
+            return IgnoredIdentity("logicpak", "logic_mods", Path(key).name)
+        parent = Path(os.path.abspath(manifest.install_root.parent))
+        roots = self.trash_service.original_roots
+        if parent == roots["ue4ss_classic"]:
+            root = "ue4ss_classic"
+        elif parent == roots["ue4ss_nested"]:
+            root = "ue4ss_nested"
+        else:
+            raise ValueError("UE4SS manifest is outside supported roots")
+        return IgnoredIdentity("ue4ss", root, manifest.install_root.name)
+
+    def _is_ignored(self, identity: IgnoredIdentity) -> bool:
+        return self.ignored_store.contains(
+            self.trash_service.game_fingerprint, identity
+        )
+
+    @staticmethod
+    def _copy_verified(source: Path, destination: Path, expected_sha256: str) -> None:
+        validate_no_reparse_ancestors(source)
+        validate_no_reparse_ancestors(destination)
+        if _is_reparse(source) or not source.is_file():
+            raise ValueError("UE4SS enabled metadata is missing or unsafe")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with source.open("rb") as reader, temporary.open("xb") as writer:
+                shutil.copyfileobj(reader, writer)
+                writer.flush()
+                os.fsync(writer.fileno())
+            if _sha256(temporary) != expected_sha256:
+                raise ValueError("UE4SS enabled metadata checksum mismatch")
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @_locked_write
+    def unmanage(self, manifest_id: str) -> dict[str, object]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        manifest = self.store.get(manifest_id)
+        if manifest.source_name != "rescan":
+            raise NotExternalModError("只有外部发现模组可以取消管理")
+        audit = self._audit(manifest)
+        if audit.status in (AuditStatus.MISSING, AuditStatus.CONFLICT):
+            raise RuntimeError(f"模组文件状态异常：{audit.status.value}")
+        identity = self._ignored_identity(manifest)
+        fingerprint = self.trash_service.game_fingerprint
+        metadata_source: Path | None = None
+        marker_destination: Path | None = None
+        restored_marker = False
+        self.ignored_store.add(fingerprint, identity)
+        try:
+            if manifest.kind is ModKind.UE4SS and manifest.ue4ss_enabled_txt is not None:
+                metadata_source = (
+                    self.data_dir
+                    / "disabled"
+                    / manifest.id
+                    / manifest.ue4ss_enabled_txt.relative_path
+                )
+                marker_destination = manifest.install_root / "enabled.txt"
+                if os.path.lexists(marker_destination):
+                    raise ModConflictError(
+                        {"files": [str(marker_destination)], "choices": ["cancel"]}
+                    )
+                self._copy_verified(
+                    metadata_source,
+                    marker_destination,
+                    manifest.ue4ss_enabled_txt.sha256,
+                )
+                restored_marker = True
+                metadata_source.unlink()
+            self.store.delete(manifest.id)
+        except BaseException:
+            try:
+                self.store.get(manifest.id)
+            except KeyError:
+                self.store.save(manifest)
+            if restored_marker and metadata_source is not None and marker_destination is not None:
+                self._copy_verified(
+                    marker_destination,
+                    metadata_source,
+                    manifest.ue4ss_enabled_txt.sha256,
+                )
+                marker_destination.unlink(missing_ok=True)
+            self.ignored_store.remove(fingerprint, identity)
+            raise
+        if metadata_source is not None:
+            self._remove_empty_parents(metadata_source, self.data_dir / "disabled")
+        return {"ok": True, "unmanaged": manifest.id}
+
+    def ignored_summary(self) -> dict[str, object]:
+        entries = self.ignored_store.list(self.trash_service.game_fingerprint)
+        return {
+            "count": len(entries),
+            "items": [
+                {"kind": item.kind, "root": item.root, "key": item.key}
+                for item in entries
+            ],
+        }
+
+    @_locked_write
+    def reset_ignored_and_rescan(self) -> list[dict[str, object]]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        fingerprint = self.trash_service.game_fingerprint
+        previous = self.ignored_store.list(fingerprint)
+        existing_ids = {manifest.id for manifest in self.store.list()}
+        self.ignored_store.reset(fingerprint)
+        try:
+            return self._rescan_locked()
+        except BaseException:
+            for manifest in self.store.list():
+                if manifest.id not in existing_ids and manifest.source_name == "rescan":
+                    self.store.delete(manifest.id)
+            self.ignored_store.replace(fingerprint, previous)
+            raise
+
     def _discovery_marker(self) -> Path:
         identity = str(self.game_root.resolve(strict=False)).casefold().encode("utf-8")
         return self.data_dir / "discovery" / f"{hashlib.sha256(identity).hexdigest()}.done"
@@ -803,7 +940,9 @@ class ModService:
                 if _is_reparse(pak) or not pak.is_file():
                     continue
                 key = (str(root.resolve()).casefold(), pak.name.casefold())
-                if key in tracked:
+                root_key = "logic_mods" if kind is ModKind.LOGICPAK else "tilde_mods"
+                ignored = IgnoredIdentity(kind.value, root_key, pak.name)
+                if key in tracked or self._is_ignored(ignored):
                     continue
                 group = [pak]
                 for suffix in (".utoc", ".ucas"):
@@ -829,6 +968,13 @@ class ModService:
                     or not (candidate / "Scripts" / "main.lua").is_file()
                     or str(candidate.resolve()).casefold() in tracked_roots
                 ):
+                    continue
+                root_key = (
+                    "ue4ss_nested"
+                    if Path(os.path.abspath(ue4ss_root)) == self.trash_service.original_roots["ue4ss_nested"]
+                    else "ue4ss_classic"
+                )
+                if self._is_ignored(IgnoredIdentity("ue4ss", root_key, candidate.name)):
                     continue
                 files = [path for path in candidate.rglob("*") if path.is_file() and not _is_reparse(path)]
                 enabled_txt = next((path for path in files if path.relative_to(candidate).as_posix().casefold() == "enabled.txt"), None)

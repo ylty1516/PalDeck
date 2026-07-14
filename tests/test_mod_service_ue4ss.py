@@ -205,6 +205,62 @@ def test_rescan_preserves_existing_enabled_marker_as_enabled(fake_game_root, tmp
     assert "MarkerEnabled : 1" in (mods / "mods.txt").read_text(encoding="utf-8")
 
 
+def test_external_ue4ss_unmanage_restores_enabled_marker_and_stays_ignored(
+    fake_game_root, tmp_path
+):
+    mods = _layout(fake_game_root, True)
+    candidate = mods / "ExternalLua"
+    script = candidate / "Scripts/main.lua"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"lua")
+    marker = candidate / "enabled.txt"
+    marker.write_bytes(b"marker")
+    service = _service(fake_game_root, tmp_path)
+    [found] = service.rescan()
+    assert found["externally_discovered"] is True
+    assert not marker.exists()
+    assert "ExternalLua : 1" in (mods / "mods.txt").read_text(encoding="utf-8")
+
+    service.unmanage(found["id"])
+
+    assert script.read_bytes() == b"lua"
+    assert marker.read_bytes() == b"marker"
+    assert "ExternalLua : 1" in (mods / "mods.txt").read_text(encoding="utf-8")
+    assert service.list_mods() == []
+    assert service.rescan() == []
+
+
+def test_external_ue4ss_unmanage_failure_rolls_back_marker_ignore_and_manifest(
+    fake_game_root, tmp_path, monkeypatch
+):
+    mods = _layout(fake_game_root, True)
+    candidate = mods / "RollbackExternal"
+    script = candidate / "Scripts/main.lua"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"lua")
+    marker = candidate / "enabled.txt"
+    marker.write_bytes(b"marker")
+    service = _service(fake_game_root, tmp_path)
+    [found] = service.rescan()
+    metadata = (
+        tmp_path / "data/disabled" / found["id"] / "metadata/enabled.txt"
+    )
+    assert metadata.read_bytes() == b"marker"
+    monkeypatch.setattr(
+        service.store,
+        "delete",
+        lambda _manifest_id: (_ for _ in ()).throw(OSError("manifest failed")),
+    )
+
+    with pytest.raises(OSError, match="manifest failed"):
+        service.unmanage(found["id"])
+
+    assert not marker.exists()
+    assert metadata.read_bytes() == b"marker"
+    assert service.store.get(found["id"]).id == found["id"]
+    assert service.ignored_summary()["count"] == 0
+
+
 def test_delete_ue4ss_removes_only_owned_files_and_preserves_user_additions(
     fake_game_root, tmp_path
 ):
