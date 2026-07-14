@@ -110,6 +110,33 @@ def test_testing_mode_does_not_bypass_auth(app):
     assert app.test_client().get("/api/mods").status_code == 403
 
 
+def test_game_services_share_data_scope_and_rebuild_for_a_new_game(
+    app, auth_client, tmp_path
+):
+    first = app.extensions["mod_service"]
+    assert first.trash_service.data_dir == Path(app.config["DATA_DIR"])
+    assert first.ignored_store.path == Path(app.config["DATA_DIR"]) / "ignored-mods-v1.json"
+    assert app.extensions["trash_service"] is first.trash_service
+    assert app.extensions["ignored_mod_store"] is first.ignored_store
+    first_fingerprint = first.trash_service.game_fingerprint
+
+    second_root = tmp_path / "SecondPalworld"
+    (second_root / "Pal/Binaries/Win64").mkdir(parents=True)
+    (second_root / "Pal/Content/Paks").mkdir(parents=True)
+    (second_root / "Palworld.exe").touch()
+    (second_root / "Pal/Binaries/Win64/Palworld-Win64-Shipping.exe").touch()
+    response = auth_client.post("/api/game/set", json={"path": str(second_root)})
+
+    assert response.status_code == 200
+    second = app.extensions["mod_service"]
+    assert second is not first
+    assert second.game_root == second_root
+    assert second.trash_service.game_fingerprint != first_fingerprint
+    assert app.extensions["trash_service"] is second.trash_service
+    assert app.extensions["ignored_mod_store"] is second.ignored_store
+    assert app.extensions["workshop_service"].game_root == second_root
+
+
 def test_mods_success_uses_standard_envelope(auth_client):
     response = auth_client.get("/api/mods")
     assert response.status_code == 200

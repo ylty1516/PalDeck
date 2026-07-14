@@ -112,11 +112,20 @@ def create_app(
                     game_path = str(candidate)
             except (OSError, ValueError, AttributeError):
                 pass
-    if game_path:
-        app.extensions["mod_service"] = ModService(game_path, writable)
-        app.extensions["workshop_service"] = SteamWorkshopService(
-            game_root=game_path, lock_root=writable,
+    def build_game_services(path: str | os.PathLike[str]) -> ModService:
+        mod_service = ModService(path, writable)
+        workshop_service = SteamWorkshopService(
+            game_root=path, lock_root=writable,
         )
+        app.extensions["mod_service"] = mod_service
+        app.extensions["trash_service"] = mod_service.trash_service
+        app.extensions["ignored_mod_store"] = mod_service.ignored_store
+        app.extensions["workshop_service"] = workshop_service
+        app.extensions["trash_cleanup"] = mod_service.purge_expired_trash()
+        return mod_service
+
+    if game_path:
+        build_game_services(game_path)
     pending: dict[str, dict[str, Any]] = {}
     pending_lock = threading.Lock()
     app.extensions["pending_uploads"] = pending
@@ -583,10 +592,7 @@ def create_app(
             return config
 
         config_store.update(save_game_path)
-        app.extensions["mod_service"] = ModService(path, writable)
-        app.extensions["workshop_service"] = SteamWorkshopService(
-            game_root=path, lock_root=writable,
-        )
+        build_game_services(path)
         return success(info)
 
     @app.get("/api/game/status")
