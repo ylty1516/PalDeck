@@ -59,6 +59,150 @@ class FakeUe4ssProvider:
         return Path(destination)
 
 
+def test_trash_and_external_routes_require_authentication(app):
+    client = app.test_client()
+    trash_id = "12345678123456781234567812345678"
+    mod_id = "12345678123456781234567812345678"
+    routes = (
+        ("get", "/api/trash", None),
+        ("post", f"/api/trash/{trash_id}/restore", {}),
+        ("delete", f"/api/trash/{trash_id}", None),
+        ("post", f"/api/mods/{mod_id}/unmanage", {}),
+        ("get", "/api/mods/ignored", None),
+        ("post", "/api/mods/ignored/reset", {}),
+    )
+    for method, path, body in routes:
+        response = getattr(client, method)(path, json=body)
+        assert response.status_code == 403
+        assert response.json["error_code"] == "invalid_session"
+
+
+def test_delete_moves_mod_to_trash_and_restore_round_trips(app, auth_client, tmp_path):
+    source = tmp_path / "recoverable.pak"
+    source.write_bytes(b"recoverable")
+    installed = app.extensions["mod_service"].install(source)
+
+    removed = auth_client.delete(f"/api/mods/{installed['id']}")
+
+    assert removed.status_code == 200
+    trash_id = removed.json["data"]["trash_id"]
+    assert removed.json["data"]["files_moved"] == 1
+    listed = auth_client.get("/api/trash")
+    assert listed.status_code == 200
+    assert listed.json["data"]["items"][0]["id"] == trash_id
+    assert "payload" not in str(listed.json).casefold()
+
+    restored = auth_client.post(f"/api/trash/{trash_id}/restore", json={})
+
+    assert restored.status_code == 200
+    assert restored.json["data"]["id"] == installed["id"]
+    assert source.name == restored.json["data"]["manifest_files"][0]["relative_path"]
+    assert auth_client.get("/api/trash").json["data"]["items"] == []
+
+
+def test_trash_routes_reject_invalid_ids_bodies_and_delete_queries(
+    app, auth_client, tmp_path
+):
+    assert auth_client.post("/api/trash/not-a-uuid/restore", json={}).status_code == 400
+    valid = "12345678123456781234567812345678"
+    assert auth_client.post(f"/api/trash/{valid}/restore", json={"path": "C:/bad"}).status_code == 400
+    assert auth_client.delete("/api/mods/not-a-uuid?force_modified=maybe").status_code == 400
+    assert auth_client.delete("/api/mods/not-a-uuid?extra=true").status_code == 400
+
+
+def test_trash_restore_conflict_and_permanent_purge_are_explicit(
+    app, auth_client, tmp_path
+):
+    source = tmp_path / "conflict.pak"
+    source.write_bytes(b"conflict")
+    installed = app.extensions["mod_service"].install(source)
+    trash_id = auth_client.delete(f"/api/mods/{installed['id']}").json["data"]["trash_id"]
+    destination = app.extensions["mod_service"].game_root / "Pal/Content/Paks/~mods/conflict.pak"
+    destination.write_bytes(b"external")
+
+    conflict = auth_client.post(f"/api/trash/{trash_id}/restore", json={})
+
+    assert conflict.status_code == 409
+    assert conflict.json["error_code"] == "trash_restore_conflict"
+    assert conflict.json["details"]["file_count"] == 1
+    destination.unlink()
+    purged = auth_client.delete(f"/api/trash/{trash_id}")
+    assert purged.status_code == 200
+    assert purged.json["data"]["files_deleted"] == 1
+    assert auth_client.get("/api/trash").json["data"]["items"] == []
+
+
+def test_corrupt_trash_record_is_listed_but_cannot_be_restored(
+    app, auth_client
+):
+    trash_id = "12345678123456781234567812345678"
+    records = Path(app.config["DATA_DIR"]) / "trash/records"
+    records.mkdir(parents=True, exist_ok=True)
+    (records / f"{trash_id}.json").write_text("{broken", encoding="utf-8")
+
+    listed = auth_client.get("/api/trash")
+    restored = auth_client.post(f"/api/trash/{trash_id}/restore", json={})
+
+    assert trash_id in listed.json["data"]["invalid_records"]
+    assert restored.status_code == 400
+    assert restored.json["error_code"] == "trash_record_invalid"
+
+
+def test_external_mod_can_be_unmanaged_ignored_and_rediscovered(
+    app, auth_client, fake_game_root
+):
+    pak = fake_game_root / "Pal/Content/Paks/~mods/ExternalApi.pak"
+    pak.parent.mkdir(parents=True, exist_ok=True)
+    pak.write_bytes(b"external")
+    service = app.extensions["mod_service"]
+    external = next(item for item in service.rescan() if item["name"] == "ExternalApi")
+
+    unmanaged = auth_client.post(f"/api/mods/{external['id']}/unmanage", json={})
+
+    assert unmanaged.status_code == 200
+    assert pak.read_bytes() == b"external"
+    ignored = auth_client.get("/api/mods/ignored")
+    assert ignored.status_code == 200
+    assert ignored.json["data"]["count"] == 1
+    assert service.rescan() == []
+
+    reset = auth_client.post("/api/mods/ignored/reset", json={})
+
+    assert reset.status_code == 200
+    assert reset.json["data"]["ignored_removed"] == 1
+    assert reset.json["data"]["rediscovered"] == 1
+    assert reset.json["data"]["mods"][0]["externally_discovered"] is True
+
+
+def test_ignored_reset_while_game_runs_keeps_ignore_store(
+    app, auth_client, fake_game_root
+):
+    pak = fake_game_root / "Pal/Content/Paks/~mods/StillIgnored.pak"
+    pak.parent.mkdir(parents=True, exist_ok=True)
+    pak.write_bytes(b"external")
+    service = app.extensions["mod_service"]
+    external = next(item for item in service.rescan() if item["name"] == "StillIgnored")
+    assert auth_client.post(f"/api/mods/{external['id']}/unmanage", json={}).status_code == 200
+    service.game_running = lambda: True
+
+    response = auth_client.post("/api/mods/ignored/reset", json={})
+
+    assert response.status_code == 423
+    assert response.json["error_code"] == "ignored_reset_requires_game_stopped"
+    assert service.ignored_summary()["count"] == 1
+
+
+def test_paldeck_installed_mod_cannot_be_unmanaged(app, auth_client, tmp_path):
+    source = tmp_path / "managed.pak"
+    source.write_bytes(b"managed")
+    installed = app.extensions["mod_service"].install(source)
+
+    response = auth_client.post(f"/api/mods/{installed['id']}/unmanage", json={})
+
+    assert response.status_code == 409
+    assert response.json["error_code"] == "mod_not_external"
+
+
 def test_static_assets_are_public(app):
     response = app.test_client().get("/app.js")
     assert response.status_code == 200

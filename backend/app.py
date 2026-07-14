@@ -27,9 +27,20 @@ from backend.appearance import AppearanceService
 from backend.desktop_bridge import DesktopBridge
 from backend.game_lock import game_write_lock
 from backend.import_selection import SelectionExpiredError, SelectionRegistry
-from backend.mod_service import GameRunningError, ModConflictError, ModifiedFilesError, ModService
+from backend.mod_service import (
+    GameRunningError,
+    ModConflictError,
+    ModifiedFilesError,
+    ModService,
+    NotExternalModError,
+)
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
 from backend.storage import JsonStore
+from backend.trash_service import (
+    TrashPayloadConflict,
+    TrashPayloadMissing,
+    TrashPayloadModified,
+)
 from backend.ue4ss_manager import Ue4ssFrameworkManager, Ue4ssLifecycleError
 from backend.ue4ss_provider import Ue4ssProvider
 from backend.version import APP_VERSION
@@ -202,6 +213,16 @@ def create_app(
             raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
         return current
 
+    def require_empty_json(message: str = "请求不接受参数") -> None:
+        if request.get_json(silent=True) != {}:
+            raise ApiError(message, 400, "invalid_input")
+
+    def validate_uuid(value: str, *, code: str = "invalid_input") -> str:
+        try:
+            return uuid.UUID(value).hex
+        except (ValueError, AttributeError) as exc:
+            raise ApiError("ID 必须是有效 UUID", 400, code) from exc
+
     @app.before_request
     def require_session():
         cleanup_pending_uploads()
@@ -234,6 +255,28 @@ def create_app(
     @app.errorhandler(ModifiedFilesError)
     def handle_modified_files(exc: ModifiedFilesError):
         return failure("模组文件已修改，确认后可强制删除", 409, "modified_files", exc.details)
+
+    @app.errorhandler(NotExternalModError)
+    def handle_not_external(_exc: NotExternalModError):
+        return failure("只有外部发现模组可以取消管理", 409, "mod_not_external")
+
+    @app.errorhandler(TrashPayloadConflict)
+    def handle_trash_conflict(exc: TrashPayloadConflict):
+        files = list(exc.details.get("files", []))[:20]
+        return failure(
+            "回收站恢复目标已存在，未覆盖任何文件",
+            409,
+            "trash_restore_conflict",
+            {"files": files, "file_count": len(exc.details.get("files", []))},
+        )
+
+    @app.errorhandler(TrashPayloadMissing)
+    def handle_trash_missing(_exc: TrashPayloadMissing):
+        return failure("回收站负载文件缺失", 409, "trash_payload_missing")
+
+    @app.errorhandler(TrashPayloadModified)
+    def handle_trash_modified(_exc: TrashPayloadModified):
+        return failure("回收站负载文件已被修改", 409, "trash_payload_modified")
 
     @app.errorhandler(GameRunningError)
     @app.errorhandler(ue4ss_installer.Ue4ssGameRunningError)
@@ -576,8 +619,78 @@ def create_app(
 
     @app.delete("/api/mods/<mod_id>")
     def delete_mod(mod_id: str):
-        force = request.args.get("force_modified", "false").casefold() == "true"
-        return success(service().delete(mod_id, force_modified=force))
+        if set(request.args) - {"force_modified"} or len(
+            request.args.getlist("force_modified")
+        ) > 1:
+            raise ApiError("删除请求仅接受 force_modified", 400, "invalid_input")
+        raw_force = request.args.get("force_modified", "false").casefold()
+        if raw_force not in {"true", "false"}:
+            raise ApiError("force_modified 必须是布尔值", 400, "invalid_input")
+        return success(service().delete(mod_id, force_modified=raw_force == "true"))
+
+    @app.get("/api/trash")
+    def list_trash():
+        current = service()
+        current.purge_expired_trash()
+        return success(current.list_trash())
+
+    @app.post("/api/trash/<trash_id>/restore")
+    def restore_trash(trash_id: str):
+        require_empty_json("恢复请求不接受参数")
+        normalized = validate_uuid(trash_id, code="trash_record_invalid")
+        current = service()
+        try:
+            record = current.trash_service.store.get(normalized)
+        except ValueError as exc:
+            raise ApiError("回收站记录损坏", 400, "trash_record_invalid") from exc
+        if record.entry_type == "ue4ss_framework":
+            return success(ue4ss_framework_manager().restore(normalized))
+        return success(current.restore_trash(normalized))
+
+    @app.delete("/api/trash/<trash_id>")
+    def purge_trash(trash_id: str):
+        if request.args:
+            raise ApiError("彻底删除请求不接受参数", 400, "invalid_input")
+        normalized = validate_uuid(trash_id, code="trash_record_invalid")
+        try:
+            return success(service().purge_trash(normalized))
+        except ValueError as exc:
+            raise ApiError("回收站记录损坏", 400, "trash_record_invalid") from exc
+
+    @app.post("/api/mods/<mod_id>/unmanage")
+    def unmanage_mod(mod_id: str):
+        require_empty_json("取消管理请求不接受参数")
+        validate_uuid(mod_id)
+        return success(service().unmanage(mod_id))
+
+    @app.get("/api/mods/ignored")
+    def ignored_mods():
+        if request.args:
+            raise ApiError("忽略清单请求不接受参数", 400, "invalid_input")
+        return success(service().ignored_summary())
+
+    @app.post("/api/mods/ignored/reset")
+    def reset_ignored_mods():
+        require_empty_json("重新发现请求不接受参数")
+        current = service()
+        previous = current.ignored_summary()["count"]
+        try:
+            mods = current.reset_ignored_and_rescan()
+        except GameRunningError as exc:
+            raise ApiError(
+                "请先关闭幻兽帕鲁，再重新发现已忽略模组",
+                423,
+                "ignored_reset_requires_game_stopped",
+            ) from exc
+        return success(
+            {
+                "ignored_removed": previous,
+                "rediscovered": sum(
+                    1 for item in mods if item.get("externally_discovered") is True
+                ),
+                "mods": mods,
+            }
+        )
 
     @app.post("/api/mods/resync")
     def resync_mods():
