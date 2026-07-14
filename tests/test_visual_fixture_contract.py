@@ -34,8 +34,23 @@ def test_fixture_files_are_fixed_safe_json_for_all_views():
         assert fixture["view"] == view
         assert isinstance(fixture["api"], dict)
         assert all(path.startswith("/api/") for path in fixture["api"])
+        assert fixture["api"]["/api/health"]["version"] == "2.3.0-fixture"
+        assert "/api/trash" in fixture["api"]
 
         assert list(_walk(fixture)), "fixture must contain deterministic content"
+
+    mods = json.loads((FIXTURES / "mods.json").read_text(encoding="utf-8"))
+    local = [item for item in mods["api"]["/api/mods"] if item.get("source") != "steam_workshop"]
+    assert any(item.get("externally_discovered") is True for item in local)
+    assert any(item.get("externally_discovered") is False for item in local)
+    trash = mods["api"]["/api/trash"]
+    assert trash["items"] and all("payload" not in key.casefold() for item in trash["items"] for key in item)
+
+    settings = json.loads((FIXTURES / "settings.json").read_text(encoding="utf-8"))
+    ue4ss = settings["api"]["/api/ue4ss/status"]
+    assert ue4ss["managed"] is True and ue4ss["integrity"] == "healthy"
+    assert ue4ss["owned_files"] > 0
+    assert settings["api"]["/api/mods/ignored"]["count"] >= 0
 
     nexus = json.loads((FIXTURES / "nexus.json").read_text(encoding="utf-8"))
     serialized = json.dumps(nexus, ensure_ascii=False).lower()

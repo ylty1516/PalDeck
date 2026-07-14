@@ -1,10 +1,12 @@
 {
   "view": "settings",
   "api": {
-    "/api/health": {"version": "2.2.0-fixture"},
+    "/api/health": {"version": "2.3.0-fixture"},
     "/api/appearance": {"theme": "aurora-glass", "mask": 0.35, "blur": 0, "position": "center", "petals": "off", "petal_style": "natural", "background": "default"},
     "/api/game/status": {"configured": true, "valid": true, "path": "D:\\SteamLibrary\\steamapps\\common\\Palworld", "has_ue4ss": true},
     "/api/mods": [],
-    "/api/ue4ss/status": {"installed": true, "version": "Palworld-fixed", "bundled": {"asset": {"updated_at": "2026-07-01", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
+    "/api/trash": {"items": [], "invalid_records": []},
+    "/api/mods/ignored": {"count": 2, "items": [{"kind": "pak", "root": "tilde_mods", "key": "OldCamera.pak"}, {"kind": "ue4ss", "root": "ue4ss_nested", "key": "LegacyTools"}]},
+    "/api/ue4ss/status": {"installed": true, "managed": true, "integrity": "healthy", "owned_files": 20, "missing_files": 0, "modified_files": 0, "conflict_files": 0, "repair_available": true, "uninstall_available": true, "version": "Palworld-fixed", "bundled": {"asset": {"updated_at": "2026-07-01", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
   }
 }
