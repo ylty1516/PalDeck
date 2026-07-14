@@ -21,7 +21,7 @@ REQUIRED_ACTIONS = {
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
     "installUe4ss", "checkUpdate", "restartAdmin",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "useGamePath", "openNexus", "copyNexusId"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "unmanageMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "restoreTrash", "purgeTrash", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -53,6 +53,58 @@ def parsed_html() -> ContractParser:
     parser = ContractParser()
     parser.feed(HTML.read_text(encoding="utf-8"))
     return parser
+
+
+def test_v23_mod_cards_expose_safe_trash_and_external_actions():
+    html = HTML.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    assert "externally_discovered" in render
+    assert 'actionButton("取消管理", "unmanageMod"' in render
+    assert 'actionButton("移入回收站", "deleteMod"' in render
+    assert 'data-action="showTrash"' in html
+    assert "此模组的受管文件将移入 PalDeck 回收站并保留 30 天" in html
+    assert "此操作不可撤销" not in html.split('id="deleteModal"', 1)[1].split("</dialog>", 1)[0]
+    assert 'case "unmanageMod":' in app
+    assert 'request(`/api/mods/${encodeURIComponent(id)}/unmanage`' in app
+
+
+def test_v23_trash_dialog_uses_fixed_ids_focus_and_safe_dom_rendering():
+    html = HTML.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    assert 'id="trashModal"' in html
+    assert 'aria-labelledby="trashTitle"' in html
+    assert 'id="trashList"' in html
+    assert "export function renderTrash" in render
+    assert 'actionButton("恢复", "restoreTrash"' in render
+    assert 'actionButton("彻底删除", "purgeTrash"' in render
+    assert "记录损坏，已禁止文件操作" in render
+    assert "innerHTML" not in render
+    assert 'request("/api/trash")' in app
+    assert 'case "restoreTrash":' in app
+    assert 'case "purgeTrash":' in app
+    assert "彻底删除且无法恢复" in app
+
+
+def test_v23_ue4ss_lifecycle_and_ignored_reset_controls_are_real():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    for token in (
+        'id="ue4ssIntegrity"', 'id="ue4ssOwnedFiles"',
+        'id="ue4ssAbnormalFiles"', 'data-action="repairUe4ss"',
+        'data-action="uninstallUe4ss"', 'id="ignoredModsCount"',
+        'data-action="resetIgnoredMods"',
+    ):
+        assert token in html
+    for endpoint in (
+        '"/api/ue4ss/repair"', '"/api/ue4ss/uninstall"',
+        '"/api/mods/ignored"', '"/api/mods/ignored/reset"',
+    ):
+        assert endpoint in app
+    assert "confirm_replace" in app
+    assert "confirm_modified" in app
+    assert "owned_files" in app and "missing_files" in app and "modified_files" in app
 
 
 def test_html_has_exactly_five_pages_and_required_layers():
@@ -677,7 +729,7 @@ def test_restored_window_layout_wraps_mod_actions_and_centers_status_open_button
     css = CSS.read_text(encoding="utf-8")
     assert "@media (max-width: 1350px)" in css
     assert 'grid-template-areas: "identity state actions" "source version actions"' in css
-    assert ".mod-actions { grid-area: actions; justify-self: end; max-width: 240px; flex-wrap: wrap; }" in css
+    assert ".mod-actions { grid-area: actions; justify-self: end; max-width: 320px; flex-wrap: wrap; }" in css
     assert ".mod-list-header { display: none; }" in css
     assert ".status-path > span" in css and "min-width: 0" in css
     button = re.search(r"\.status-path \.compact \{(.*?)\}", css, re.S)

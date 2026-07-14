@@ -13,7 +13,8 @@ export function normalizedModState(mod) {
 }
 
 function normalizedModSource(mod) {
-  return mod.source || "local";
+  if (mod.source === "steam_workshop") return "steam_workshop";
+  return mod.externally_discovered === true ? "external" : "local";
 }
 
 function containsQuery(mod, query) {
@@ -41,7 +42,10 @@ export function deriveModView(mods, { query = "", source = "", status = "" } = {
   const statusFilter = status == null ? "" : String(status);
   const items = sourceItems.filter((mod) => {
     const modState = normalizedModState(mod);
-    const sourceMatches = !sourceFilter || sourceFilter === "all" || normalizedModSource(mod) === sourceFilter;
+    const normalizedSource = normalizedModSource(mod);
+    const sourceMatches = !sourceFilter || sourceFilter === "all"
+      || (sourceFilter === "local" && normalizedSource !== "steam_workshop")
+      || normalizedSource === sourceFilter;
     const statusMatches = !statusFilter || statusFilter === "all" || modState === statusFilter;
     return sourceMatches && statusMatches && containsQuery(mod, normalizedQuery);
   });

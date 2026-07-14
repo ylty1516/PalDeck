@@ -6,7 +6,7 @@ import {
   actionableErrorMessage, createRevisionGuard, createSerialQueue, dynamicActionKey, nextModsGeneration,
   pendingUploadTokenAfterError, resetModFileSelectionState,
 } from "./interaction-policy.js";
-import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, validatedNexusUrl } from "./render.js";
+import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, renderTrash, validatedNexusUrl } from "./render.js";
 import { callWindowControl, chooseModFolder as chooseNativeModFolder, initializeWindowControls } from "./window-controls.js";
 import { createImportQueue, deriveModView, reduceImportQueue } from "./ui-model.js";
 
@@ -15,7 +15,7 @@ const state = {
   mods: [], nexus: [], credits: [], gamePath: "", selectedModFile: null, selectedSelectionToken: null,
   importQueue: [], activeImportId: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
-  ue4ssUpdateAvailable: false,
+  trash: { items: [], invalid_records: [] }, ue4ssUpdateAvailable: false,
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
   appearance: { theme: "aurora-glass", mask: 0.35, blur: 0, position: "center", petals: "medium", petal_style: "natural", background: "default" },
@@ -31,7 +31,7 @@ const VIEW_COPY = Object.freeze({
   credits: ["开源致谢", "感谢开放源代码项目与社区资料"],
 });
 const UE4SS_WRITE_ACTIONS = new Set([
-  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip",
+  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip", "repairUe4ss", "uninstallUe4ss",
 ]);
 const LOCAL_INPUT_ACTIONS = new Set([
   "filterMods", "filterModSource", "filterModStatus", "changeImportType", "editImportName", "editImportNexusId",
@@ -235,6 +235,48 @@ function filterMods() {
   renderModStats(view.stats);
   $("#modResultCount").textContent = `${view.items.length} 项`;
   renderMods($("#modList"), view.items);
+}
+
+async function loadTrash({ open = false } = {}) {
+  const payload = await request("/api/trash");
+  state.trash = payload && typeof payload === "object" ? payload : { items: [], invalid_records: [] };
+  const count = (state.trash.items?.length || 0) + (state.trash.invalid_records?.length || 0);
+  $("#trashCount").textContent = String(count);
+  renderTrash($("#trashList"), state.trash);
+  if (open && !$("#trashModal").open) openModal($("#trashModal"));
+  return state.trash;
+}
+
+async function restoreTrash(id) {
+  $("#trashResult").textContent = "正在验证负载并恢复文件…";
+  try {
+    await request(`/api/trash/${encodeURIComponent(id)}/restore`, { method: "POST", body: {}, timeout: 120000 });
+    $("#trashResult").textContent = "恢复完成";
+    await Promise.all([loadTrash(), loadMods()]);
+    toast("模组已从回收站恢复", "success");
+  } catch (error) {
+    $("#trashResult").textContent = `恢复失败：${actionableErrorMessage(error)}`;
+    throw error;
+  }
+}
+
+async function purgeTrash(id) {
+  if (!window.confirm("此记录的文件将彻底删除且无法恢复。是否继续？")) return;
+  $("#trashResult").textContent = "正在彻底删除回收负载…";
+  await request(`/api/trash/${encodeURIComponent(id)}`, { method: "DELETE", timeout: 120000 });
+  $("#trashResult").textContent = "记录已彻底删除";
+  await loadTrash();
+  toast("回收记录已彻底删除", "success");
+}
+
+async function unmanageMod(id) {
+  const mod = state.mods.find((item) => String(item.id) === String(id));
+  const name = mod?.name || id;
+  if (!window.confirm(`取消管理“${name}”？游戏文件会保留，后续刷新不再接管；可在设置中重新发现。`)) return;
+  beginModsWrite();
+  await request(`/api/mods/${encodeURIComponent(id)}/unmanage`, { method: "POST", body: {} });
+  await Promise.all([loadMods(), loadIgnoredMods()]);
+  toast("已取消管理并保留游戏文件", "success");
 }
 
 function isSupportedModFile(file) {
@@ -464,15 +506,16 @@ async function deletePendingMod() {
   const suffix = state.pendingDeleteForce ? "?force_modified=true" : "";
   beginModsWrite();
   try {
-    await request(`/api/mods/${encodeURIComponent(id)}${suffix}`, { method: "DELETE" });
+    const removed = await request(`/api/mods/${encodeURIComponent(id)}${suffix}`, { method: "DELETE" });
     state.pendingDeleteId = null;
     state.pendingDeleteForce = false;
-    await loadMods();
-    toast("模组已删除", "success");
+    await Promise.all([loadMods(), loadTrash()]);
+    const expiry = removed.expires_at ? new Date(removed.expires_at).toLocaleDateString("zh-CN") : "30 天后";
+    toast(`模组已移入回收站，保留至 ${expiry}`, "success");
   } catch (error) {
     if (error instanceof ApiError && error.status === 409 && error.code === "modified_files" && !state.pendingDeleteForce) {
       state.pendingDeleteForce = true;
-      $("#deleteMessage").textContent = "检测到已修改文件。再次确认将强制删除这些文件，此操作不可撤销。";
+      $("#deleteMessage").textContent = "检测到已修改文件。再次确认会将实际修改内容一并移入 PalDeck 回收站并保留 30 天。";
       renderConflict($("#deleteDetails"), error.details);
       openModal($("#deleteModal"));
       return;
@@ -605,18 +648,98 @@ function showPathInfo(status) {
 }
 
 async function loadUe4ssStatus() {
-  if (!state.gamePath) { $("#ue4ssStatus").textContent = "请先配置游戏目录"; return; }
+  if (!state.gamePath) { $("#ue4ssStatus").textContent = "请先配置游戏目录"; return null; }
   const status = await request("/api/ue4ss/status");
-  $("#ue4ssStatus").textContent = status.installed ? "UE4SS 已安装" : "UE4SS 未安装";
+  const integrityLabels = {
+    not_installed: "未安装", unmanaged: "外部安装", healthy: "正常",
+    missing: "文件缺失", modified: "文件已修改", conflict: "路径冲突",
+  };
+  $("#ue4ssStatus").textContent = status.installed
+    ? (status.managed ? "UE4SS 已由 PalDeck 管理" : "检测到外部 UE4SS")
+    : "UE4SS 未安装";
+  $("#ue4ssIntegrity").textContent = integrityLabels[status.integrity] || "未知";
+  $("#ue4ssOwnedFiles").textContent = String(status.owned_files || 0);
+  $("#ue4ssAbnormalFiles").textContent = String((status.missing_files || 0) + (status.modified_files || 0) + (status.conflict_files || 0));
+  $("#installUe4ssButton").hidden = status.installed === true;
+  $("#repairUe4ssButton").hidden = status.repair_available !== true;
+  $("#uninstallUe4ssButton").hidden = status.uninstall_available !== true;
   const asset = status.bundled?.asset;
   $("#ue4ssUpdatedAt").textContent = asset?.updated_at ? `内置更新：${asset.updated_at}` : "内置资源不可用";
   $("#ue4ssDigest").textContent = asset?.sha256 ? `SHA-256：${asset.sha256.slice(0, 10)}` : "";
+  return status;
+}
+
+async function loadIgnoredMods() {
+  if (!state.gamePath) { $("#ignoredModsCount").textContent = "0"; return { count: 0, items: [] }; }
+  const ignored = await request("/api/mods/ignored");
+  $("#ignoredModsCount").textContent = String(ignored.count || 0);
+  return ignored;
+}
+
+async function resetIgnoredMods() {
+  const count = Number($("#ignoredModsCount").textContent) || 0;
+  if (!count) { toast("当前没有已忽略的外部模组", "info"); return; }
+  if (!window.confirm(`重新发现 ${count} 个已忽略 Mod？PalDeck 将立即安全重扫游戏目录。`)) return;
+  const result = await request("/api/mods/ignored/reset", { method: "POST", body: {}, timeout: 120000 });
+  state.mods = Array.isArray(result.mods) ? result.mods : [];
+  filterMods();
+  $("#ignoredModsCount").textContent = "0";
+  toast(`已重新发现 ${result.rediscovered || 0} 个外部模组`, "success");
+}
+
+async function repairUe4ss() {
+  const output = $("#ue4ssResult");
+  const invoke = (confirmReplace) => request("/api/ue4ss/repair", {
+    method: "POST", body: confirmReplace ? { confirm_replace: true } : {}, timeout: 120000,
+  });
+  output.textContent = "正在检查 UE4SS 完整性…";
+  try {
+    let result;
+    try { result = await invoke(false); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.code !== "ue4ss_repair_conflict") throw error;
+      const abnormal = (error.details?.modified?.length || 0) + (error.details?.conflicts?.length || 0);
+      if (!window.confirm(`检测到 ${abnormal || "若干"} 个需要替换的 UE4SS 文件。修复会保留用户 Mod 和配置，是否继续？`)) return;
+      output.textContent = "正在备份并修复 UE4SS 核心文件…";
+      result = await invoke(true);
+    }
+    output.textContent = result.unchanged ? "UE4SS 完整性正常，无需修改" : "UE4SS 修复完成，用户 Mod 与配置已保留";
+    await Promise.all([loadUe4ssStatus(), loadMods()]);
+    toast("UE4SS 检查与修复完成", "success");
+  } catch (error) {
+    output.textContent = `UE4SS 修复失败：${actionableErrorMessage(error)}`;
+    throw error;
+  }
+}
+
+async function uninstallUe4ss() {
+  const output = $("#ue4ssResult");
+  if (!window.confirm("安全卸载只会将 PalDeck 识别的 UE4SS 核心文件移入回收站；用户 Mod 和配置会保留。是否继续？")) return;
+  const invoke = (confirmModified) => request("/api/ue4ss/uninstall", {
+    method: "POST", body: confirmModified ? { confirm_modified: true } : {}, timeout: 120000,
+  });
+  output.textContent = "正在审计并回收 UE4SS 核心文件…";
+  try {
+    let result;
+    try { result = await invoke(false); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.code !== "ue4ss_modified_files") throw error;
+      if (!window.confirm(`检测到 ${error.details?.file_count || "若干"} 个已修改核心文件。确认后实际内容也会进入回收站，是否继续？`)) return;
+      result = await invoke(true);
+    }
+    output.textContent = "UE4SS 已安全卸载，可在回收站恢复";
+    await Promise.all([loadUe4ssStatus(), loadTrash(), loadMods()]);
+    toast(`UE4SS 已移入回收站（${String(result.trash_id || "").slice(0, 8)}）`, "success");
+  } catch (error) {
+    output.textContent = `UE4SS 卸载失败：${actionableErrorMessage(error)}`;
+    throw error;
+  }
 }
 
 async function loadSettings() {
   const status = await request("/api/game/status");
   if (status.configured) showPathInfo(status);
-  await loadUe4ssStatus();
+  await Promise.all([loadUe4ssStatus(), loadIgnoredMods()]);
 }
 
 async function installWithUe4ssConfirmation(operation) {
@@ -703,15 +826,13 @@ export const ACTION_HANDLERS = Object.freeze({
   windowMaximize: async () => callWindowControl("toggle_maximize"),
   windowClose: async () => callWindowControl("close"),
   restartAdmin: async () => { await request("/api/system/restart-admin", { method: "POST", body: {} }); toast("正在请求管理员权限", "success"); },
+  showTrash: async () => loadTrash({ open: true }),
+  closeTrash: () => $("#trashModal").close(),
   refreshMods: async () => {
     beginModsWrite();
-    try {
-      await request("/api/mods/resync", { method: "POST", body: {}, timeout: 120000 });
-      await loadMods();
-      toast("已重新扫描游戏模组目录", "success");
-    } finally {
-      endModsWrite();
-    }
+    await request("/api/mods/resync", { method: "POST", body: {}, timeout: 120000 });
+    await loadMods();
+    toast("已重新扫描游戏模组目录", "success");
   },
   openModsFolder: async () => request("/api/mods/open-folder"),
   filterMods: () => filterMods(),
@@ -736,6 +857,8 @@ export const ACTION_HANDLERS = Object.freeze({
   saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); toast("游戏路径已保存", "success"); },
   repairFolders: async () => { await request("/api/game/ensure-folders", { method: "POST", body: {} }); toast("模组目录已修复", "success"); },
   installUe4ss: async () => installFixedUe4ss("/api/ue4ss/install-bundled"),
+  repairUe4ss: async () => repairUe4ss(),
+  uninstallUe4ss: async () => uninstallUe4ss(),
   checkUe4ss: async () => checkUe4ssUpstream(),
   installUe4ssUpdate: async () => installFixedUe4ss("/api/ue4ss/install-upstream"),
   chooseUe4ssZip: () => $("#ue4ssZipInput").click(),
@@ -779,6 +902,7 @@ export const ACTION_HANDLERS = Object.freeze({
   petalStyleNatural: choosePetalStyle,
   petalStyleWatercolor: choosePetalStyle,
   petalStyleMinimal: choosePetalStyle,
+  resetIgnoredMods: async () => resetIgnoredMods(),
   saveAppearance: async () => {
     const revision = appearanceRevisions.capture();
     const { theme, mask, blur, position, petals, petal_style } = state.appearance;
@@ -863,7 +987,10 @@ async function handleDynamicAction(event) {
       case "openWorkshopFolder": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-folder`), { disable: false }); break;
       case "openSteamWorkshop": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-page`, { method: "POST", body: {} }), { disable: false }); break;
       case "rescanMods": beginModsWrite(); await request("/api/mods/resync", { method: "POST", body: {} }); await loadMods(); toast("重扫完成", "success"); break;
-      case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `确定删除“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”吗？`; openModal($("#deleteModal")); break;
+      case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”的受管文件将移入 PalDeck 回收站并保留 30 天。`; openModal($("#deleteModal")); break;
+      case "unmanageMod": await unmanageMod(id); break;
+      case "restoreTrash": await restoreTrash(id); break;
+      case "purgeTrash": await purgeTrash(id); break;
       case "useGamePath": $("#gamePathInput").value = target.dataset.path || ""; toast("已填入检测到的路径", "success"); break;
       case "openNexus": await run(target, () => openValidatedNexus(target), { disable: false }); break;
       case "copyNexusId": await run(target, () => copyNexusId(target), { disable: false }); break;
@@ -904,11 +1031,12 @@ async function init() {
   document.addEventListener("change", dispatchStatic);
   $("#modList").addEventListener("click", handleDynamicAction);
   $("#modList").addEventListener("change", handleDynamicAction);
+  $("#trashList").addEventListener("click", handleDynamicAction);
   $("#detectList").addEventListener("click", handleDynamicAction);
   $("#nexusGrid").addEventListener("click", handleDynamicAction);
   $("#creditsCore").addEventListener("click", handleDynamicAction);
   $("#creditsDependencies").addEventListener("click", handleDynamicAction);
-  for (const dialog of [$("#conflictModal"), $("#deleteModal"), $("#workshopDependencyModal")]) {
+  for (const dialog of [$("#conflictModal"), $("#deleteModal"), $("#trashModal"), $("#workshopDependencyModal")]) {
     dialog.addEventListener("close", restoreFocus);
   }
   $("#conflictModal").addEventListener("cancel", async (event) => {
@@ -933,7 +1061,7 @@ async function init() {
     $("#creditsVersion").textContent = `v${health.version || "-"}`;
     applyAppearance(appearance); refreshBackground();
     if (game.configured) showPathInfo(game);
-    await loadMods();
+    await Promise.all([loadMods(), game.configured ? loadTrash() : Promise.resolve()]);
   } catch (error) { updateShellStatus({ healthy: false }); toast(actionableErrorMessage(error), "error"); }
 }
 

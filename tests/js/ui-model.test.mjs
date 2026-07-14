@@ -51,6 +51,20 @@ test("deriveModView normalizes missing source to local and supports all or empty
   assert.deepEqual(mods, snapshot);
 });
 
+test("external filter distinguishes discovered mods while local keeps both local kinds", () => {
+  const mods = [
+    { id: "managed", source: "local", status: "enabled", externally_discovered: false },
+    { id: "external", source: "local", status: "disabled", externally_discovered: true },
+    { workshop_id: "9", source: "steam_workshop", valid: true, enabled: true },
+  ];
+  const external = deriveModView(mods, { source: "external" });
+  const local = deriveModView(mods, { source: "local" });
+  assert.deepEqual(external.items.map((item) => item.id), ["external"]);
+  assert.deepEqual(local.items.map((item) => item.id), ["managed", "external"]);
+  assert.equal(external.stats.total, 3);
+  assert.equal(local.stats.total, 3);
+});
+
 test("deriveModView safely excludes malformed records", () => {
   const valid = { id: "ok", name: "Safe", source: "local", status: "enabled" };
   const result = deriveModView([null, [], "bad", 42, valid], { source: "local", query: "safe" });

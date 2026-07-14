@@ -40,6 +40,7 @@ export function renderMods(container, mods) {
   const fragment = document.createDocumentFragment();
   for (const mod of mods) {
     const workshop = mod.source === "steam_workshop";
+    const externallyDiscovered = !workshop && mod.externally_discovered === true;
     const rawStatus = workshop
       ? (mod.valid === false ? "conflict" : (mod.enabled === true ? "enabled" : "disabled"))
       : (mod.status || mod.audit?.status || (mod.enabled === true ? "enabled" : "disabled"));
@@ -48,7 +49,7 @@ export function renderMods(container, mods) {
     const toggleAllowed = workshop ? mod.can_toggle !== false && mod.valid !== false : ["enabled", "disabled"].includes(status);
     const id = String(workshop ? mod.workshop_id : mod.id);
     const name = mod.name || mod.mod_name || (workshop ? `Workshop ${id}` : "未命名模组");
-    const card = el("article", `mod-row glass-panel${workshop ? " source-workshop" : ""} status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
+    const card = el("article", `mod-row glass-panel${workshop ? " source-workshop" : ""}${externallyDiscovered ? " source-external" : ""} status-${status}${status === "disabled" ? " disabled-mod" : ""}`);
     card.dataset.id = id;
 
     const identity = el("div", "mod-identity");
@@ -67,7 +68,12 @@ export function renderMods(container, mods) {
       ? (Array.isArray(mod.install_types) && mod.install_types.length ? mod.install_types.join(" / ") : "未知")
       : (mod.mod_type || "unknown");
     const typeDetails = workshop ? types : `${types} · ${formatBytes(mod.size_bytes)}`;
-    source.append(el("span", `badge${workshop ? " source-badge" : ""}`, workshop ? "Steam Workshop" : "本地模组"), el("small", "mod-type", typeDetails));
+    const sourceLabel = workshop ? "Steam Workshop" : (externallyDiscovered ? "外部发现" : "PalDeck 安装");
+    source.append(
+      el("span", `badge${workshop ? " source-badge" : ""}${externallyDiscovered ? " external-badge" : " managed-badge"}`, sourceLabel),
+      el("small", "mod-type", typeDetails),
+    );
+    if (externallyDiscovered) source.append(el("small", "external-hint", "安装 PalDeck 前已存在"));
 
     const version = el("div", "mod-version-cell", mod.version || "未提供");
     const state = el("div", "mod-state-cell");
@@ -102,9 +108,14 @@ export function renderMods(container, mods) {
       toggle.disabled = !toggleAllowed;
       const open = actionButton("文件夹", "openModFolder", "btn compact");
       open.dataset.id = id;
-      const remove = actionButton("删除", "deleteMod", "btn compact danger");
+      const remove = actionButton("移入回收站", "deleteMod", "btn compact danger");
       remove.dataset.id = id;
       actions.append(toggle, open);
+      if (externallyDiscovered) {
+        const unmanage = actionButton("取消管理", "unmanageMod", "btn compact warning");
+        unmanage.dataset.id = id;
+        actions.append(unmanage);
+      }
       if (!toggleAllowed) {
         const rescan = actionButton("重扫", "rescanMods", "btn compact");
         rescan.dataset.id = id;
@@ -119,6 +130,44 @@ export function renderMods(container, mods) {
     fragment.append(card);
   }
   container.replaceChildren(fragment);
+}
+
+export function renderTrash(container, payload) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const invalid = Array.isArray(payload?.invalid_records) ? payload.invalid_records : [];
+  if (!items.length && !invalid.length) return renderMessage(container, "回收站为空", "empty-state");
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = el("article", "trash-item glass-panel");
+    const body = el("div", "trash-item-body");
+    body.append(
+      el("h3", "mod-title", item.name || "未命名记录"),
+      el("p", "mod-meta", `${item.entry_type === "ue4ss_framework" ? "UE4SS 框架" : "本地模组"} · ${Number(item.file_count || 0)} 个文件`),
+      el("p", "trash-time", `删除时间：${formatDate(item.created_at)} · 剩余 ${Number(item.days_remaining || 0)} 天`),
+    );
+    const actions = el("div", "button-row trash-actions");
+    const restore = actionButton("恢复", "restoreTrash", "btn primary");
+    restore.dataset.id = String(item.id || "");
+    const purge = actionButton("彻底删除", "purgeTrash", "btn danger");
+    purge.dataset.id = String(item.id || "");
+    actions.append(restore, purge);
+    row.append(body, actions);
+    fragment.append(row);
+  }
+  for (const id of invalid) {
+    const row = el("article", "trash-item glass-panel invalid");
+    row.append(
+      el("h3", "mod-title", `损坏记录 ${String(id).slice(0, 8)}`),
+      el("p", "warning", "记录损坏，已禁止文件操作"),
+    );
+    fragment.append(row);
+  }
+  container.replaceChildren(fragment);
+}
+
+function formatDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "未知" : date.toLocaleString("zh-CN");
 }
 
 export function renderNexus(container, mods) {

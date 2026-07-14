@@ -38,6 +38,7 @@
       <header class="topbar">
         <div><h1 id="viewTitle">我的模组</h1><p id="viewSubtitle">管理已安装的模组</p></div>
         <div class="top-actions">
+          <button type="button" class="btn" data-action="showTrash">回收站 <span id="trashCount">0</span></button>
           <button type="button" class="btn" data-action="refreshMods">刷新模组</button>
           <button type="button" class="btn primary" data-action="openModsFolder">打开模组文件夹</button>
         </div>
@@ -47,7 +48,7 @@
         <div class="mod-overview glass-panel">
           <div class="mod-search-row">
             <label class="search-field grow"><span class="search-icon" data-icon="search"></span><span class="sr-only">搜索模组</span><input id="modFilter" type="search" data-action="filterMods" placeholder="搜索名称、类型或 N 网尾号"></label>
-            <label class="compact-filter"><span>来源</span><select id="modSourceFilter" data-action="filterModSource"><option value="all">全部来源</option><option value="local">本地模组</option><option value="steam_workshop">Steam Workshop</option></select></label>
+            <label class="compact-filter"><span>来源</span><select id="modSourceFilter" data-action="filterModSource"><option value="all">全部来源</option><option value="local">本地模组</option><option value="external">外部发现</option><option value="steam_workshop">Steam Workshop</option></select></label>
             <label class="compact-filter"><span>状态</span><select id="modStatusFilter" data-action="filterModStatus"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已禁用</option><option value="abnormal">异常</option></select></label>
           </div>
           <div id="modStats" class="mod-stats" aria-label="模组统计">
@@ -107,8 +108,13 @@
             <hr><section class="ue4ss-card" data-settings-section="ue4ss" aria-label="Palworld 专用 UE4SS">
               <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
               <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
+              <div class="ue4ss-metrics" aria-label="UE4SS 生命周期状态">
+                <article><small>完整性</small><strong id="ue4ssIntegrity">未知</strong></article>
+                <article><small>受管文件</small><strong id="ue4ssOwnedFiles">0</strong></article>
+                <article><small>异常文件</small><strong id="ue4ssAbnormalFiles">0</strong></article>
+              </div>
               <p id="ue4ssUpdatedAt" class="ue4ss-meta">正在读取内置版本…</p><p id="ue4ssDigest" class="ue4ss-meta"></p>
-              <div class="button-row"><button type="button" class="btn primary" data-action="installUe4ss">安装内置</button><button type="button" class="btn" data-action="checkUe4ss">检查 GitHub</button><button type="button" class="btn" data-action="chooseUe4ssZip">本地 ZIP</button><button id="installUe4ssUpdate" type="button" class="btn primary" data-action="installUe4ssUpdate" hidden>下载并安装新版</button></div>
+              <div class="button-row ue4ss-actions"><button id="installUe4ssButton" type="button" class="btn primary" data-action="installUe4ss">安装内置</button><button id="repairUe4ssButton" type="button" class="btn" data-action="repairUe4ss">检查并修复</button><button id="uninstallUe4ssButton" type="button" class="btn danger" data-action="uninstallUe4ss">安全卸载</button><button type="button" class="btn" data-action="checkUe4ss">检查 GitHub</button><button type="button" class="btn" data-action="chooseUe4ssZip">本地 ZIP</button><button id="installUe4ssUpdate" type="button" class="btn primary" data-action="installUe4ssUpdate" hidden>下载并安装新版</button></div>
               <input id="ue4ssZipInput" type="file" data-action="selectUe4ssZip" accept=".zip,application/zip">
               <div id="ue4ssResult" class="result" aria-live="polite"></div>
             </section>
@@ -131,7 +137,7 @@
               <button type="button" class="petal-style-card" data-action="petalStyleWatercolor" data-petal-style="watercolor" aria-pressed="false"><span class="petal-preview preview-watercolor" aria-hidden="true"><i></i><i></i><i></i></span><strong>水彩</strong><small>透明晕染与偶现花朵</small></button>
               <button type="button" class="petal-style-card" data-action="petalStyleMinimal" data-petal-style="minimal" aria-pressed="false"><span class="petal-preview preview-minimal" aria-hidden="true"><i></i><i></i><i></i></span><strong>简约</strong><small>低饱和边缘轻落</small></button>
             </div></fieldset></section>
-            <details class="advanced-settings settings-subcard" data-settings-section="advanced"><summary>高级选项</summary><p class="muted">窗口兼容模式、诊断与管理员操作保持现有安全边界；需要时可从侧栏进入管理员重启。</p></details>
+            <details class="advanced-settings settings-subcard" data-settings-section="advanced"><summary>高级选项</summary><p class="muted">窗口兼容模式、诊断与管理员操作保持现有安全边界；需要时可从侧栏进入管理员重启。</p><div class="ignored-mods-setting"><span>已忽略外部模组：<strong id="ignoredModsCount">0</strong></span><button type="button" class="btn" data-action="resetIgnoredMods">重新发现已忽略 Mod</button></div></details>
             <button type="button" class="btn primary" data-action="saveAppearance">保存外观</button>
           </article>
         </div>
@@ -158,7 +164,8 @@
   <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
   <div id="busyOverlay" class="busy-overlay" hidden><div class="spinner"></div><span id="busyText">处理中…</span></div>
   <dialog id="conflictModal" aria-labelledby="conflictTitle"><form method="dialog" class="modal-card"><h2 id="conflictTitle">发现文件冲突</h2><div id="conflictDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelConflict" autofocus>取消</button><button type="button" class="btn" data-action="keepBothConflict">保留两者</button><button type="button" class="btn primary" data-action="replaceConflict">替换原文件</button></div></form></dialog>
-  <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">删除模组</h2><p id="deleteMessage">此操作不可撤销。</p><div id="deleteDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">确认删除</button></div></form></dialog>
+  <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">移入回收站</h2><p id="deleteMessage">此模组的受管文件将移入 PalDeck 回收站并保留 30 天。</p><div id="deleteDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">移入回收站</button></div></form></dialog>
+  <dialog id="trashModal" aria-labelledby="trashTitle"><form method="dialog" class="modal-card trash-modal-card"><div class="modal-heading"><div><h2 id="trashTitle">PalDeck 回收站</h2><p class="muted">受管文件保留 30 天，可在目标无冲突时恢复。</p></div><button type="button" class="btn" data-action="closeTrash" autofocus>关闭</button></div><div id="trashResult" class="result" aria-live="polite"></div><div id="trashList" class="trash-list" aria-live="polite"></div></form></dialog>
   <dialog id="workshopDependencyModal" aria-labelledby="workshopDependencyTitle"><form method="dialog" class="modal-card"><h2 id="workshopDependencyTitle">仍有模组依赖此项目</h2><p class="muted">禁用后以下 Workshop 模组可能无法正常工作：</p><div id="workshopDependencyDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelWorkshopDependency" autofocus>取消</button><button type="button" class="btn danger" data-action="approveWorkshopDependency">仍要禁用</button></div></form></dialog>
   <script type="module" src="app.js"></script>
 </body>
