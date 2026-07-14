@@ -16,6 +16,7 @@ from backend.process_utils import (
     is_palworld_running,
     restart_as_admin,
 )
+from backend.trash_service import TrashPayloadConflict
 
 
 def test_process_detection_supports_safe_dependency_injection():
@@ -108,9 +109,124 @@ def test_zip_pak_group_install_disable_enable_delete(fake_game_root, tmp_path):
     enabled = service.set_enabled(manifest_id, True)
     assert enabled["audit"]["status"] == "enabled"
     assert not (tmp_path / "data" / "disabled" / manifest_id).exists()
-    assert service.delete(manifest_id) == {"ok": True, "deleted": manifest_id}
+    removed = service.delete(manifest_id)
+    assert removed["ok"] is True
+    assert removed["trash_id"]
+    assert removed["files_moved"] == 3
     assert service.list_mods() == []
     assert not any(_live(fake_game_root).iterdir())
+
+    restored = service.restore_trash(removed["trash_id"])
+    assert restored["id"] == manifest_id
+    assert restored["audit"]["status"] == "enabled"
+    assert {p.name for p in _live(fake_game_root).iterdir()} == {
+        "Cool.pak", "Cool.utoc", "Cool.ucas"
+    }
+
+
+def test_disabled_mod_is_recycled_on_data_volume_and_restored_disabled(fake_game_root, tmp_path):
+    source = tmp_path / "DisabledRecover.pak"
+    source.write_bytes(b"payload")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    service.set_enabled(installed["id"], False)
+
+    removed = service.delete(installed["id"])
+
+    assert removed["files_moved"] == 1
+    assert not (tmp_path / "data/disabled" / installed["id"] / source.name).exists()
+    [record] = service.list_trash()["items"]
+    assert record["entry_type"] == "local_mod"
+    assert record["file_count"] == 1
+    restored = service.restore_trash(removed["trash_id"])
+    assert restored["audit"]["status"] == "disabled"
+    assert (tmp_path / "data/disabled" / installed["id"] / source.name).read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("failure", ["record", "manifest", "second_move"])
+def test_recycle_failure_restores_files_manifest_and_no_record(
+    fake_game_root, tmp_path, monkeypatch, failure
+):
+    archive = _zip(tmp_path / "rollback-trash.zip", {"Roll.pak": b"pak", "Roll.utoc": b"utoc"})
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(archive)
+    if failure == "record":
+        monkeypatch.setattr(
+            service.trash_service.store,
+            "save",
+            lambda _record: (_ for _ in ()).throw(OSError("record failed")),
+        )
+    elif failure == "manifest":
+        monkeypatch.setattr(
+            service.store,
+            "delete",
+            lambda _manifest_id: (_ for _ in ()).throw(OSError("manifest failed")),
+        )
+    else:
+        original = service.trash_service.move_to_payload
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("second move failed")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(service.trash_service, "move_to_payload", fail_second)
+
+    with pytest.raises(OSError):
+        service.delete(installed["id"])
+
+    assert service.store.get(installed["id"]).id == installed["id"]
+    assert (_live(fake_game_root) / "Roll.pak").read_bytes() == b"pak"
+    assert (_live(fake_game_root) / "Roll.utoc").read_bytes() == b"utoc"
+    assert service.list_trash()["items"] == []
+
+
+def test_restore_conflict_never_overwrites_foreign_file(fake_game_root, tmp_path):
+    source = tmp_path / "ConflictRestore.pak"
+    source.write_bytes(b"managed")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    removed = service.delete(installed["id"])
+    live = _live(fake_game_root) / source.name
+    live.write_bytes(b"foreign")
+
+    with pytest.raises(TrashPayloadConflict):
+        service.restore_trash(removed["trash_id"])
+
+    assert live.read_bytes() == b"foreign"
+    assert service.list_trash()["items"][0]["id"] == removed["trash_id"]
+
+
+def test_restore_rejects_record_that_omits_one_manifest_file(fake_game_root, tmp_path):
+    archive = _zip(tmp_path / "omit.zip", {"Omit.pak": b"pak", "Omit.utoc": b"utoc"})
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(archive)
+    removed = service.delete(installed["id"])
+    record = service.trash_service.store.get(removed["trash_id"])
+    service.trash_service.store.save(replace(record, files=record.files[:1]))
+
+    with pytest.raises(ValueError, match="omits"):
+        service.restore_trash(removed["trash_id"])
+
+
+def test_expired_cleanup_purges_valid_payload(fake_game_root, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    source = tmp_path / "Expired.pak"
+    source.write_bytes(b"payload")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    removed = service.delete(installed["id"])
+
+    result = service.trash_service.purge_expired(
+        now=datetime.now(timezone.utc) + timedelta(days=31)
+    )
+
+    assert result == {"purged": [removed["trash_id"]], "failed": []}
+    assert service.list_trash()["items"] == []
 
 
 def test_identical_target_hash_is_deduplicated_across_sources(fake_game_root, tmp_path):

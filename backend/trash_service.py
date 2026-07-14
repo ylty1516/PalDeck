@@ -6,17 +6,22 @@ import hashlib
 import os
 import stat
 import uuid
+from datetime import datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
+from .domain import AuditStatus, ManifestAudit, ModKind, ModManifest
 from .game_detector import get_mod_directories
 from .manifest_store import (
+    ManifestStore,
     _is_reparse,
     _relative_path_key,
     validate_no_reparse_ancestors,
 )
 from .process_utils import is_palworld_running
-from .trash_store import TrashFile, TrashStore
+from .trash_store import TrashFile, TrashRecord, TrashStore
+from .ue4ss_config import remove_entry, update_entry
 
 
 class TrashPayloadError(RuntimeError):
@@ -212,6 +217,335 @@ class TrashService:
             raise OSError("trash restore target must be on the same volume as its payload")
         os.replace(payload, destination)
         return destination, payload
+
+    @property
+    def game_fingerprint(self) -> str:
+        identity = str(self.game_root.resolve(strict=False)).casefold().encode("utf-8")
+        return hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _write_atomic(path: Path, data: bytes) -> None:
+        validate_no_reparse_ancestors(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _live_identity(self, manifest: ModManifest, relative_path: str) -> tuple[str, str]:
+        if manifest.kind is ModKind.PAK:
+            root_key = "tilde_mods"
+            relative = relative_path
+        elif manifest.kind is ModKind.LOGICPAK:
+            root_key = "logic_mods"
+            relative = relative_path
+        else:
+            parent = Path(os.path.abspath(manifest.install_root.parent))
+            if parent == self.original_roots["ue4ss_classic"]:
+                root_key = "ue4ss_classic"
+            elif parent == self.original_roots["ue4ss_nested"]:
+                root_key = "ue4ss_nested"
+            else:
+                raise ValueError("UE4SS manifest is outside supported roots")
+            relative = f"{manifest.install_root.name}/{relative_path}"
+        expected_root = self.original_roots[root_key]
+        actual_root = (
+            Path(os.path.abspath(manifest.install_root))
+            if manifest.kind is not ModKind.UE4SS
+            else Path(os.path.abspath(manifest.install_root.parent))
+        )
+        if actual_root != expected_root:
+            raise ValueError("manifest install root does not match its kind")
+        _relative_path_key(relative)
+        return root_key, PureWindowsPath(relative).as_posix()
+
+    def _manifest_source_identities(self, manifest: ModManifest) -> list[tuple[str, str]]:
+        identities: list[tuple[str, str]] = []
+        for item in manifest.files:
+            identities.append(self._live_identity(manifest, item.relative_path))
+            identities.append(("disabled", f"{manifest.id}/{item.relative_path}"))
+        if manifest.ue4ss_enabled_txt is not None:
+            identities.append(
+                (
+                    "disabled",
+                    f"{manifest.id}/{manifest.ue4ss_enabled_txt.relative_path}",
+                )
+            )
+        return identities
+
+    def recycle_local_mod(
+        self,
+        manifest: ModManifest,
+        audit: ManifestAudit,
+        manifest_store: ManifestStore,
+        *,
+        now: datetime | None = None,
+    ) -> TrashRecord:
+        if audit.status is AuditStatus.MISSING:
+            raise TrashPayloadMissing("managed mod files are missing")
+        trash_id = uuid.uuid4().hex
+        moves: list[tuple[Path, Path]] = []
+        files: list[TrashFile] = []
+        mods_txt = (
+            manifest.install_root.parent / "mods.txt"
+            if manifest.kind is ModKind.UE4SS
+            else None
+        )
+        old_config = mods_txt.read_bytes() if mods_txt is not None and mods_txt.is_file() else None
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.utcoffset() is None:
+            raise ValueError("trash timestamp must include a timezone")
+        record: TrashRecord | None = None
+        try:
+            for original_root, relative_path in self._manifest_source_identities(manifest):
+                source = self.resolve_original(original_root, relative_path)
+                if not source.is_file() or _is_reparse(source):
+                    continue
+                item = self.move_to_payload(trash_id, original_root, relative_path)
+                files.append(item)
+                moves.append((self.resolve_payload(trash_id, item), source))
+            if not files:
+                raise TrashPayloadMissing("managed mod has no recoverable files")
+            if mods_txt is not None:
+                self._write_atomic(
+                    mods_txt,
+                    remove_entry(old_config if old_config is not None else b"", manifest.install_root.name),
+                )
+            record = TrashRecord(
+                id=trash_id,
+                schema_version=1,
+                entry_type="local_mod",
+                name=manifest.name,
+                created_at=current_time.isoformat(),
+                expires_at=(current_time + timedelta(days=30)).isoformat(),
+                game_fingerprint=self.game_fingerprint,
+                files=tuple(files),
+                manifest=ManifestStore._to_dict(manifest),
+                ue4ss_state=(
+                    {"name": manifest.install_root.name, "enabled": manifest.enabled}
+                    if manifest.kind is ModKind.UE4SS
+                    else None
+                ),
+                framework_ownership=None,
+            )
+            self.store.save(record)
+            manifest_store.delete(manifest.id)
+        except BaseException:
+            if record is not None:
+                self.store.delete(record.id)
+            if mods_txt is not None:
+                if old_config is None:
+                    mods_txt.unlink(missing_ok=True)
+                else:
+                    self._write_atomic(mods_txt, old_config)
+            try:
+                manifest_store.get(manifest.id)
+            except KeyError:
+                manifest_store.save(manifest)
+            self.rollback_moves(moves)
+            raise
+        for _payload, original in moves:
+            if original.is_relative_to(self.data_dir / "disabled"):
+                stop = self.data_dir / "disabled"
+            elif manifest.kind is ModKind.UE4SS:
+                stop = manifest.install_root.parent
+            else:
+                stop = manifest.install_root
+            self._remove_empty_parents(original, stop)
+        return record
+
+    @staticmethod
+    def _remove_empty_parents(path: Path, stop: Path) -> None:
+        current = path.parent
+        while current != stop and current.is_relative_to(stop):
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
+
+    def _validated_local_record(
+        self, trash_id: str, manifest_store: ManifestStore
+    ) -> tuple[TrashRecord, ModManifest]:
+        record = self.store.get(trash_id)
+        if record.entry_type != "local_mod" or record.game_fingerprint != self.game_fingerprint:
+            raise ValueError("trash record does not belong to this game")
+        if record.manifest is None:
+            raise ValueError("local trash record has no manifest")
+        manifest = ManifestStore._from_dict(record.manifest)
+        if manifest.id != record.manifest.get("id"):
+            raise ValueError("trash manifest id is inconsistent")
+        allowed = {
+            (root, _relative_path_key(relative))
+            for root, relative in self._manifest_source_identities(manifest)
+        }
+        supplied = {
+            (item.original_root, _relative_path_key(item.relative_path))
+            for item in record.files
+        }
+        if not supplied or not supplied.issubset(allowed):
+            raise ValueError("trash record files do not match its manifest")
+        for expected in manifest.files:
+            live = self._live_identity(manifest, expected.relative_path)
+            disabled = ("disabled", f"{manifest.id}/{expected.relative_path}")
+            normalized_options = {
+                (root, _relative_path_key(relative)) for root, relative in (live, disabled)
+            }
+            if supplied.isdisjoint(normalized_options):
+                raise ValueError("trash record omits a managed manifest file")
+        if manifest.ue4ss_enabled_txt is not None:
+            metadata_identity = (
+                "disabled",
+                _relative_path_key(
+                    f"{manifest.id}/{manifest.ue4ss_enabled_txt.relative_path}"
+                ),
+            )
+            if metadata_identity not in supplied:
+                raise ValueError("trash record omits UE4SS enabled metadata")
+        try:
+            manifest_store.get(manifest.id)
+        except KeyError:
+            pass
+        else:
+            raise TrashPayloadConflict("manifest is already active")
+        active_paths: set[str] = set()
+        for active in manifest_store.list():
+            for root, relative in self._manifest_source_identities(active):
+                active_paths.add(os.path.normcase(str(self.resolve_original(root, relative))))
+        conflicts = [
+            str(self.resolve_original(item.original_root, item.relative_path))
+            for item in record.files
+            if os.path.normcase(
+                str(self.resolve_original(item.original_root, item.relative_path))
+            ) in active_paths
+        ]
+        if conflicts:
+            raise TrashPayloadConflict("trash files overlap active manifests", {"files": conflicts})
+        return record, manifest
+
+    def restore_local_mod(
+        self, trash_id: str, manifest_store: ManifestStore
+    ) -> ModManifest:
+        record, manifest = self._validated_local_record(trash_id, manifest_store)
+        for item in record.files:
+            self.verify_payload(record.id, item)
+            destination = self.resolve_original(item.original_root, item.relative_path)
+            if os.path.lexists(destination):
+                raise TrashPayloadConflict(
+                    "trash restore target already exists", {"files": [str(destination)]}
+                )
+        mods_txt = (
+            manifest.install_root.parent / "mods.txt"
+            if manifest.kind is ModKind.UE4SS
+            else None
+        )
+        old_config = mods_txt.read_bytes() if mods_txt is not None and mods_txt.is_file() else None
+        moves: list[tuple[Path, Path]] = []
+        saved_manifest = False
+        try:
+            for item in record.files:
+                destination, payload = self.restore_file(record.id, item)
+                moves.append((destination, payload))
+            if mods_txt is not None:
+                state = record.ue4ss_state or {}
+                name = state.get("name")
+                enabled = state.get("enabled")
+                if type(name) is not str or type(enabled) is not bool:
+                    raise ValueError("trash UE4SS state is invalid")
+                self._write_atomic(
+                    mods_txt,
+                    update_entry(old_config if old_config is not None else b"", name, enabled),
+                )
+            manifest_store.save(manifest)
+            saved_manifest = True
+            self.store.delete(record.id)
+        except BaseException:
+            if saved_manifest:
+                manifest_store.delete(manifest.id)
+            if mods_txt is not None:
+                if old_config is None:
+                    mods_txt.unlink(missing_ok=True)
+                else:
+                    self._write_atomic(mods_txt, old_config)
+            self.rollback_moves(moves)
+            raise
+        self._remove_empty_payload_roots(record)
+        return manifest
+
+    def _remove_empty_payload_roots(self, record: TrashRecord) -> None:
+        for payload_root in {item.payload_root for item in record.files}:
+            root = self._payload_base(payload_root, record.id)
+            for item in sorted(
+                (entry for entry in record.files if entry.payload_root == payload_root),
+                key=lambda entry: len(PureWindowsPath(entry.payload_path).parts),
+                reverse=True,
+            ):
+                self._remove_empty_parents(
+                    self.resolve_payload(record.id, item), root.parent
+                )
+
+    def list_records(self, *, now: datetime | None = None) -> dict[str, object]:
+        current_time = now or datetime.now(timezone.utc)
+        records, invalid = self.store.list()
+        items: list[dict[str, object]] = []
+        for record in records:
+            if record.game_fingerprint != self.game_fingerprint:
+                continue
+            expires = datetime.fromisoformat(record.expires_at)
+            items.append(
+                {
+                    "id": record.id,
+                    "entry_type": record.entry_type,
+                    "name": record.name,
+                    "created_at": record.created_at,
+                    "expires_at": record.expires_at,
+                    "days_remaining": max(0, ceil((expires - current_time).total_seconds() / 86400)),
+                    "file_count": len(record.files),
+                    "valid": True,
+                }
+            )
+        return {"items": items, "invalid_records": invalid}
+
+    def purge(self, trash_id: str) -> dict[str, object]:
+        record = self.store.get(trash_id)
+        if record.game_fingerprint != self.game_fingerprint:
+            raise ValueError("trash record does not belong to this game")
+        for item in record.files:
+            payload = self.resolve_payload(record.id, item)
+            if not payload.exists():
+                continue
+            self.verify_payload(record.id, item)
+        deleted = 0
+        for item in record.files:
+            payload = self.resolve_payload(record.id, item)
+            if payload.is_file() and not _is_reparse(payload):
+                payload.unlink()
+                deleted += 1
+        self.store.delete(record.id)
+        self._remove_empty_payload_roots(record)
+        return {"ok": True, "purged": record.id, "files_deleted": deleted}
+
+    def purge_expired(self, *, now: datetime | None = None) -> dict[str, object]:
+        current_time = now or datetime.now(timezone.utc)
+        records, _invalid = self.store.list()
+        purged: list[str] = []
+        failed: list[str] = []
+        for record in records:
+            if record.game_fingerprint != self.game_fingerprint:
+                continue
+            if datetime.fromisoformat(record.expires_at) > current_time:
+                continue
+            try:
+                self.purge(record.id)
+                purged.append(record.id)
+            except (OSError, ValueError, TrashPayloadError):
+                failed.append(record.id)
+        return {"purged": purged, "failed": failed}
 
     def rollback_moves(self, moves: list[tuple[Path, Path]]) -> None:
         for current, original in reversed(moves):

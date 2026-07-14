@@ -26,6 +26,7 @@ from .game_detector import (
 from .game_lock import game_write_lock
 from .manifest_store import ManifestStore, validate_no_reparse_ancestors
 from .process_utils import check_directory_writable, is_palworld_running
+from .trash_service import TrashService
 from .ue4ss_config import enabled_state, parse_entry, remove_entry, update_entry
 
 _SIDECARS = (".pak", ".utoc", ".ucas")
@@ -97,6 +98,9 @@ class ModService:
             ),
         )
         self.game_running = game_running
+        self.trash_service = TrashService(
+            self.game_root, self.data_dir, game_running=self.game_running,
+        )
         self._migrate_legacy_once()
 
     def _transaction_lock(self, timeout: float = 10.0):
@@ -727,65 +731,31 @@ class ModService:
         audit = self._audit(manifest)
         if audit.status in (AuditStatus.MODIFIED, AuditStatus.CONFLICT) and not force_modified:
             raise ModifiedFilesError(self._modified_paths(manifest, audit.status))
-        transaction = self.data_dir / "staging" / uuid.uuid4().hex
-        transaction.mkdir(parents=True)
-        moved: list[tuple[Path, Path]] = []
-        manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
-        manifest_bytes = manifest_path.read_bytes()
-        mods_txt = manifest.install_root.parent / "mods.txt" if manifest.kind is ModKind.UE4SS else None
-        old_config = mods_txt.read_bytes() if mods_txt is not None and mods_txt.is_file() else None
-        try:
-            disabled_root = self.data_dir / "disabled" / manifest.id
-            for root in (manifest.install_root, disabled_root):
-                for item in manifest.files:
-                    source = root / item.relative_path
-                    if source.is_file() and not _is_reparse(source):
-                        backup = transaction / str(len(moved)) / item.relative_path
-                        backup.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(source, backup)
-                        moved.append((backup, source))
-            if manifest.kind is ModKind.UE4SS:
-                metadata = (
-                    disabled_root / manifest.ue4ss_enabled_txt.relative_path
-                    if manifest.ue4ss_enabled_txt is not None
-                    else None
-                )
-                if metadata is not None and metadata.is_file():
-                    backup = transaction / "metadata" / "enabled.txt"
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(metadata, backup)
-                    moved.append((backup, metadata))
-                current = old_config if old_config is not None else b""
-                self._write_mods_txt(
-                    mods_txt,
-                    self._updated_mods_bytes(current, manifest.install_root.name, None),
-                )
-            self.store.delete(manifest.id)
-        except BaseException:
-            if mods_txt is not None:
-                if old_config is None:
-                    mods_txt.unlink(missing_ok=True)
-                else:
-                    mods_txt.write_bytes(old_config)
-            for backup, original in reversed(moved):
-                original.parent.mkdir(parents=True, exist_ok=True)
-                if backup.exists():
-                    os.replace(backup, original)
-            if not manifest_path.exists():
-                rollback = manifest_path.with_name(f".{manifest_path.name}.rollback.tmp")
-                rollback.parent.mkdir(parents=True, exist_ok=True)
-                rollback.write_bytes(manifest_bytes)
-                os.replace(rollback, manifest_path)
-            raise
-        finally:
-            shutil.rmtree(transaction, ignore_errors=True)
-        for _, original in moved:
-            if manifest.kind is ModKind.UE4SS and original.is_relative_to(manifest.install_root):
-                stop = manifest.install_root.parent
-            else:
-                stop = manifest.install_root if original.is_relative_to(manifest.install_root) else self.data_dir / "disabled"
-            self._remove_empty_parents(original, stop)
-        return {"ok": True, "deleted": manifest.id}
+        record = self.trash_service.recycle_local_mod(manifest, audit, self.store)
+        return {
+            "ok": True,
+            "trash_id": record.id,
+            "expires_at": record.expires_at,
+            "files_moved": len(record.files),
+        }
+
+    @_locked_write
+    def restore_trash(self, trash_id: str) -> dict[str, object]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        manifest = self.trash_service.restore_local_mod(trash_id, self.store)
+        return self._listed(manifest)
+
+    def list_trash(self) -> dict[str, object]:
+        return self.trash_service.list_records()
+
+    @_locked_write
+    def purge_trash(self, trash_id: str) -> dict[str, object]:
+        return self.trash_service.purge(trash_id)
+
+    @_locked_write
+    def purge_expired_trash(self) -> dict[str, object]:
+        return self.trash_service.purge_expired()
 
     def _discovery_marker(self) -> Path:
         identity = str(self.game_root.resolve(strict=False)).casefold().encode("utf-8")

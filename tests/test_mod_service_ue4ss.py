@@ -84,10 +84,43 @@ def test_ue4ss_missing_mods_entry_is_appended_and_delete_removes_only_target(
     item = service.install(source)
     assert (mods / "mods.txt").read_text(encoding="utf-8") == "Other : 1\n# tail\nNewMod : 1\n"
 
-    service.delete(item["id"])
+    removed = service.delete(item["id"])
 
+    assert removed["trash_id"]
     assert (mods / "mods.txt").read_text(encoding="utf-8") == "Other : 1\n# tail\n"
     assert not (mods / "NewMod").exists()
+
+    restored = service.restore_trash(removed["trash_id"])
+    assert restored["id"] == item["id"]
+    assert restored["status"] == "enabled"
+    assert (mods / "NewMod" / "Scripts" / "main.lua").read_bytes() == b"lua"
+    assert (mods / "mods.txt").read_text(encoding="utf-8") == (
+        "Other : 1\n# tail\nNewMod : 1\n"
+    )
+
+
+def test_ue4ss_recycle_record_failure_restores_files_config_and_manifest(
+    fake_game_root, tmp_path, monkeypatch
+):
+    mods = _layout(fake_game_root, False)
+    (mods / "mods.txt").write_text("Other : 1\n", encoding="utf-8")
+    source = _zip(tmp_path / "trash-rollback.zip", {"TrashRollback/Scripts/main.lua": b"lua"})
+    service = _service(fake_game_root, tmp_path)
+    item = service.install(source)
+    before_config = (mods / "mods.txt").read_bytes()
+    monkeypatch.setattr(
+        service.trash_service.store,
+        "save",
+        lambda _record: (_ for _ in ()).throw(OSError("record failed")),
+    )
+
+    with pytest.raises(OSError, match="record failed"):
+        service.delete(item["id"])
+
+    assert (mods / "TrashRollback/Scripts/main.lua").read_bytes() == b"lua"
+    assert (mods / "mods.txt").read_bytes() == before_config
+    assert service.store.get(item["id"]).id == item["id"]
+    assert service.list_trash()["items"] == []
 
 
 @pytest.mark.parametrize("failure", ["config", "save"])
