@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import threading
 import time
@@ -32,6 +33,25 @@ def _ue4ss_zip_bytes() -> bytes:
         archive.writestr("ue4ss/UE4SS.dll", b"dll")
         archive.writestr("ue4ss/UE4SS-settings.ini", b"[General]\n")
         archive.writestr("ue4ss/MemberVariableLayout.ini", b"layout")
+    return payload.getvalue()
+
+
+def _value_mod_zip_bytes() -> bytes:
+    payload = io.BytesIO()
+    schema = {
+        "schema_version": 1,
+        "mod_id": "ValueApiMod",
+        "display_name": "API 数值模组",
+        "description": "用于验证安全数值接口。",
+        "version": "1.0.0",
+        "fields": [
+            {"key": "count", "label": "数量", "type": "int", "min": 1, "max": 100, "default": 10, "step": 1, "description": "目标数量"},
+        ],
+    }
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("ValueApiMod/Scripts/main.lua", b"return true\n")
+        archive.writestr("ValueApiMod/config.json", json.dumps({"count": 10, "keep": "yes"}))
+        archive.writestr("ValueApiMod/palmod_config.json", json.dumps(schema, ensure_ascii=False))
     return payload.getvalue()
 
 
@@ -201,6 +221,94 @@ def test_paldeck_installed_mod_cannot_be_unmanaged(app, auth_client, tmp_path):
 
     assert response.status_code == 409
     assert response.json["error_code"] == "mod_not_external"
+
+
+def install_api_value_mod(app, tmp_path):
+    archive = tmp_path / "value-api.zip"
+    archive.write_bytes(_value_mod_zip_bytes())
+    return app.extensions["mod_service"].install(archive)
+
+
+def test_mod_value_routes_require_authentication(app):
+    mod_id = "12345678123456781234567812345678"
+    client = app.test_client()
+    assert client.get(f"/api/mods/{mod_id}/values").status_code == 403
+    assert client.post(
+        f"/api/mods/{mod_id}/values",
+        json={"revision": "sha256:" + "a" * 64, "values": {"count": 20}},
+    ).status_code == 403
+
+
+def test_mod_value_api_lists_reads_and_updates_without_paths(app, auth_client, tmp_path):
+    installed = install_api_value_mod(app, tmp_path)
+    listed = auth_client.get("/api/mods").json["data"]
+    item = next(mod for mod in listed if mod["id"] == installed["id"])
+    assert item["adjustable_values"] is True
+    assert item["adjustable_value_count"] == 1
+
+    loaded = auth_client.get(f"/api/mods/{installed['id']}/values")
+    assert loaded.status_code == 200
+    assert loaded.json["data"]["fields"][0]["value"] == 10
+    assert "install" not in str(loaded.json).casefold()
+    saved = auth_client.post(
+        f"/api/mods/{installed['id']}/values",
+        json={"revision": loaded.json["data"]["revision"], "values": {"count": 20}},
+    )
+
+    assert saved.status_code == 200
+    assert saved.json["data"]["fields"][0]["value"] == 20
+    assert app.extensions["mod_service"].list_mods()[0]["status"] == "enabled"
+
+
+def test_mod_value_api_rejects_extra_fields_invalid_values_and_stale_revision(
+    app, auth_client, tmp_path
+):
+    installed = install_api_value_mod(app, tmp_path)
+    endpoint = f"/api/mods/{installed['id']}/values"
+    loaded = auth_client.get(endpoint).json["data"]
+    invalid = (
+        {"revision": loaded["revision"], "values": {}, "path": "C:/bad"},
+        {"revision": "bad", "values": {"count": 20}},
+        {"revision": loaded["revision"], "values": {}},
+        {"revision": loaded["revision"], "values": {"unknown": 20}},
+        {"revision": loaded["revision"], "values": {"count": 101}},
+    )
+    for body in invalid:
+        response = auth_client.post(endpoint, json=body)
+        assert response.status_code == 400
+        assert response.json["error_code"] in {"invalid_input", "mod_values_invalid"}
+
+    manifest = app.extensions["mod_service"].store.get(installed["id"])
+    config = manifest.install_root / "config.json"
+    config.write_bytes(config.read_bytes() + b" ")
+    stale = auth_client.post(
+        endpoint,
+        json={"revision": loaded["revision"], "values": {"count": 20}},
+    )
+    assert stale.status_code == 409
+    assert stale.json["error_code"] == "mod_values_stale"
+
+
+def test_mod_value_api_maps_not_supported_conflict_and_game_running(
+    app, auth_client, tmp_path
+):
+    pak = tmp_path / "plain.pak"
+    pak.write_bytes(b"pak")
+    plain = app.extensions["mod_service"].install(pak)
+    unsupported = auth_client.get(f"/api/mods/{plain['id']}/values")
+    assert unsupported.status_code == 409
+    assert unsupported.json["error_code"] == "mod_values_not_supported"
+
+    installed = install_api_value_mod(app, tmp_path)
+    endpoint = f"/api/mods/{installed['id']}/values"
+    loaded = auth_client.get(endpoint).json["data"]
+    app.extensions["mod_service"].game_running = lambda: True
+    running = auth_client.post(
+        endpoint,
+        json={"revision": loaded["revision"], "values": {"count": 20}},
+    )
+    assert running.status_code == 423
+    assert running.json["error_code"] == "game_running"
 
 
 def test_static_assets_are_public(app):

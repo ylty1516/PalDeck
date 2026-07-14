@@ -34,6 +34,12 @@ from backend.mod_service import (
     ModService,
     NotExternalModError,
 )
+from backend.mod_value_service import (
+    ModValueConflict,
+    ModValueInvalid,
+    ModValueNotSupported,
+    ModValueStale,
+)
 from backend.steam_workshop import SteamWorkshopService, WorkshopDependencyError, WorkshopNotFoundError
 from backend.storage import JsonStore
 from backend.trash_service import (
@@ -264,6 +270,22 @@ def create_app(
     @app.errorhandler(NotExternalModError)
     def handle_not_external(_exc: NotExternalModError):
         return failure("只有外部发现模组可以取消管理", 409, "mod_not_external")
+
+    @app.errorhandler(ModValueNotSupported)
+    def handle_mod_values_not_supported(exc: ModValueNotSupported):
+        return failure(str(exc), 409, "mod_values_not_supported", exc.details)
+
+    @app.errorhandler(ModValueInvalid)
+    def handle_mod_values_invalid(exc: ModValueInvalid):
+        return failure(str(exc), 400, "mod_values_invalid", exc.details)
+
+    @app.errorhandler(ModValueStale)
+    def handle_mod_values_stale(exc: ModValueStale):
+        return failure(str(exc), 409, "mod_values_stale", exc.details)
+
+    @app.errorhandler(ModValueConflict)
+    def handle_mod_values_conflict(exc: ModValueConflict):
+        return failure(str(exc), 409, "mod_values_conflict", exc.details)
 
     @app.errorhandler(TrashPayloadConflict)
     def handle_trash_conflict(exc: TrashPayloadConflict):
@@ -626,6 +648,32 @@ def create_app(
         path = str(folder)
         opener(path)
         return success({"path": path})
+
+    @app.get("/api/mods/<mod_id>/values")
+    def get_mod_values(mod_id: str):
+        validate_uuid(mod_id)
+        return success(service().get_mod_values(mod_id))
+
+    @app.post("/api/mods/<mod_id>/values")
+    def update_mod_values(mod_id: str):
+        validate_uuid(mod_id)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {"revision", "values"}:
+            raise ApiError(
+                "数值调整请求必须且只能包含 revision 和 values",
+                400,
+                "invalid_input",
+            )
+        revision = body["revision"]
+        values = body["values"]
+        if (
+            type(revision) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None
+            or not isinstance(values, dict)
+            or not values
+        ):
+            raise ApiError("数值调整请求格式无效", 400, "invalid_input")
+        return success(service().update_mod_values(mod_id, values, revision))
 
     @app.post("/api/mods/<mod_id>/toggle")
     def toggle_mod(mod_id: str):
