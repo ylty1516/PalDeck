@@ -123,7 +123,13 @@ def _finite_number(value: Any, *, integer: bool = False) -> int | float:
         if type(value) is not int:
             raise ModValueInvalid("整数配置字段类型无效")
         return value
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if type(value) not in (int, float):
+        raise ModValueInvalid("浮点配置字段类型无效")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError as exc:
+        raise ModValueInvalid("浮点配置字段超出可表示范围") from exc
+    if not finite:
         raise ModValueInvalid("浮点配置字段类型无效")
     return float(value) if type(value) is float else value
 
@@ -238,7 +244,7 @@ class ModValueService:
                 allow_empty=True,
             )
             kind = raw["type"]
-            if kind not in {"int", "float", "bool"} or type(kind) is not str:
+            if type(kind) is not str or kind not in {"int", "float", "bool"}:
                 raise ModValueInvalid("schema field type 无效")
             if kind == "bool":
                 if type(raw["default"]) is not bool or type(config[key]) is not bool:
@@ -379,6 +385,8 @@ class ModValueService:
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise ModValueInvalid("更新后的 config.json 无法安全序列化") from exc
+        if self._read_file(path, "config.json") != original:
+            raise ModValueStale("Mod 配置在保存前发生变化，请重新加载")
         self._write_atomic(path, published)
         changed_files = tuple(
             ManifestFile(

@@ -162,6 +162,7 @@ def test_schema_rejects_wrong_mod_id_duplicate_keys_bad_ranges_and_bool_constrai
     bad_range = explicit_schema(); bad_range["fields"][0]["min"] = 600; mutations.append(bad_range)
     bad_step = explicit_schema(); bad_step["fields"][0]["step"] = 0; mutations.append(bad_step)
     bad_bool = explicit_schema(); bad_bool["fields"][2]["min"] = 0; mutations.append(bad_bool)
+    bad_type = explicit_schema(); bad_type["fields"][0]["type"] = []; mutations.append(bad_type)
 
     for index, schema in enumerate(mutations):
         manifest, _store = make_manifest(
