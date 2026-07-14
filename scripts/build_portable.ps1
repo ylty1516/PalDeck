@@ -185,7 +185,9 @@ PalDeck v$version - Windows 便携版
 6. 只管理 Steam 客户端已订阅并下载的 Workshop 模组启停；不提供 Workshop 订阅、取消订阅或删除。
 7. Workshop UE4SS 与手动或内置 UE4SS 互斥，请先禁用或移除另一来源再切换。
 8. 内置 Palworld 专用 UE4SS 来自 Okaetsu/RE-UE4SS（MIT）；许可证与致谢随程序分发，并可在“致谢”页查看。
-9. 不支持 Xbox/Microsoft Store 或专用服务器 Mod 管理。
+9. 本地受管 Mod 删除进入 PalDeck 自有回收站并保留 30 天，可恢复或手动彻底删除。
+10. 外部发现 Mod 可取消管理并保留文件；UE4SS 修复与卸载会保护用户 Mod 和可变配置。
+11. 不支持 Xbox/Microsoft Store 或专用服务器 Mod 管理。
 
 项目说明见：https://github.com/ylty1516/PalDeck
 Source commit: $sourceCommit

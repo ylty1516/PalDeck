@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.self_updater import TRUSTED_GITHUB_OWNER, TRUSTED_GITHUB_REPO
 from backend.ue4ss_provider import Ue4ssProvider
 
 _REPORT_PATH = re.compile(r"^[Ff]:[\\/]")
@@ -130,6 +131,37 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
         if 'if (mod.adultContent !== false) continue;' not in render_source:
             raise AssertionError("frontend Nexus adult fail-closed guard missing")
         passed("nexus_adult_filtered", {"frontend_fail_closed": True})
+
+        trash_markers = (
+            'id="trashModal"', 'data-action="showTrash"',
+            'data-action="approveDelete"', 'id="trashList"',
+        )
+        if any(marker not in index for marker in trash_markers) or "renderTrash" not in render_source:
+            raise AssertionError("trash lifecycle markers missing")
+        passed("trash_lifecycle_markers", {"markers": trash_markers})
+
+        external_markers = (
+            "externally_discovered", 'actionButton("取消管理", "unmanageMod"',
+            'actionButton("移入回收站", "deleteMod"',
+        )
+        if any(marker not in render_source for marker in external_markers):
+            raise AssertionError("external mod markers missing")
+        passed("external_mod_markers", {"markers": external_markers})
+
+        ue4ss_markers = (
+            'data-action="repairUe4ss"', 'data-action="uninstallUe4ss"',
+            'id="ue4ssIntegrity"', 'id="ue4ssOwnedFiles"',
+        )
+        if any(marker not in index for marker in ue4ss_markers):
+            raise AssertionError("UE4SS lifecycle markers missing")
+        passed("ue4ss_lifecycle_markers", {"markers": ue4ss_markers})
+
+        if (TRUSTED_GITHUB_OWNER, TRUSTED_GITHUB_REPO) != ("ylty1516", "PalDeck"):
+            raise AssertionError("PalDeck update trust origin mismatch")
+        passed("paldeck_update_origin", {
+            "owner": TRUSTED_GITHUB_OWNER,
+            "repo": TRUSTED_GITHUB_REPO,
+        })
 
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:

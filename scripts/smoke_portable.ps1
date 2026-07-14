@@ -95,6 +95,7 @@ try {
     if ($failedItems.Count -ne 0) { throw "Self-check report contains failed items" }
     $expectedItems = @(
         "index_five_views_and_release_markers", "v22_responsive_shell", "import_queue_empty", "nexus_adult_filtered",
+        "trash_lifecycle_markers", "external_mod_markers", "ue4ss_lifecycle_markers", "paldeck_update_origin",
         "health", "fresh_data_no_game_path", "workshop_empty_state", "bundled_ue4ss_metadata", "appearance_get",
         "theme_aurora-glass", "theme_ivory-sakura", "theme_starlit-night",
         "petal_style_natural", "petal_style_watercolor", "petal_style_minimal",
