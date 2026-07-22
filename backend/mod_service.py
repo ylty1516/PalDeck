@@ -1119,7 +1119,8 @@ class ModService:
                     if enabled_txt is not None:
                         metadata = self.data_dir / "disabled" / manifest.id / "metadata" / "enabled.txt"
                         metadata.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(enabled_txt, metadata)
+                        self._copy_verified(enabled_txt, metadata, _sha256(enabled_txt))
+                        enabled_txt.unlink()
                         manifest = replace(
                             manifest,
                             ue4ss_enabled_txt=ManifestFile(
@@ -1130,7 +1131,8 @@ class ModService:
                 except BaseException:
                     if metadata is not None and metadata.exists():
                         enabled_txt.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(metadata, enabled_txt)
+                        self._copy_verified(metadata, enabled_txt, _sha256(metadata))
+                        metadata.unlink()
                     if manifest is not None:
                         self.store.delete(manifest.id)
                     if metadata is not None:

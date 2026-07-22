@@ -1,3 +1,4 @@
+import os
 import zipfile
 from pathlib import Path
 
@@ -65,6 +66,38 @@ def test_rescan_discovers_cpp_framework_and_each_palschema_content_pack(
     )
     assert not (ue4ss_mods / "PalSchema" / "enabled.txt").exists()
     assert by_name["PalSchema"]["status"] == "enabled"
+
+
+def test_rescan_archives_enabled_marker_without_direct_cross_volume_rename(
+    fake_game_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    ue4ss_mods, _content_root = _palschema_layout(fake_game_root, True)
+    marker = ue4ss_mods / "PalSchema" / "enabled.txt"
+    original_replace = os.replace
+
+    def reject_direct_marker_move(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if source_path == marker and "metadata" in destination_path.parts:
+            raise OSError(17, "simulated cross-volume rename")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("backend.mod_service.os.replace", reject_direct_marker_move)
+
+    service = _service(fake_game_root, tmp_path)
+    found = service.rescan()
+    framework = next(item for item in found if item["name"] == "PalSchema")
+
+    assert framework["status"] == "enabled"
+    assert not marker.exists()
+    assert (
+        tmp_path
+        / "data"
+        / "disabled"
+        / framework["id"]
+        / "metadata"
+        / "enabled.txt"
+    ).is_file()
 
 
 def test_palschema_content_pack_can_toggle_unmanage_and_be_rediscovered(
