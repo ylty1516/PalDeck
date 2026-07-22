@@ -331,6 +331,14 @@ def create_app(
     def handle_permission(_exc: PermissionError):
         return failure("没有执行此操作所需的文件权限", 403, "permission_denied")
 
+    @app.errorhandler(TimeoutError)
+    def handle_operation_busy(_exc: TimeoutError):
+        return failure(
+            "另一个模组操作仍在完成，请稍后重试",
+            409,
+            "operation_busy",
+        )
+
     @app.errorhandler(RequestEntityTooLarge)
     def handle_too_large(_exc: RequestEntityTooLarge):
         return failure("上传文件过大", 413, "upload_too_large")

@@ -323,6 +323,19 @@ def test_health_is_public_and_structured(app):
     assert response.json["data"]["status"] == "up"
 
 
+def test_operation_lock_timeout_uses_actionable_busy_error(app, auth_client, monkeypatch):
+    service = app.extensions["mod_service"]
+
+    def busy():
+        raise TimeoutError("still scanning")
+
+    monkeypatch.setattr(service, "discover_existing_once", busy)
+    response = auth_client.get("/api/mods")
+
+    assert response.status_code == 409
+    assert response.json["error_code"] == "operation_busy"
+
+
 def test_api_rejects_missing_session_cookie(app):
     response = app.test_client().get("/api/mods")
     assert response.status_code == 403

@@ -14,9 +14,9 @@ URL = "https://github.com/Okaetsu/RE-UE4SS/releases/download/experimental-palwor
 REPO = "https://github.com/Okaetsu/RE-UE4SS"
 TAG = "experimental-palworld"
 ASSET = "UE4SS-Palworld.zip"
-SIZE = 6_982_837
-SHA256 = "7c80b2f4a29baf0f384552c8517e58196e78c8a1b8530637b7179eddae1b54a9"
-UPDATED_AT = "2026-07-09T23:56:19Z"
+SIZE = 7_217_022
+SHA256 = "768a45718fbb9e429ac5cc3ce4a139a1b7b468bff31b4a136ae483d725aca1ca"
+UPDATED_AT = "2026-07-19T07:14:13Z"
 REQUIRED_FILES = {
     "dwmapi.dll",
     "ue4ss/UE4SS.dll",

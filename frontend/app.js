@@ -779,7 +779,12 @@ async function repairUe4ss() {
       result = await invoke(true);
     }
     output.textContent = result.unchanged ? "UE4SS 完整性正常，无需修改" : "UE4SS 修复完成，用户 Mod 与配置已保留";
-    await Promise.all([loadUe4ssStatus(), loadMods()]);
+    const refreshes = await Promise.allSettled([loadUe4ssStatus(), loadMods()]);
+    if (refreshes.some((item) => item.status === "rejected")) {
+      output.textContent = "UE4SS 修复已完成，但状态刷新失败；请稍后手动刷新";
+      toast("UE4SS 已修复，状态刷新稍后重试", "warning");
+      return;
+    }
     toast("UE4SS 检查与修复完成", "success");
   } catch (error) {
     output.textContent = `UE4SS 修复失败：${actionableErrorMessage(error)}`;

@@ -141,6 +141,8 @@ def test_v23_ue4ss_lifecycle_and_ignored_reset_controls_are_real():
     assert "confirm_replace" in app
     assert "confirm_modified" in app
     assert "owned_files" in app and "missing_files" in app and "modified_files" in app
+    assert "Promise.allSettled([loadUe4ssStatus(), loadMods()])" in app
+    assert 'item.status === "rejected"' in app
 
 
 def test_html_has_exactly_five_pages_and_required_layers():

@@ -31,9 +31,9 @@ def test_vendored_asset_matches_manifest_and_required_contents():
         "repo": "https://github.com/Okaetsu/RE-UE4SS",
         "tag": "experimental-palworld",
         "asset": "UE4SS-Palworld.zip",
-        "size": 6_982_837,
-        "sha256": "7c80b2f4a29baf0f384552c8517e58196e78c8a1b8530637b7179eddae1b54a9",
-        "updated_at": "2026-07-09T23:56:19Z",
+        "size": 7_217_022,
+        "sha256": "768a45718fbb9e429ac5cc3ce4a139a1b7b468bff31b4a136ae483d725aca1ca",
+        "updated_at": "2026-07-19T07:14:13Z",
     }
     assert archive_path.stat().st_size == manifest["size"]
     assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == manifest["sha256"]

@@ -563,6 +563,28 @@ def test_initial_discovery_defers_while_game_runs_and_retries_later(fake_game_ro
     assert service.discover_existing_once()[0]["id"] == found["id"]
 
 
+def test_initial_discovery_returns_consistent_snapshot_when_lock_is_busy(
+    fake_game_root, tmp_path, monkeypatch
+):
+    live = _live(fake_game_root)
+    live.mkdir(parents=True, exist_ok=True)
+    (live / "Known.pak").write_bytes(b"pak")
+    service = _service(fake_game_root, tmp_path)
+    [known] = service.rescan()
+
+    class BusyLock:
+        def __enter__(self):
+            raise TimeoutError("another discovery still owns the lock")
+
+        def __exit__(self, _type, _value, _traceback):
+            return False
+
+    monkeypatch.setattr(service, "_transaction_lock", lambda: BusyLock())
+
+    assert service.discover_existing_once() == [known]
+    assert not service._discovery_marker().exists()
+
+
 def test_external_rescan_mod_can_be_unmanaged_ignored_and_rediscovered(
     fake_game_root, tmp_path
 ):

@@ -1024,7 +1024,10 @@ class ModService:
                 finally:
                     temporary.unlink(missing_ok=True)
                 return result
-        except GameRunningError:
+        except (GameRunningError, TimeoutError):
+            # An aborted or overlapping UI refresh can leave the first discovery
+            # request finishing in the server. Return the last consistent snapshot
+            # instead of surfacing a generic 500 while that request owns the lock.
             return self.list_mods()
 
     @_locked_write
