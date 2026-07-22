@@ -1,0 +1,15 @@
+{
+  "view": "credits",
+  "api": {
+    "/api/health": {"version": "2.3.1-fixture"},
+    "/api/appearance": {"theme": "aurora-glass", "mask": 0.35, "blur": 0, "position": "center", "petals": "off", "petal_style": "natural", "background": "default"},
+    "/api/game/status": {"configured": true, "valid": true, "path": "D:\\SteamLibrary\\steamapps\\common\\Palworld", "has_ue4ss": true},
+    "/api/mods": [],
+    "/api/trash": {"items": [], "invalid_records": []},
+    "/api/credits": [
+      {"id": "paldeck", "name": "PalDeck", "purpose": "Palworld 模组桌面管理器", "author": "PalDeck contributors", "license": "MIT", "version": "2.3.1", "core": true, "direct_dependency": false, "license_text": "MIT License"},
+      {"id": "flask", "name": "Flask", "purpose": "本地 Web 应用服务", "author": "Pallets", "license": "BSD-3-Clause", "version": "3.x", "core": true, "direct_dependency": true, "license_text": "BSD 3-Clause License"},
+      {"id": "pillow", "name": "Pillow", "purpose": "图片处理", "author": "Pillow contributors", "license": "HPND", "version": "12.3.0", "core": false, "direct_dependency": true, "license_text": "Historical Permission Notice and Disclaimer"}
+    ]
+  }
+}

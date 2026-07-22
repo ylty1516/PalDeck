@@ -1,0 +1,5 @@
+{
+  "inventory_slots": 100,
+  "apply_on_interval_sec": 5,
+  "boost_pouch_bonus": true
+}

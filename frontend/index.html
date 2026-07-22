@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="aurora-glass">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Palworld Mod Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="backgroundLayer" class="background-layer" aria-hidden="true"></div>
+  <canvas id="petalCanvas" aria-hidden="true"></canvas>
+  <div class="app-shell">
+    <aside class="sidebar glass-panel">
+      <div class="brand"><img class="brand-logo" src="app-icon.png" alt=""><div><strong>Palworld Mods</strong><small>桌面管理器</small></div></div>
+      <nav aria-label="主导航">
+        <button type="button" class="nav-item active" data-action="showMods" data-view="mods" aria-current="page"><span class="nav-icon" data-icon="mods"></span><span>我的模组</span></button>
+        <button type="button" class="nav-item" data-action="showImport" data-view="import"><span class="nav-icon" data-icon="import"></span><span>导入安装</span></button>
+        <button type="button" class="nav-item" data-action="showNexus" data-view="nexus"><span class="nav-icon" data-icon="nexus"></span><span>N网热门</span></button>
+        <button type="button" class="nav-item" data-action="showSettings" data-view="settings"><span class="nav-icon" data-icon="settings"></span><span>设置与外观</span></button>
+        <button type="button" class="nav-item" data-action="showCredits" data-view="credits"><span class="nav-icon" data-icon="credits"></span><span>开源致谢</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <button type="button" class="background-shortcut" data-action="showAppearance"><span class="background-thumb" aria-hidden="true"></span><span><strong>自定义背景</strong><small>更换你的专属风景</small></span><span aria-hidden="true">›</span></button>
+        <div class="sidebar-version"><span id="sidebarVersion">v2.1.1</span><button type="button" class="btn subtle" data-action="checkUpdateSidebar">检查更新</button></div>
+        <button type="button" class="btn subtle admin-action" data-action="restartAdmin">以管理员身份重启</button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div class="window-chrome" hidden>
+        <div class="window-drag-region pywebview-drag-region" aria-hidden="true"></div>
+        <div class="window-buttons" aria-label="窗口控制">
+          <button type="button" class="window-button" data-action="windowMinimize" aria-label="最小化"><span data-icon="minimize"></span></button>
+          <button type="button" class="window-button" data-action="windowMaximize" aria-label="最大化或还原"><span data-icon="maximize"></span></button>
+          <button type="button" class="window-button close" data-action="windowClose" aria-label="关闭"><span data-icon="close"></span></button>
+        </div>
+      </div>
+      <header class="topbar">
+        <div><h1 id="viewTitle">我的模组</h1><p id="viewSubtitle">管理已安装的模组</p></div>
+        <div class="top-actions">
+          <button type="button" class="btn" data-action="showTrash">回收站 <span id="trashCount">0</span></button>
+          <button type="button" class="btn" data-action="refreshMods">刷新模组</button>
+          <button type="button" class="btn primary" data-action="openModsFolder">打开模组文件夹</button>
+        </div>
+      </header>
+
+      <section id="view-mods" class="view active" aria-labelledby="viewTitle">
+        <div class="mod-overview glass-panel">
+          <div class="mod-search-row">
+            <label class="search-field grow"><span class="search-icon" data-icon="search"></span><span class="sr-only">搜索模组</span><input id="modFilter" type="search" data-action="filterMods" placeholder="搜索名称、类型或 N 网尾号"></label>
+            <label class="compact-filter"><span>来源</span><select id="modSourceFilter" data-action="filterModSource"><option value="all">全部来源</option><option value="local">本地模组</option><option value="external">外部发现</option><option value="steam_workshop">Steam Workshop</option></select></label>
+            <label class="compact-filter"><span>状态</span><select id="modStatusFilter" data-action="filterModStatus"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已禁用</option><option value="abnormal">异常</option></select></label>
+          </div>
+          <div id="modStats" class="mod-stats" aria-label="模组统计">
+            <article><span class="stat-icon blue" data-icon="mods"></span><span><small>全部模组</small><strong id="statTotal">0</strong></span></article>
+            <article><span class="stat-icon green" data-icon="status"></span><span><small>已启用</small><strong id="statEnabled">0</strong></span></article>
+            <article><span class="stat-icon gray" data-icon="minimize"></span><span><small>已禁用</small><strong id="statDisabled">0</strong></span></article>
+            <article><span class="stat-icon red" data-icon="close"></span><span><small>异常</small><strong id="statAbnormal">0</strong></span></article>
+          </div>
+        </div>
+        <div id="modConflictNotice" class="conflict-notice glass-panel" role="alert" hidden></div>
+        <div class="mod-list-header glass-panel" aria-hidden="true"><span>模组信息 <small id="modResultCount">0 项</small></span><span>来源与类型</span><span>版本</span><span>状态</span><span>操作</span></div>
+        <div id="modList" class="card-list mod-table" aria-live="polite"></div>
+      </section>
+
+      <section id="view-import" class="view" aria-labelledby="viewTitle">
+        <div class="two-column">
+          <div id="dropzone" class="dropzone glass-panel">
+            <span class="drop-symbol">⇩</span><h2>拖放 ZIP / PAK 文件</h2><p>按顺序预检并事务安装，无需手动解压。</p>
+            <div class="button-row"><button type="button" class="btn primary" data-action="chooseModFile">选择文件</button><button type="button" class="btn" data-action="chooseModFolder">选择文件夹</button></div>
+            <input id="modFileInput" type="file" data-action="selectModFile" multiple accept=".zip,.pak,application/zip,application/octet-stream">
+          </div>
+          <div class="glass-panel panel">
+            <label>安装类型<select id="importType" data-action="changeImportType"><option value="auto">自动识别</option><option value="pak">PAK</option><option value="logicpak">LogicMods</option><option value="ue4ss">UE4SS 脚本/C++</option><option value="palschema">PalSchema 内容模组</option><option value="ue4ss_framework">UE4SS 框架</option><option value="workshop">Workshop</option></select></label>
+            <label>显示名称<input id="importName" type="text" data-action="editImportName" placeholder="可选"></label>
+            <label>N 网尾号<input id="importNexusId" type="number" data-action="editImportNexusId" min="1" placeholder="可选"></label>
+            <div id="importQueue" class="import-queue" aria-live="polite"><p class="muted">尚未选择文件</p></div>
+            <p id="selectedModFile" class="muted">尚未选择文件</p>
+            <button type="button" class="btn primary" data-action="importMod">开始安装队列</button>
+            <div id="importResult" class="result" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-nexus" class="view" aria-labelledby="viewTitle">
+        <div class="nexus-toolbar glass-panel">
+          <div class="nexus-search-line"><label class="search-field grow"><span class="search-icon" data-icon="search"></span><span class="sr-only">搜索 N 网</span><input id="nexusQuery" type="search" data-action="editNexusQuery" placeholder="搜索名称、作者或 N 网尾号"></label><button type="button" class="btn primary" data-action="searchNexus">搜索</button><button type="button" class="btn" data-action="refreshNexus"><span data-icon="refresh"></span>刷新</button></div>
+          <div class="nexus-sort-tabs" role="group" aria-label="Nexus 排序"><button type="button" class="btn primary" data-action="downloadsNexus">下载最多</button><button type="button" class="btn" data-action="endorsementsNexus">推荐最高</button><button type="button" class="btn" data-action="latestNexus">最新发布</button></div>
+          <p id="nexusStatus" class="nexus-source-status muted">等待加载</p>
+        </div>
+        <div class="nexus-catalog-layout">
+          <div id="nexusGrid" class="nexus-grid" aria-live="polite"></div>
+          <aside class="nexus-side-rail">
+            <article class="glass-panel side-card"><h2>快速直达</h2><p>在上方输入纯数字 N 网尾号，可直接查询 Palworld 模组详情。</p><button type="button" class="btn primary" data-action="focusNexusSearch">输入尾号</button></article>
+            <article class="glass-panel side-card"><h2>浏览说明</h2><ul><li>匿名只读，不登录 Nexus 账户</li><li>成人内容已过滤，无法关闭</li><li>不提供下载、收藏或自动安装</li></ul></article>
+            <article class="glass-panel side-card"><h2>数据来源</h2><p>优先显示 Nexus 实时目录；连接失败时会明确标记缓存或过期缓存。</p></article>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view" aria-labelledby="viewTitle">
+        <div class="settings-grid">
+          <article class="glass-panel panel settings-card" data-settings-section="game">
+            <h2>游戏与工具</h2>
+            <label>游戏目录<input id="gamePathInput" type="text" data-action="editGamePath" placeholder="含 Palworld.exe 的目录"></label>
+            <div class="button-row"><button type="button" class="btn" data-action="autoDetectGame">自动检测</button><button type="button" class="btn primary" data-action="saveGamePath">保存路径</button><button type="button" class="btn" data-action="repairFolders">修复目录</button></div>
+            <div id="detectList" class="stack"></div><div id="pathInfo" class="result"></div>
+            <hr><section class="ue4ss-card" data-settings-section="ue4ss" aria-label="Palworld 专用 UE4SS">
+              <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
+              <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
+              <div class="ue4ss-metrics" aria-label="UE4SS 生命周期状态">
+                <article><small>完整性</small><strong id="ue4ssIntegrity">未知</strong></article>
+                <article><small>受管文件</small><strong id="ue4ssOwnedFiles">0</strong></article>
+                <article><small>异常文件</small><strong id="ue4ssAbnormalFiles">0</strong></article>
+              </div>
+              <p id="ue4ssUpdatedAt" class="ue4ss-meta">正在读取内置版本…</p><p id="ue4ssDigest" class="ue4ss-meta"></p>
+              <div class="button-row ue4ss-actions"><button id="installUe4ssButton" type="button" class="btn primary" data-action="installUe4ss">安装内置</button><button id="repairUe4ssButton" type="button" class="btn" data-action="repairUe4ss">检查并修复</button><button id="uninstallUe4ssButton" type="button" class="btn danger" data-action="uninstallUe4ss">安全卸载</button><button type="button" class="btn" data-action="checkUe4ss">检查 GitHub</button><button type="button" class="btn" data-action="chooseUe4ssZip">本地 ZIP</button><button id="installUe4ssUpdate" type="button" class="btn primary" data-action="installUe4ssUpdate" hidden>下载并安装新版</button></div>
+              <input id="ue4ssZipInput" type="file" data-action="selectUe4ssZip" accept=".zip,application/zip">
+              <div id="ue4ssResult" class="result" aria-live="polite"></div>
+            </section>
+            <section class="settings-subcard" data-settings-section="update"><h3>应用更新</h3><p id="updateStatus" class="muted">尚未检查更新</p>
+            <div class="button-row"><button type="button" class="btn" data-action="checkUpdate">检查更新</button><button type="button" class="btn primary" data-action="applyUpdate">安装更新</button></div></section>
+          </article>
+
+          <article class="glass-panel panel appearance-panel">
+            <h2>主题与背景</h2>
+            <div class="appearance-live-preview" aria-label="效果预览"><strong>效果预览</strong><div><span></span><span></span><span></span></div><small>当前主题与背景组合</small></div>
+            <section class="settings-subcard" data-settings-section="theme"><h3>外观主题</h3><div class="theme-picker" aria-label="主题"><button type="button" data-action="themeAurora" class="theme-card" data-theme-value="aurora-glass" aria-pressed="false">极光玻璃</button><button type="button" data-action="themeIvory" class="theme-card" data-theme-value="ivory-sakura" aria-pressed="false">象牙樱花</button><button type="button" data-action="themeStarlit" class="theme-card" data-theme-value="starlit-night" aria-pressed="false">星夜</button></div></section>
+            <section class="settings-subcard" data-settings-section="background"><h3>背景自定义</h3><div class="button-row"><button type="button" class="btn" data-action="chooseBackground">选择背景</button><button type="button" class="btn" data-action="resetBackground">恢复默认</button></div>
+            <input id="backgroundInput" type="file" data-action="selectBackground" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp">
+            <label>遮罩 <output id="maskValue">35%</output><input id="maskRange" type="range" data-action="changeMask" min="0" max="85" value="35"></label>
+            <label>模糊 <output id="blurValue">0px</output><input id="blurRange" type="range" data-action="changeBlur" min="0" max="24" value="0"></label>
+            <fieldset><legend>背景位置</legend><div class="position-grid"><button type="button" data-action="positionTopLeft" data-position="top-left" aria-label="左上" aria-pressed="false">↖</button><button type="button" data-action="positionTopCenter" data-position="top-center" aria-label="顶部居中" aria-pressed="false">↑</button><button type="button" data-action="positionTopRight" data-position="top-right" aria-label="右上" aria-pressed="false">↗</button><button type="button" data-action="positionCenterLeft" data-position="center-left" aria-label="左侧居中" aria-pressed="false">←</button><button type="button" data-action="positionCenter" data-position="center" aria-label="居中" aria-pressed="false">·</button><button type="button" data-action="positionCenterRight" data-position="center-right" aria-label="右侧居中" aria-pressed="false">→</button><button type="button" data-action="positionBottomLeft" data-position="bottom-left" aria-label="左下" aria-pressed="false">↙</button><button type="button" data-action="positionBottomCenter" data-position="bottom-center" aria-label="底部居中" aria-pressed="false">↓</button><button type="button" data-action="positionBottomRight" data-position="bottom-right" aria-label="右下" aria-pressed="false">↘</button></div></fieldset></section>
+            <section class="settings-subcard" data-settings-section="effects"><h3>动态效果</h3><label>樱花密度<select id="petalLevel" data-action="changePetals"><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+            <fieldset class="petal-style-fieldset"><legend>樱花风格</legend><div class="petal-style-picker">
+              <button type="button" class="petal-style-card" data-action="petalStyleNatural" data-petal-style="natural" aria-pressed="false"><span class="petal-preview preview-natural" aria-hidden="true"><i></i><i></i><i></i></span><strong>自然</strong><small>立体花瓣与风中翻转</small></button>
+              <button type="button" class="petal-style-card" data-action="petalStyleWatercolor" data-petal-style="watercolor" aria-pressed="false"><span class="petal-preview preview-watercolor" aria-hidden="true"><i></i><i></i><i></i></span><strong>水彩</strong><small>透明晕染与偶现花朵</small></button>
+              <button type="button" class="petal-style-card" data-action="petalStyleMinimal" data-petal-style="minimal" aria-pressed="false"><span class="petal-preview preview-minimal" aria-hidden="true"><i></i><i></i><i></i></span><strong>简约</strong><small>低饱和边缘轻落</small></button>
+            </div></fieldset></section>
+            <details class="advanced-settings settings-subcard" data-settings-section="advanced"><summary>高级选项</summary><p class="muted">窗口兼容模式、诊断与管理员操作保持现有安全边界；需要时可从侧栏进入管理员重启。</p><div class="ignored-mods-setting"><span>已忽略外部模组：<strong id="ignoredModsCount">0</strong></span><button type="button" class="btn" data-action="resetIgnoredMods">重新发现已忽略 Mod</button></div></details>
+            <button type="button" class="btn primary" data-action="saveAppearance">保存外观</button>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-credits" class="view" aria-labelledby="viewTitle">
+        <div class="credits-intro glass-panel">
+          <img src="app-icon.png" alt="" class="credits-logo"><div class="credits-project"><h2>PalDeck <span id="creditsVersion" class="badge">当前版本</span></h2><p>感谢开放源代码项目、维护者、测试者、Mod 作者和社区用户的支持。致谢数据随源码提供，页面本身不会联网。</p></div>
+          <div id="creditsIntroActions" class="button-row credits-intro-actions"><button type="button" class="btn primary" data-action="openPalDeckHome">项目主页</button><button type="button" class="btn" data-action="openPalDeckIssues">问题反馈</button><button type="button" class="btn" data-action="openPalDeckLicense">查看 LICENSE</button></div>
+        </div>
+        <h2 class="section-heading">开源项目致谢 · 核心项目</h2><div id="creditsCore" class="credits-grid" aria-live="polite"></div>
+        <section class="special-thanks glass-panel"><h2>特别感谢</h2><div><article><strong>测试者</strong><p>帮助复现问题、验证安装流程与便携构建。</p></article><article><strong>Mod 作者</strong><p>持续创作 Palworld 内容，让管理工具具有意义。</p></article><article><strong>社区支持者</strong><p>提交建议、反馈 Issue，并帮助项目持续改进。</p></article></div></section>
+        <details class="credits-dependencies glass-panel"><summary>完整直接运行与构建依赖及许可证</summary><div id="creditsDependencies" class="credits-dependency-list"></div></details>
+      </section>
+    </main>
+
+    <footer id="appStatusbar" class="app-statusbar glass-panel" aria-label="应用状态">
+      <div class="status-segment"><span class="status-icon" data-icon="status"></span><span><small>服务状态</small><strong id="healthStatus" class="status-dot">正在连接…</strong></span></div>
+      <div id="statusGamePath" class="status-segment status-path"><span class="status-icon" data-icon="folder"></span><span><small>游戏目录</small><strong id="pathChip" class="path-chip">未配置游戏目录</strong></span><button type="button" class="btn compact" data-action="openGameFolder">打开</button></div>
+      <button type="button" class="status-segment status-config" data-action="showSettingsStatus"><span class="status-icon" data-icon="settings"></span><span><small>配置文件</small><strong>设置与工具</strong></span><span aria-hidden="true">›</span></button>
+    </footer>
+  </div>
+
+  <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+  <div id="busyOverlay" class="busy-overlay" hidden><div class="spinner"></div><span id="busyText">处理中…</span></div>
+  <dialog id="conflictModal" aria-labelledby="conflictTitle"><form method="dialog" class="modal-card"><h2 id="conflictTitle">发现文件冲突</h2><div id="conflictDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelConflict" autofocus>取消</button><button type="button" class="btn" data-action="keepBothConflict">保留两者</button><button type="button" class="btn primary" data-action="replaceConflict">替换原文件</button></div></form></dialog>
+  <dialog id="deleteModal" aria-labelledby="deleteTitle"><form method="dialog" class="modal-card"><h2 id="deleteTitle">移入回收站</h2><p id="deleteMessage">此模组的受管文件将移入 PalDeck 回收站并保留 30 天。</p><div id="deleteDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelDelete" autofocus>取消</button><button type="button" class="btn danger" data-action="approveDelete">移入回收站</button></div></form></dialog>
+  <dialog id="trashModal" aria-labelledby="trashTitle"><form method="dialog" class="modal-card trash-modal-card"><div class="modal-heading"><div><h2 id="trashTitle">PalDeck 回收站</h2><p class="muted">受管文件保留 30 天，可在目标无冲突时恢复。</p></div><button type="button" class="btn" data-action="closeTrash" autofocus>关闭</button></div><div id="trashResult" class="result" aria-live="polite"></div><div id="trashList" class="trash-list" aria-live="polite"></div></form></dialog>
+  <dialog id="workshopDependencyModal" aria-labelledby="workshopDependencyTitle"><form method="dialog" class="modal-card"><h2 id="workshopDependencyTitle">仍有模组依赖此项目</h2><p class="muted">禁用后以下 Workshop 模组可能无法正常工作：</p><div id="workshopDependencyDetails"></div><div class="button-row"><button type="button" class="btn" data-action="cancelWorkshopDependency" autofocus>取消</button><button type="button" class="btn danger" data-action="approveWorkshopDependency">仍要禁用</button></div></form></dialog>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
