@@ -394,7 +394,8 @@ def test_game_services_share_data_scope_and_rebuild_for_a_new_game(
     assert app.extensions["ue4ss_framework_manager"] is not framework
 
 
-def test_mods_success_uses_standard_envelope(auth_client):
+def test_mods_success_uses_standard_envelope(app, auth_client):
+    app.extensions["workshop_service"]._steam_roots = []
     response = auth_client.get("/api/mods")
     assert response.status_code == 200
     assert response.json == {"ok": True, "data": []}

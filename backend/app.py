@@ -140,7 +140,6 @@ def create_app(
         workshop_service = SteamWorkshopService(
             game_root=path,
             lock_root=writable,
-            steam_roots=[] if testing else None,
         )
         app.extensions["mod_service"] = mod_service
         app.extensions["trash_service"] = mod_service.trash_service
