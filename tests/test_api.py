@@ -55,6 +55,115 @@ def _value_mod_zip_bytes() -> bytes:
     return payload.getvalue()
 
 
+def test_fault_recovery_api_tracks_session_and_disables_new_mod(
+    app, auth_client, tmp_path
+):
+    service = app.extensions["mod_service"]
+    running = {"value": False}
+    service.game_running = lambda: running["value"]
+
+    baseline = auth_client.get("/api/recovery/status")
+    assert baseline.status_code == 200
+    assert baseline.json["data"]["last_stable_at"]
+
+    source = tmp_path / "RecoveryCandidate.pak"
+    source.write_bytes(b"candidate")
+    installed = service.install(source)
+
+    running["value"] = True
+    started = auth_client.get("/api/recovery/status")
+    assert started.json["data"]["running"] is True
+    assert started.json["data"]["active_session"]
+    running["value"] = False
+    ended = auth_client.get("/api/recovery/status")
+    assert ended.json["data"]["pending_assessment"]["change_count"] == 1
+
+    assessed = auth_client.post(
+        "/api/recovery/assess", json={"outcome": "fault"}
+    )
+    assert assessed.status_code == 200
+    plan = assessed.json["data"]["recovery_plan"]
+    assert plan["available"] is True
+    assert plan["actions"][0]["id"] == installed["id"]
+
+    invalid = auth_client.post(
+        "/api/recovery/rollback",
+        json={"revision": plan["revision"], "confirm": False},
+    )
+    assert invalid.status_code == 400
+    assert invalid.json["error_code"] == "invalid_input"
+
+    rolled_back = auth_client.post(
+        "/api/recovery/rollback",
+        json={"revision": plan["revision"], "confirm": True},
+    )
+    assert rolled_back.status_code == 200
+    assert rolled_back.json["data"]["executed_count"] == 1
+    current = next(item for item in service.list_mods() if item["id"] == installed["id"])
+    assert current["status"] == "disabled"
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/api/recovery/assess", {}),
+        ("/api/recovery/assess", {"outcome": "crash"}),
+        ("/api/recovery/rollback", {}),
+        (
+            "/api/recovery/rollback",
+            {"revision": "sha256:" + "0" * 64, "confirm": "yes"},
+        ),
+    ],
+)
+def test_fault_recovery_api_rejects_invalid_bodies(auth_client, path, body):
+    response = auth_client.post(path, json=body)
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+
+
+def test_fault_recovery_api_rolls_back_partial_disable_on_failure(
+    app, auth_client, tmp_path, monkeypatch
+):
+    service = app.extensions["mod_service"]
+    running = {"value": False}
+    service.game_running = lambda: running["value"]
+    auth_client.get("/api/recovery/status")
+    for name in ("FirstCandidate.pak", "SecondCandidate.pak"):
+        source = tmp_path / name
+        source.write_bytes(name.encode("ascii"))
+        service.install(source)
+    running["value"] = True
+    auth_client.get("/api/recovery/status")
+    running["value"] = False
+    auth_client.get("/api/recovery/status")
+    assessed = auth_client.post(
+        "/api/recovery/assess", json={"outcome": "fault"}
+    )
+    plan = assessed.json["data"]["recovery_plan"]
+    assert plan["action_count"] == 2
+
+    original = service.set_enabled
+    disables = {"count": 0}
+
+    def fail_second_disable(manifest_id, enabled):
+        if enabled is False:
+            disables["count"] += 1
+            if disables["count"] == 2:
+                raise RuntimeError("injected rollback failure")
+        return original(manifest_id, enabled)
+
+    monkeypatch.setattr(service, "set_enabled", fail_second_disable)
+    response = auth_client.post(
+        "/api/recovery/rollback",
+        json={"revision": plan["revision"], "confirm": True},
+    )
+    assert response.status_code == 500
+    assert {item["status"] for item in service.list_mods()} == {"enabled"}
+    retry = auth_client.get("/api/recovery/status").json["data"]
+    assert retry["pending_assessment"]["outcome"] == "fault"
+    assert retry["recovery_plan"]["action_count"] == 2
+
+
 class FakeUe4ssProvider:
     def __init__(self, archive: bytes):
         self.archive = archive

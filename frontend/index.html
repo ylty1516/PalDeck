@@ -117,6 +117,16 @@
               <div id="modHealthResult" class="result" aria-live="polite">不会自动覆盖用户修改；高风险项目需要逐项确认。</div>
               <div id="modHealthList" class="mod-health-list" aria-live="polite"></div>
             </section>
+            <section class="settings-subcard recovery-card" data-settings-section="recovery" aria-label="游戏故障恢复">
+              <div class="mod-health-heading"><div><h3>游戏故障恢复</h3><p class="muted">记录游戏会话，回滚相对上次稳定状态中新启用的 Mod</p></div><strong id="recoveryState" class="badge">等待监测</strong></div>
+              <div id="recoveryResult" class="result" aria-live="polite">PalDeck 不会把普通退出误判为崩溃；游戏结束后由你确认本次是否正常。</div>
+              <div id="recoveryList" class="mod-health-list" aria-live="polite"></div>
+              <div class="button-row">
+                <button id="recoveryMarkStable" type="button" class="btn primary" data-action="markRecoveryStable" hidden>本次运行正常</button>
+                <button id="recoveryMarkFault" type="button" class="btn" data-action="markRecoveryFault" hidden>游戏出现故障</button>
+                <button id="recoveryRollback" type="button" class="btn danger" data-action="rollbackRecovery" hidden>回滚新启用 Mod</button>
+              </div>
+            </section>
             <hr><section class="ue4ss-card" data-settings-section="ue4ss" aria-label="Palworld 专用 UE4SS">
               <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
               <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>

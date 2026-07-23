@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import secrets
@@ -25,6 +26,11 @@ from werkzeug.utils import secure_filename
 from backend import credits, game_detector, nexus_api, process_utils, self_updater, smoke_check, ue4ss_installer
 from backend.appearance import AppearanceService
 from backend.desktop_bridge import DesktopBridge
+from backend.fault_recovery import (
+    FaultRecoveryService,
+    RecoveryPlanStale,
+    RecoveryUnavailable,
+)
 from backend.game_lock import game_write_lock
 from backend.import_selection import SelectionExpiredError, SelectionRegistry
 from backend.mod_service import (
@@ -152,6 +158,40 @@ def create_app(
             writable,
             provider=app.extensions["ue4ss_provider"],
         )
+        def recovery_snapshot() -> list[dict[str, object]]:
+            result = [
+                {
+                    "source": "managed",
+                    "id": str(item["id"]),
+                    "name": str(item.get("name") or item["id"]),
+                    "enabled": item.get("status") == "enabled",
+                    "recoverable": item.get("status") in {"enabled", "disabled"},
+                }
+                for item in mod_service.list_mods()
+            ]
+            result.extend(
+                {
+                    "source": "workshop",
+                    "id": str(item["workshop_id"]),
+                    "name": str(item.get("name") or item["workshop_id"]),
+                    "enabled": item.get("enabled") is True,
+                    "recoverable": (
+                        item.get("valid") is True and item.get("can_toggle") is True
+                    ),
+                }
+                for item in workshop_service.list_mods()
+                if item.get("workshop_id") is not None
+            )
+            return result
+
+        game_identity = hashlib.sha256(
+            os.path.normcase(str(Path(path).resolve(strict=False))).encode("utf-8")
+        ).hexdigest()
+        app.extensions["fault_recovery_service"] = FaultRecoveryService(
+            writable / "fault-recovery" / f"{game_identity}.json",
+            snapshot_provider=recovery_snapshot,
+            game_running=lambda: mod_service.game_running(),
+        )
         app.extensions["trash_cleanup"] = mod_service.purge_expired_trash()
         return mod_service
 
@@ -215,6 +255,12 @@ def create_app(
 
     def workshop_service(required: bool = True) -> SteamWorkshopService | None:
         current = app.extensions.get("workshop_service")
+        if current is None and required:
+            raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
+        return current
+
+    def fault_recovery_service(required: bool = True) -> FaultRecoveryService | None:
+        current = app.extensions.get("fault_recovery_service")
         if current is None and required:
             raise ApiError("尚未设置游戏路径", 400, "game_not_configured")
         return current
@@ -283,6 +329,14 @@ def create_app(
     @app.errorhandler(RepairPlanStale)
     def handle_repair_stale(exc: RepairPlanStale):
         return failure(str(exc), 409, "mod_repair_stale", exc.details)
+
+    @app.errorhandler(RecoveryPlanStale)
+    def handle_recovery_stale(exc: RecoveryPlanStale):
+        return failure(str(exc), 409, "recovery_plan_stale", exc.details)
+
+    @app.errorhandler(RecoveryUnavailable)
+    def handle_recovery_unavailable(exc: RecoveryUnavailable):
+        return failure(str(exc), 409, "recovery_unavailable")
 
     @app.errorhandler(ModValueNotSupported)
     def handle_mod_values_not_supported(exc: ModValueNotSupported):
@@ -854,6 +908,87 @@ def create_app(
         if current is None:
             return success({"configured": False, "path": None})
         return success({"configured": True, **game_detector.validate_game_path(current.game_root)})
+
+    @app.get("/api/recovery/status")
+    def recovery_status():
+        return success(fault_recovery_service().observe())
+
+    @app.post("/api/recovery/assess")
+    def assess_recovery_session():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {"outcome"}:
+            raise ApiError(
+                "会话评估请求必须只包含 outcome", 400, "invalid_input"
+            )
+        outcome = body.get("outcome")
+        if outcome not in {"stable", "fault"}:
+            raise ApiError(
+                "outcome 必须是 stable 或 fault", 400, "invalid_input"
+            )
+        if service().game_running():
+            raise GameRunningError("幻兽帕鲁正在运行，无法评估会话")
+        return success(fault_recovery_service().assess(outcome))
+
+    @app.post("/api/recovery/rollback")
+    def rollback_recovery_session():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {"revision", "confirm"}:
+            raise ApiError(
+                "故障回滚请求必须包含 revision 和 confirm",
+                400,
+                "invalid_input",
+            )
+        revision = body.get("revision")
+        if (
+            type(revision) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None
+            or body.get("confirm") is not True
+        ):
+            raise ApiError("故障回滚请求格式无效", 400, "invalid_input")
+        current = service()
+        workshop = workshop_service()
+        if current.game_running():
+            raise GameRunningError("幻兽帕鲁正在运行，无法回滚 Mod")
+
+        def execute(actions: list[dict[str, object]]) -> list[dict[str, object]]:
+            applied: list[dict[str, object]] = []
+            with game_write_lock(writable):
+                try:
+                    if current.game_running():
+                        raise GameRunningError("幻兽帕鲁正在运行，无法回滚 Mod")
+                    for action in actions:
+                        source = str(action["source"])
+                        item_id = str(action["id"])
+                        if source == "managed":
+                            current.set_enabled(item_id, False)
+                        elif source == "workshop":
+                            workshop.set_enabled(
+                                item_id, False, confirm_dependents=True
+                            )
+                        else:
+                            raise ValueError("未知的故障恢复 Mod 来源")
+                        applied.append(dict(action))
+                except BaseException as error:
+                    rollback_failed: list[str] = []
+                    for action in reversed(applied):
+                        try:
+                            if action["source"] == "managed":
+                                current.set_enabled(str(action["id"]), True)
+                            else:
+                                workshop.set_enabled(str(action["id"]), True)
+                        except BaseException:
+                            rollback_failed.append(str(action["key"]))
+                    if rollback_failed:
+                        raise RuntimeError(
+                            "故障回滚中断，且部分 Mod 无法恢复原状态："
+                            + "、".join(rollback_failed)
+                        ) from error
+                    raise
+            return applied
+
+        return success(
+            fault_recovery_service().rollback(revision, execute)
+        )
 
     @app.post("/api/game/ensure-folders")
     def ensure_folders():

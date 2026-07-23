@@ -17,7 +17,7 @@ const state = {
   importQueue: [], activeImportId: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   trash: { items: [], invalid_records: [] }, ue4ssUpdateAvailable: false,
-  modHealth: null,
+  modHealth: null, recovery: null, recoverySeenSessionId: null,
   expandedModValueId: null, modValueCapability: null, modValueLoading: false, modValueError: "",
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
@@ -28,13 +28,14 @@ const appearanceRevisions = createRevisionGuard();
 const backgroundWriteQueue = createSerialQueue();
 const inFlightDynamicActions = new Set();
 let workshopWriteQueue = Promise.resolve();
+let recoveryPollTimer = null;
 const VIEW_COPY = Object.freeze({
   mods: ["我的模组", "管理已安装的模组"], import: ["导入安装", "自动识别并安全安装 ZIP / PAK"],
   nexus: ["N网热门", "浏览 Nexus Mods 热门与最新内容"], settings: ["设置与外观", "游戏工具、更新与三套主题"],
   credits: ["开源致谢", "感谢开放源代码项目与社区资料"],
 });
 const UE4SS_WRITE_ACTIONS = new Set([
-  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip", "repairUe4ss", "uninstallUe4ss", "repairModHealth",
+  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip", "repairUe4ss", "uninstallUe4ss", "repairModHealth", "rollbackRecovery",
 ]);
 const LOCAL_INPUT_ACTIONS = new Set([
   "filterMods", "filterModSource", "filterModStatus", "changeImportType", "editImportName", "editImportNexusId",
@@ -876,6 +877,112 @@ async function repairModHealth() {
   toast("Mod 健康中心安全修复完成", result.ok === false ? "warning" : "success");
 }
 
+function renderRecoveryStatus(status) {
+  state.recovery = status && typeof status === "object" ? status : null;
+  const pending = state.recovery?.pending_assessment;
+  const plan = state.recovery?.recovery_plan;
+  const stableButton = $("#recoveryMarkStable");
+  const faultButton = $("#recoveryMarkFault");
+  const rollbackButton = $("#recoveryRollback");
+  stableButton.hidden = !pending || pending.outcome !== "pending";
+  faultButton.hidden = !pending || pending.outcome !== "pending";
+  rollbackButton.hidden = !plan?.available;
+
+  let badge = "等待监测";
+  let message = "等待下一次 Palworld 游戏会话。";
+  if (state.recovery?.running) {
+    badge = "游戏运行中";
+    message = "正在记录本次会话；运行期间不会修改任何 Mod。";
+  } else if (pending?.outcome === "pending") {
+    badge = "等待确认";
+    message = "检测到游戏已经退出。请确认本次运行是否正常。";
+  } else if (pending?.outcome === "fault") {
+    badge = "故障待恢复";
+    message = plan?.action_count
+      ? `找到 ${plan.action_count} 个相对上次稳定状态新启用的 Mod，可在确认后禁用。`
+      : "没有找到可安全自动回滚的新启用 Mod，请结合日志逐项排查。";
+  } else if (pending?.outcome === "rolled_back") {
+    badge = "已执行回滚";
+    message = "可疑的新启用 Mod 已禁用；请重新启动游戏验证。";
+  }
+  $("#recoveryState").textContent = badge;
+  $("#recoveryResult").textContent = message;
+
+  const fragment = document.createDocumentFragment();
+  const items = plan?.actions?.length ? plan.actions : (pending?.changes || []);
+  for (const item of items.slice(0, 8)) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item warning";
+    const source = item.source === "workshop" ? "Workshop" : "本地";
+    const change = "to_enabled" in item
+      ? "将回滚为禁用"
+      : (item.after_enabled ? "本次会话前已启用" : "本次会话前已禁用");
+    row.textContent = `${item.name || item.id} · ${source} · ${change}`;
+    fragment.append(row);
+  }
+  for (const item of (plan?.blocked || []).slice(0, 4)) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item warning";
+    row.textContent = `${item.name || item.id} · 当前文件状态异常，不能自动回滚`;
+    fragment.append(row);
+  }
+  if (!fragment.childNodes.length && pending) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item";
+    row.textContent = "本次会话与上次稳定状态之间没有检测到 Mod 启停变化。";
+    fragment.append(row);
+  }
+  $("#recoveryList").replaceChildren(fragment);
+}
+
+async function loadRecoveryStatus({ notify = false } = {}) {
+  const status = await request("/api/recovery/status", { timeout: 30000 });
+  const pendingId = status?.pending_assessment?.id || null;
+  if (notify && pendingId && pendingId !== state.recoverySeenSessionId
+      && status.pending_assessment.outcome === "pending") {
+    toast("检测到 Palworld 已退出，请在设置中的“游戏故障恢复”确认本次结果", "info");
+  }
+  if (pendingId) state.recoverySeenSessionId = pendingId;
+  renderRecoveryStatus(status);
+  return status;
+}
+
+async function assessRecovery(outcome) {
+  const status = await request("/api/recovery/assess", {
+    method: "POST", body: { outcome }, timeout: 30000,
+  });
+  renderRecoveryStatus(status);
+  toast(outcome === "stable" ? "已记录为稳定状态" : "已生成故障恢复计划", outcome === "stable" ? "success" : "warning");
+}
+
+async function rollbackRecovery() {
+  const plan = state.recovery?.recovery_plan;
+  if (!plan?.available) {
+    toast("当前没有可安全回滚的新启用 Mod", "warning");
+    return;
+  }
+  if (!window.confirm(`将禁用 ${plan.action_count} 个相对上次稳定状态新启用的 Mod。不会删除文件，是否继续？`)) return;
+  beginModsWrite();
+  const result = await request("/api/recovery/rollback", {
+    method: "POST",
+    body: { revision: plan.revision, confirm: true },
+    timeout: 120000,
+  });
+  renderRecoveryStatus(result.status);
+  await loadMods();
+  toast(`已回滚 ${result.executed_count} 个新启用 Mod，请重新启动游戏验证`, "success");
+}
+
+function startRecoveryMonitor() {
+  if (recoveryPollTimer !== null) clearTimeout(recoveryPollTimer);
+  const poll = async () => {
+    try { await loadRecoveryStatus({ notify: true }); }
+    catch { /* Monitoring is advisory; regular API errors remain independently visible. */ }
+    recoveryPollTimer = setTimeout(poll, 5000);
+  };
+  poll();
+}
+
 function showModRepairPlan(plan) {
   const notice = $("#modConflictNotice");
   const title = document.createElement("strong");
@@ -928,7 +1035,7 @@ async function repairMod(id) {
 async function loadSettings() {
   const status = await request("/api/game/status");
   if (status.configured) showPathInfo(status);
-  if (status.configured) await Promise.all([loadUe4ssStatus(), loadIgnoredMods(), loadModHealth()]);
+  if (status.configured) await Promise.all([loadUe4ssStatus(), loadIgnoredMods(), loadModHealth(), loadRecoveryStatus()]);
 }
 
 async function installWithUe4ssConfirmation(operation) {
@@ -1043,10 +1150,13 @@ export const ACTION_HANDLERS = Object.freeze({
   latestNexus: async () => loadNexus("latest", true),
   editGamePath: noop,
   autoDetectGame: async () => { const data = await request("/api/game/detect"); renderDetectedGames($("#detectList"), data.installs || []); },
-  saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); toast("游戏路径已保存", "success"); },
+  saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); state.recoverySeenSessionId = null; startRecoveryMonitor(); toast("游戏路径已保存", "success"); },
   repairFolders: async () => { await request("/api/game/ensure-folders", { method: "POST", body: {} }); toast("模组目录已修复", "success"); },
   checkModHealth: async () => loadModHealth(),
   repairModHealth: async () => repairModHealth(),
+  markRecoveryStable: async () => assessRecovery("stable"),
+  markRecoveryFault: async () => assessRecovery("fault"),
+  rollbackRecovery: async () => rollbackRecovery(),
   installUe4ss: async () => installFixedUe4ss("/api/ue4ss/install-bundled"),
   repairUe4ss: async () => repairUe4ss(),
   uninstallUe4ss: async () => uninstallUe4ss(),
@@ -1254,6 +1364,7 @@ async function init() {
     applyAppearance(appearance); refreshBackground();
     if (game.configured) showPathInfo(game);
     await Promise.all([loadMods(), game.configured ? loadTrash() : Promise.resolve()]);
+    if (game.configured) startRecoveryMonitor();
   } catch (error) { updateShellStatus({ healthy: false }); toast(actionableErrorMessage(error), "error"); }
 }
 

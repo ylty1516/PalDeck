@@ -521,6 +521,29 @@ def test_mod_health_center_has_real_diagnostics_and_repair_actions():
     assert ".mod-health-metrics" in css
 
 
+def test_fault_recovery_requires_session_assessment_and_explicit_rollback():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    for token in (
+        'id="recoveryState"',
+        'data-action="markRecoveryStable"',
+        'data-action="markRecoveryFault"',
+        'data-action="rollbackRecovery"',
+    ):
+        assert token in html
+    for endpoint in (
+        '"/api/recovery/status"',
+        '"/api/recovery/assess"',
+        '"/api/recovery/rollback"',
+    ):
+        assert endpoint in app
+    assert 'body: { outcome }' in app
+    assert 'body: { revision: plan.revision, confirm: true }' in app
+    assert "window.confirm" in app
+    assert "startRecoveryMonitor" in app
+    assert "不会修改任何 Mod" in app
+
+
 def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
     app = APP.read_text(encoding="utf-8")
     html = HTML.read_text(encoding="utf-8")
@@ -607,6 +630,7 @@ def test_interaction_policy_executable_contract():
         [{ status: 403, code: 'permission_denied' }, '管理员身份重启'],
         [{ status: 423, code: 'game_running' }, '退出游戏'],
         [{ status: 410, code: 'upload_expired' }, '重新选择文件'],
+        [{ status: 409, code: 'recovery_plan_stale' }, '重新生成'],
       ];
       if (!cases.every(([error, expected]) => actionableErrorMessage(error).includes(expected))) process.exit(4);
       const replacement = { status: 409, code: 'mod_conflict', details: { upload_token: 'new-token' } };

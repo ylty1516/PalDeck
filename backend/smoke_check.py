@@ -189,6 +189,28 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             "render_markers": mod_health_render_markers,
         })
 
+        recovery_index_markers = (
+            'id="recoveryState"',
+            'data-action="markRecoveryStable"',
+            'data-action="markRecoveryFault"',
+            'data-action="rollbackRecovery"',
+        )
+        recovery_app_markers = (
+            '"/api/recovery/status"',
+            '"/api/recovery/assess"',
+            '"/api/recovery/rollback"',
+        )
+        with request("app.js") as response:
+            app_source = response.read().decode("utf-8")
+        if any(marker not in index for marker in recovery_index_markers) or any(
+            marker not in app_source for marker in recovery_app_markers
+        ):
+            raise AssertionError("Fault recovery markers missing")
+        passed("fault_recovery_markers", {
+            "index_markers": recovery_index_markers,
+            "app_markers": recovery_app_markers,
+        })
+
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:
             raise AssertionError(f"health mismatch: {health}")
