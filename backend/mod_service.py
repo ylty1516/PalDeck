@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Iterable
 
 from .archive_utils import inspect_and_extract
-from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
+from .domain import (
+    AuditStatus,
+    ManifestAudit,
+    ManifestFile,
+    ManifestFileAudit,
+    ModKind,
+    ModManifest,
+)
 from .game_detector import (
     ensure_mod_folders,
     get_mod_directories,
@@ -31,6 +38,7 @@ from .ignored_mod_store import IgnoredIdentity, IgnoredModStore
 from .manifest_store import ManifestStore, _relative_path_key, validate_no_reparse_ancestors
 from .mod_value_service import ModValueConflict, ModValueService
 from .process_utils import check_directory_writable, is_palworld_running
+from .repair_vault import RepairVault
 from .trash_service import TrashService
 from .ue4ss_config import enabled_state, parse_entry, remove_entry, update_entry
 
@@ -65,6 +73,18 @@ class ModifiedFilesError(RuntimeError):
 
 class NotExternalModError(RuntimeError):
     """A PalDeck-installed mod cannot be removed from management only."""
+
+
+class RepairConfirmationRequired(RuntimeError):
+    def __init__(self, plan: dict[str, object]):
+        self.details = plan
+        super().__init__("修复会替换或隔离已修改的文件，需要确认")
+
+
+class RepairPlanStale(RuntimeError):
+    def __init__(self, plan: dict[str, object]):
+        self.details = plan
+        super().__init__("Mod 状态已变化，请重新检查后再修复")
 
 
 
@@ -156,6 +176,7 @@ class ModService:
             self.game_root, self.data_dir, game_running=self.game_running,
         )
         self.ignored_store = IgnoredModStore(self.data_dir / "ignored-mods-v1.json")
+        self.repair_vault = RepairVault(self.data_dir / "repair-vault-v1")
         self.value_service = ModValueService()
         self._migrate_legacy_once()
 
@@ -310,6 +331,8 @@ class ModService:
             "manifest_id": audit.manifest_id,
             "status": audit.status.value,
         }
+        value["file_health"] = [asdict(item) for item in audit.files]
+        value["audit_issues"] = list(audit.issues)
         return value
 
     def _listed(self, manifest: ModManifest) -> dict[str, object]:
@@ -344,16 +367,495 @@ class ModService:
         return enabled_state(path.read_bytes(), name) if path.is_file() else None
 
     def _audit(self, manifest: ModManifest) -> ManifestAudit:
-        audit = self.store.audit(manifest)
+        try:
+            audit = self.store.audit(manifest)
+        except ValueError:
+            return ManifestAudit(
+                manifest.id,
+                AuditStatus.CONFLICT,
+                (),
+                ("unsafe_or_unreadable_path",),
+            )
         if manifest.kind is not ModKind.UE4SS or audit.status is not AuditStatus.ENABLED:
             return audit
         state = self._mods_enabled(manifest.install_root.parent / "mods.txt", manifest.install_root.name)
         if state is None:
-            return ManifestAudit(manifest.id, AuditStatus.MISSING)
+            return ManifestAudit(
+                manifest.id,
+                AuditStatus.MISSING,
+                audit.files,
+                (*audit.issues, "ue4ss_mods_txt_missing"),
+            )
         return ManifestAudit(
             manifest.id,
             AuditStatus.ENABLED if state else AuditStatus.DISABLED,
+            audit.files,
+            audit.issues,
         )
+
+    @staticmethod
+    def _expected_from_audit(item: ManifestFileAudit) -> ManifestFile:
+        return ManifestFile(
+            item.relative_path, item.expected_size, item.expected_sha256
+        )
+
+    def _audit_paths(
+        self, manifest: ModManifest, item: ManifestFileAudit
+    ) -> dict[str, Path]:
+        return {
+            "live": manifest.install_root / item.relative_path,
+            "disabled": self.data_dir / "disabled" / manifest.id / item.relative_path,
+        }
+
+    def _capture_repair_sources(self, manifest: ModManifest) -> dict[str, object]:
+        audit = self.store.audit(manifest)
+        captured = 0
+        unavailable = 0
+        for item in audit.files:
+            expected = self._expected_from_audit(item)
+            paths = self._audit_paths(manifest, item)
+            source = next(
+                (
+                    paths[location]
+                    for location in ("live", "disabled")
+                    if getattr(item, location).state == "healthy"
+                ),
+                None,
+            )
+            if source is None:
+                unavailable += 1
+                continue
+            try:
+                captured += int(self.repair_vault.capture(source, expected))
+            except (OSError, ValueError):
+                unavailable += 1
+        return {
+            "captured": captured,
+            "unavailable": unavailable,
+            "file_count": len(audit.files),
+        }
+
+    def _checkpoint_manifest(self, manifest: ModManifest) -> bool:
+        try:
+            self.store.checkpoint(manifest)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _finalize_install(self, manifest: ModManifest) -> dict[str, object]:
+        snapshot = self._capture_repair_sources(manifest)
+        snapshot["manifest_checkpoint"] = self._checkpoint_manifest(manifest)
+        result = self._listed(manifest)
+        result["repair_snapshot"] = snapshot
+        return result
+
+    def _build_repair_plan(self, manifest: ModManifest) -> dict[str, object]:
+        audit = self._audit(manifest)
+        actions: list[dict[str, object]] = []
+        blocked: list[dict[str, object]] = []
+        for item in audit.files:
+            expected = self._expected_from_audit(item)
+            desired = (
+                "disabled"
+                if item.role == "ue4ss_metadata" or not manifest.enabled
+                else "live"
+            )
+            other = "live" if desired == "disabled" else "disabled"
+            desired_state = getattr(item, desired).state
+            other_state = getattr(item, other).state
+            vault_available = self.repair_vault.available(expected)
+            common = {
+                "relative_path": item.relative_path,
+                "role": item.role,
+                "target": desired,
+                "source": other,
+                "desired_state": desired_state,
+                "other_state": other_state,
+                "vault_available": vault_available,
+            }
+
+            if desired_state == "healthy":
+                if other_state == "missing":
+                    continue
+                if other_state == "conflict":
+                    blocked.append({**common, "reason": "path_conflict"})
+                else:
+                    actions.append({
+                        **common,
+                        "kind": "quarantine_other",
+                        "requires_confirmation": False,
+                    })
+                continue
+
+            if desired_state == "missing":
+                if other_state == "healthy":
+                    actions.append({
+                        **common,
+                        "kind": "move_verified",
+                        "requires_confirmation": False,
+                    })
+                elif other_state == "conflict":
+                    blocked.append({**common, "reason": "path_conflict"})
+                elif vault_available and other_state == "missing":
+                    actions.append({
+                        **common,
+                        "kind": "restore_from_vault",
+                        "source": "vault",
+                        "requires_confirmation": False,
+                    })
+                elif vault_available:
+                    actions.append({
+                        **common,
+                        "kind": "quarantine_other_and_restore",
+                        "requires_confirmation": True,
+                    })
+                else:
+                    blocked.append({**common, "reason": "trusted_source_missing"})
+                continue
+
+            if desired_state == "modified":
+                if other_state == "conflict":
+                    blocked.append({**common, "reason": "path_conflict"})
+                elif other_state == "healthy":
+                    actions.append({
+                        **common,
+                        "kind": "quarantine_desired_and_move",
+                        "requires_confirmation": True,
+                    })
+                elif vault_available:
+                    actions.append({
+                        **common,
+                        "kind": (
+                            "quarantine_desired_and_restore"
+                            if other_state == "missing"
+                            else "quarantine_both_and_restore"
+                        ),
+                        "requires_confirmation": True,
+                    })
+                else:
+                    blocked.append({**common, "reason": "trusted_source_missing"})
+                continue
+
+            blocked.append({**common, "reason": "path_conflict"})
+
+        if "ue4ss_mods_txt_missing" in audit.issues:
+            actions.append({
+                "kind": "restore_ue4ss_entry",
+                "relative_path": "mods.txt",
+                "role": "ue4ss_config",
+                "target": "live",
+                "source": "manifest",
+                "desired_state": "missing",
+                "other_state": "missing",
+                "vault_available": False,
+                "requires_confirmation": False,
+            })
+        if "unsafe_or_unreadable_path" in audit.issues:
+            blocked.append({
+                "relative_path": "",
+                "role": "manifest",
+                "target": "unknown",
+                "source": "unknown",
+                "desired_state": "conflict",
+                "other_state": "conflict",
+                "vault_available": False,
+                "reason": "unsafe_or_unreadable_path",
+            })
+
+        revision_payload = {
+            "manifest": ManifestStore._to_dict(manifest),
+            "audit": asdict(audit),
+            "actions": actions,
+            "blocked": blocked,
+        }
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(
+                revision_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        safe_actions = sum(
+            action["requires_confirmation"] is False for action in actions
+        )
+        confirmation_actions = len(actions) - safe_actions
+        return {
+            "manifest_id": manifest.id,
+            "name": manifest.name,
+            "status": audit.status.value,
+            "revision": revision,
+            "actions": actions,
+            "blocked": blocked,
+            "safe_actions": safe_actions,
+            "confirmation_actions": confirmation_actions,
+            "repairable": bool(actions),
+            "complete_possible": not blocked,
+            "issues": list(audit.issues),
+        }
+
+    def repair_plan(self, manifest_id: str) -> dict[str, object]:
+        with self._transaction_lock():
+            return self._build_repair_plan(self.store.get(manifest_id))
+
+    def _execute_repair_plan(
+        self,
+        manifest: ModManifest,
+        plan: dict[str, object],
+        *,
+        confirm_replace: bool,
+        safe_only: bool = False,
+    ) -> dict[str, object]:
+        actions = [
+            action
+            for action in plan["actions"]
+            if not safe_only or action["requires_confirmation"] is False
+        ]
+        if (
+            not safe_only
+            and any(action["requires_confirmation"] is True for action in actions)
+            and not confirm_replace
+        ):
+            raise RepairConfirmationRequired(plan)
+        if not actions:
+            result = self._listed(manifest)
+            return {
+                "ok": True,
+                "manifest_id": manifest.id,
+                "executed": [],
+                "executed_count": 0,
+                "remaining_blocked": plan["blocked"],
+                "complete": result["status"] in {"enabled", "disabled"},
+                "quarantine_path": None,
+                "mod": result,
+            }
+
+        transaction_id = uuid.uuid4().hex
+        quarantine_root = (
+            self.data_dir / "repair-quarantine" / "files" / transaction_id
+        )
+        audit = self.store.audit(manifest)
+        expected_by_key = {
+            (item.role, item.relative_path.casefold()): self._expected_from_audit(item)
+            for item in audit.files
+        }
+        moved: list[tuple[Path, Path]] = []
+        created: list[Path] = []
+        config_backups: dict[Path, bytes | None] = {}
+
+        def item_paths(action: dict[str, object]) -> tuple[ManifestFile, dict[str, Path]]:
+            key = (str(action["role"]), str(action["relative_path"]).casefold())
+            expected = expected_by_key[key]
+            detail = next(
+                item
+                for item in audit.files
+                if (item.role, item.relative_path.casefold()) == key
+            )
+            return expected, self._audit_paths(manifest, detail)
+
+        def move(source: Path, destination: Path, expected: ManifestFile) -> None:
+            _move_verified(source, destination, expected.sha256)
+            moved.append((destination, source))
+
+        def quarantine(
+            source: Path, location: str, expected: ManifestFile
+        ) -> Path:
+            destination = (
+                quarantine_root
+                / manifest.id
+                / location
+                / expected.relative_path
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _move_verified(source, destination)
+            moved.append((destination, source))
+            return destination
+
+        def restore(expected: ManifestFile, destination: Path) -> None:
+            self.repair_vault.restore(expected, destination)
+            created.append(destination)
+
+        executed: list[dict[str, object]] = []
+        try:
+            for action in actions:
+                kind = str(action["kind"])
+                if kind == "restore_ue4ss_entry":
+                    mods_txt = manifest.install_root.parent / "mods.txt"
+                    if mods_txt not in config_backups:
+                        config_backups[mods_txt] = (
+                            mods_txt.read_bytes() if mods_txt.is_file() else None
+                        )
+                    current = config_backups[mods_txt] or b""
+                    self._write_mods_txt(
+                        mods_txt,
+                        self._updated_mods_bytes(
+                            current, manifest.install_root.name, manifest.enabled
+                        ),
+                    )
+                    executed.append(action)
+                    continue
+
+                expected, paths = item_paths(action)
+                target = str(action["target"])
+                source = str(action["source"])
+                target_path = paths[target]
+                source_path = paths[source] if source in paths else None
+                if kind == "move_verified":
+                    move(source_path, target_path, expected)
+                elif kind == "restore_from_vault":
+                    restore(expected, target_path)
+                elif kind == "quarantine_other":
+                    quarantine(source_path, source, expected)
+                elif kind == "quarantine_desired_and_move":
+                    quarantine(target_path, target, expected)
+                    move(source_path, target_path, expected)
+                elif kind == "quarantine_desired_and_restore":
+                    quarantine(target_path, target, expected)
+                    restore(expected, target_path)
+                elif kind == "quarantine_other_and_restore":
+                    quarantine(source_path, source, expected)
+                    restore(expected, target_path)
+                elif kind == "quarantine_both_and_restore":
+                    quarantine(target_path, target, expected)
+                    quarantine(source_path, source, expected)
+                    restore(expected, target_path)
+                else:
+                    raise ValueError("unknown repair action")
+                executed.append(action)
+        except BaseException:
+            for path, before in config_backups.items():
+                if before is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._write_mods_txt(path, before)
+            for path in reversed(created):
+                path.unlink(missing_ok=True)
+            for current, original in reversed(moved):
+                original.parent.mkdir(parents=True, exist_ok=True)
+                if current.exists() and not os.path.lexists(original):
+                    _move_verified(current, original)
+            shutil.rmtree(quarantine_root, ignore_errors=True)
+            raise
+
+        result = self._listed(manifest)
+        return {
+            "ok": True,
+            "manifest_id": manifest.id,
+            "executed": executed,
+            "executed_count": len(executed),
+            "remaining_blocked": plan["blocked"],
+            "complete": result["status"] in {"enabled", "disabled"},
+            "quarantine_path": (
+                str(quarantine_root) if quarantine_root.is_dir() else None
+            ),
+            "mod": result,
+        }
+
+    @_locked_write
+    def repair_mod(
+        self,
+        manifest_id: str,
+        revision: str,
+        *,
+        confirm_replace: bool = False,
+    ) -> dict[str, object]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        manifest = self.store.get(manifest_id)
+        plan = self._build_repair_plan(manifest)
+        if revision != plan["revision"]:
+            raise RepairPlanStale(plan)
+        return self._execute_repair_plan(
+            manifest, plan, confirm_replace=confirm_replace
+        )
+
+    def health_report(self) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+        healthy = abnormal = safe_actions = confirmation_actions = blocked = 0
+        for manifest in self.store.list():
+            plan = self._build_repair_plan(manifest)
+            if plan["status"] in {"enabled", "disabled"}:
+                healthy += 1
+            else:
+                abnormal += 1
+            safe_actions += int(plan["safe_actions"])
+            confirmation_actions += int(plan["confirmation_actions"])
+            blocked += len(plan["blocked"])
+            items.append({
+                "id": manifest.id,
+                "name": manifest.name,
+                "kind": manifest.kind.value,
+                "status": plan["status"],
+                "safe_actions": plan["safe_actions"],
+                "confirmation_actions": plan["confirmation_actions"],
+                "blocked": len(plan["blocked"]),
+                "repairable": plan["repairable"],
+            })
+        invalid = self.store.invalid_records()
+        return {
+            "status": "healthy" if not abnormal and not invalid else "degraded",
+            "summary": {
+                "managed_mods": len(items),
+                "healthy_mods": healthy,
+                "abnormal_mods": abnormal,
+                "invalid_manifests": len(invalid),
+                "safe_actions": safe_actions,
+                "confirmation_actions": confirmation_actions,
+                "blocked_files": blocked,
+            },
+            "mods": items,
+            "invalid_manifests": invalid,
+        }
+
+    @_locked_write
+    def repair_all_safe(self) -> dict[str, object]:
+        self._assert_stopped()
+        self._prepare_dirs()
+        restored_manifests: list[str] = []
+        for item in self.store.invalid_records():
+            if item["backup_available"] is not True:
+                continue
+            try:
+                if self.store.restore_invalid_from_backup(str(item["id"])):
+                    restored_manifests.append(str(item["id"]))
+            except (OSError, TypeError, ValueError):
+                continue
+
+        captured = 0
+        repaired: list[dict[str, object]] = []
+        failed: list[str] = []
+        for manifest in self.store.list():
+            try:
+                captured += int(self._capture_repair_sources(manifest)["captured"])
+            except (OSError, ValueError):
+                pass
+            self._checkpoint_manifest(manifest)
+            plan = self._build_repair_plan(manifest)
+            if not plan["safe_actions"]:
+                continue
+            try:
+                result = self._execute_repair_plan(
+                    manifest,
+                    plan,
+                    confirm_replace=False,
+                    safe_only=True,
+                )
+                repaired.append({
+                    "id": manifest.id,
+                    "executed_count": result["executed_count"],
+                    "complete": result["complete"],
+                })
+            except (OSError, RuntimeError, ValueError):
+                failed.append(manifest.id)
+        return {
+            "ok": not failed,
+            "restored_manifests": restored_manifests,
+            "captured_repair_objects": captured,
+            "repaired": repaired,
+            "failed": failed,
+            "report": self.health_report(),
+        }
 
     def _install_ue4ss(
         self,
@@ -414,7 +916,7 @@ class ModService:
                 self.store.save(created)
             current = old_config if old_config is not None else b""
             self._write_mods_txt(mods_txt, self._updated_mods_bytes(current, folder_name, True))
-            return self._listed(created)
+            return self._finalize_install(created)
         except BaseException:
             if created is not None:
                 self.store.delete(created.id)
@@ -490,7 +992,7 @@ class ModService:
                 source_name=source_path.name,
                 nexus_id=nexus_id,
             )
-            return self._listed(created)
+            return self._finalize_install(created)
         except BaseException:
             if created is not None:
                 self.store.delete(created.id)
@@ -600,7 +1102,7 @@ class ModService:
                 if len(owner_ids) == 1 and not has_unmanaged_overlap:
                     owner = next(owner for owner in overlap_owners if owner is not None)
                     if len(overlaps) == len(planned):
-                        return self._listed(owner)
+                        return self._finalize_install(owner)
                     stems = {destination.stem.casefold() for _, destination in planned}
                     additions = [incoming for incoming, destination in planned if not destination.exists()]
                     if (
@@ -688,7 +1190,7 @@ class ModService:
                     files=tuple(sorted((*merge_owner.files, *added_records), key=lambda item: item.relative_path)),
                 )
                 self.store.save(merged)
-                return self._listed(merged)
+                return self._finalize_install(merged)
             created = self.store.create(
                 name=_safe_label(name),
                 kind=kind,
@@ -699,7 +1201,7 @@ class ModService:
             )
             for old_id in old_manifests:
                 self.store.delete(old_id)
-            return self._listed(created)
+            return self._finalize_install(created)
         except BaseException:
             if created is not None:
                 self.store.delete(created.id)
@@ -747,7 +1249,9 @@ class ModService:
                     self._updated_mods_bytes(current, manifest.install_root.name, enabled),
                 )
                 self.store.save(changed)
-                return self._listed(changed)
+                result = self._listed(changed)
+                self._checkpoint_manifest(changed)
+                return result
             except BaseException:
                 if old_config is None:
                     mods_txt.unlink(missing_ok=True)
@@ -813,6 +1317,7 @@ class ModService:
                     moves.append((destination, source))
             self.store.save(changed)
             result = self._listed(changed)
+            self._checkpoint_manifest(changed)
         except BaseException:
             for current, original in reversed(moves):
                 original.parent.mkdir(parents=True, exist_ok=True)
@@ -890,7 +1395,7 @@ class ModService:
         self._assert_stopped()
         self._prepare_dirs()
         manifest = self.trash_service.restore_local_mod(trash_id, self.store)
-        return self._listed(manifest)
+        return self._finalize_install(manifest)
 
     def list_trash(self) -> dict[str, object]:
         return self.trash_service.list_records()
@@ -1279,9 +1784,11 @@ class ModService:
         manifest_path = self.store.manifests_dir / f"{manifest.id}.json"
         manifest_before = manifest_path.read_bytes()
         try:
-            _changed, result = self.value_service.update_values(
+            changed, result = self.value_service.update_values(
                 manifest, values, revision, self.store.save
             )
+            self._capture_repair_sources(changed)
+            self._checkpoint_manifest(changed)
             return result
         except BaseException:
             try:

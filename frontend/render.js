@@ -131,7 +131,22 @@ export function renderMods(container, mods, options = {}) {
     } else {
       const fileCount = Array.isArray(mod.manifest_files) ? mod.manifest_files.length : (Array.isArray(mod.files) ? mod.files.length : 0);
       state.append(el("small", toggleAllowed ? "ok" : "warning", `${statusInfo.integrity} · ${fileCount} 个受管文件`));
-      if (!toggleAllowed) state.append(el("small", "repair-hint", "请修复文件或重扫；异常状态不可启停。"));
+      if (!toggleAllowed) {
+        state.append(el("small", "repair-hint", "请先诊断修复；异常状态不可启停。"));
+        const health = Array.isArray(mod.file_health) ? mod.file_health : [];
+        const abnormalFiles = health.filter((item) => {
+          const live = item?.live?.state || "missing";
+          const disabled = item?.disabled?.state || "missing";
+          return live === "modified" || live === "conflict" || disabled === "modified" || disabled === "conflict" || (live === "missing" && disabled === "missing");
+        });
+        const stateLabel = { missing: "缺失", modified: "已修改", conflict: "路径冲突", healthy: "正常" };
+        for (const item of abnormalFiles.slice(0, 2)) {
+          state.append(el("small", "mod-file-health", `${item.relative_path} · 启用区 ${stateLabel[item.live?.state] || "未知"} / 禁用区 ${stateLabel[item.disabled?.state] || "未知"}`));
+        }
+        if (mod.audit_issues?.includes("unsafe_or_unreadable_path")) {
+          state.append(el("small", "mod-file-health", "检测到不安全或无法读取的路径，已禁止自动操作"));
+        }
+      }
     }
 
     const expanded = !workshop && String(options.expandedId || "") === id;
@@ -162,9 +177,9 @@ export function renderMods(container, mods, options = {}) {
         actions.append(unmanage);
       }
       if (!toggleAllowed) {
-        const rescan = actionButton("重扫", "rescanMods", "btn compact");
-        rescan.dataset.id = id;
-        actions.append(rescan);
+        const repair = actionButton("诊断修复", "repairMod", "btn compact warning");
+        repair.dataset.id = id;
+        actions.append(repair);
       }
       actions.append(remove);
       if (mod.adjustable_values === true) {

@@ -19,9 +19,10 @@ REQUIRED_ACTIONS = {
     "refreshMods", "openModsFolder", "chooseModFile", "importMod",
     "searchNexus", "refreshNexus", "autoDetectGame", "saveGamePath",
     "repairFolders", "chooseBackground", "resetBackground", "saveAppearance",
-    "installUe4ss", "checkUpdate", "restartAdmin",
+    "installUe4ss", "checkUpdate", "restartAdmin", "checkModHealth",
+    "repairModHealth",
 }
-DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "unmanageMod", "rescanMods", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "restoreTrash", "purgeTrash", "toggleModValues", "saveModValues", "cancelModValues", "useGamePath", "openNexus", "copyNexusId"}
+DYNAMIC_ACTIONS = {"toggleMod", "openModFolder", "deleteMod", "unmanageMod", "repairMod", "toggleWorkshop", "openWorkshopFolder", "openSteamWorkshop", "restoreTrash", "purgeTrash", "toggleModValues", "saveModValues", "cancelModValues", "useGamePath", "openNexus", "copyNexusId"}
 
 
 class ContractParser(HTMLParser):
@@ -258,7 +259,7 @@ def test_css_has_three_themes_accessibility_effects_and_responsive_rules():
 
 def test_v22_settings_page_has_seven_real_sections_and_live_preview():
     html = HTML.read_text(encoding="utf-8")
-    for section in ("game", "update", "ue4ss", "theme", "background", "effects", "advanced"):
+    for section in ("game", "health", "update", "ue4ss", "theme", "background", "effects", "advanced"):
         assert f'data-settings-section="{section}"' in html
     assert 'class="appearance-live-preview"' in html
     assert "效果预览" in html
@@ -478,7 +479,7 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
     app = APP.read_text(encoding="utf-8")
     for status in ("enabled", "disabled", "modified", "missing", "conflict"):
         assert f'{status}:' in render
-    for label in ("已启用", "已禁用", "文件已修改", "文件缺失", "文件冲突", "完整性正常", "请修复文件或重扫"):
+    for label in ("已启用", "已禁用", "文件已修改", "文件缺失", "文件冲突", "完整性正常", "请先诊断修复"):
         assert label in render
     assert '["enabled", "disabled"].includes(status)' in render
     assert "toggle.disabled = !toggleAllowed" in render
@@ -495,6 +496,29 @@ def test_local_mod_cards_cover_audit_states_integrity_and_safe_toggle_contract()
     assert toggle.group(1).index("await loadMods()") < toggle.group(1).index('error.code === "mod_conflict"')
     assert "target.disabled = true" in app
     assert "target.disabled = false" in app
+
+
+def test_mod_health_center_has_real_diagnostics_and_repair_actions():
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    render = RENDER.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    for token in (
+        'id="modHealthState"', 'id="modHealthHealthy"',
+        'id="modHealthAbnormal"', 'id="modHealthInvalid"',
+        'data-action="checkModHealth"', 'data-action="repairModHealth"',
+    ):
+        assert token in html
+    for endpoint in (
+        '"/api/mods/health"', '"/api/mods/repair-safe"',
+        'repair-plan', '/repair`',
+    ):
+        assert endpoint in app
+    assert 'actionButton("诊断修复", "repairMod"' in render
+    assert "mod.file_health" in render
+    assert "confirm_replace" in app
+    assert "repair-quarantine" not in app
+    assert ".mod-health-metrics" in css
 
 
 def test_mod_filter_stats_import_rollback_and_error_guidance_contract():
@@ -544,8 +568,9 @@ def test_toolbar_refresh_performs_a_real_disk_rescan_before_listing():
 
 def test_dynamic_mod_actions_are_delegated_and_guard_duplicate_submissions():
     app = APP.read_text(encoding="utf-8")
-    assert 'case "rescanMods":' in app
-    assert '"rescanMods"' in RENDER.read_text(encoding="utf-8")
+    assert 'case "repairMod":' in app
+    assert '"repairMod"' in RENDER.read_text(encoding="utf-8")
+    assert 'case "rescanMods":' not in app
     assert "if (target.disabled) return" in app
     assert "inFlightDynamicActions" in app
     assert 'dynamicActionKey(target.dataset.dynamicAction, id)' in app
@@ -620,7 +645,8 @@ def test_import_lifecycle_and_mod_generation_contract():
     for operation in ("importSelected", "toggleMod", "deletePendingMod"):
         body = re.search(rf"async function {operation}\([^)]*\) \{{(.*?)^\}}", app, re.S | re.M)
         assert body and "beginModsWrite()" in body.group(1), operation
-    assert 'case "rescanMods": beginModsWrite();' in app
+    repair = re.search(r"async function repairMod\(id\) \{(.*?)^\}", app, re.S | re.M)
+    assert repair and "beginModsWrite()" in repair.group(1)
     assert "externalSignal" in api
 
 

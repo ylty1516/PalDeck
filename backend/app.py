@@ -33,6 +33,8 @@ from backend.mod_service import (
     ModifiedFilesError,
     ModService,
     NotExternalModError,
+    RepairConfirmationRequired,
+    RepairPlanStale,
 )
 from backend.mod_value_service import (
     ModValueConflict,
@@ -272,6 +274,16 @@ def create_app(
     def handle_not_external(_exc: NotExternalModError):
         return failure("只有外部发现模组可以取消管理", 409, "mod_not_external")
 
+    @app.errorhandler(RepairConfirmationRequired)
+    def handle_repair_confirmation(exc: RepairConfirmationRequired):
+        return failure(
+            str(exc), 409, "mod_repair_confirmation_required", exc.details
+        )
+
+    @app.errorhandler(RepairPlanStale)
+    def handle_repair_stale(exc: RepairPlanStale):
+        return failure(str(exc), 409, "mod_repair_stale", exc.details)
+
     @app.errorhandler(ModValueNotSupported)
     def handle_mod_values_not_supported(exc: ModValueNotSupported):
         return failure(str(exc), 409, "mod_values_not_supported", exc.details)
@@ -436,6 +448,15 @@ def create_app(
         local_mods = current.discover_existing_once() if current else []
         workshop_mods = workshop.list_mods() if workshop else []
         return success([*local_mods, *workshop_mods])
+
+    @app.get("/api/mods/health")
+    def mod_health():
+        return success(service().health_report())
+
+    @app.post("/api/mods/repair-safe")
+    def repair_safe_mods():
+        require_empty_json("安全修复请求不接受参数")
+        return success(service().repair_all_safe())
 
     @app.get("/api/workshop/mods")
     def list_workshop_mods():
@@ -683,6 +704,37 @@ def create_app(
         ):
             raise ApiError("数值调整请求格式无效", 400, "invalid_input")
         return success(service().update_mod_values(mod_id, values, revision))
+
+    @app.get("/api/mods/<mod_id>/repair-plan")
+    def get_mod_repair_plan(mod_id: str):
+        normalized = validate_uuid(mod_id)
+        return success(service().repair_plan(normalized))
+
+    @app.post("/api/mods/<mod_id>/repair")
+    def repair_mod(mod_id: str):
+        normalized = validate_uuid(mod_id)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) not in (
+            {"revision"}, {"revision", "confirm_replace"},
+        ):
+            raise ApiError(
+                "Mod 修复请求必须包含 revision，可选 confirm_replace",
+                400,
+                "invalid_input",
+            )
+        revision = body.get("revision")
+        confirm = body.get("confirm_replace", False)
+        if (
+            type(revision) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None
+            or type(confirm) is not bool
+        ):
+            raise ApiError("Mod 修复请求格式无效", 400, "invalid_input")
+        return success(
+            service().repair_mod(
+                normalized, revision, confirm_replace=confirm
+            )
+        )
 
     @app.post("/api/mods/<mod_id>/toggle")
     def toggle_mod(mod_id: str):

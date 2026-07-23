@@ -195,6 +195,19 @@ input[type="range"]::-webkit-slider-thumb { width: 18px; height: 18px; margin-to
 .ue4ss-metrics small { color: var(--muted); font-size: 10px; }
 .ue4ss-metrics strong { margin-top: 3px; font-size: 13px; }
 .ue4ss-meta { display: inline-block; margin: 4px 12px 10px 0; color: var(--muted); font-size: 12px; }
+.mod-health-card { margin-top: 12px; }
+.mod-health-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.mod-health-heading h3, .mod-health-heading p { margin: 0; }
+.mod-health-heading p { margin-top: 4px; }
+.mod-health-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mod-health-metrics article { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: color-mix(in srgb, var(--panel-solid) 72%, transparent); }
+.mod-health-metrics small, .mod-health-metrics strong { display: block; }
+.mod-health-metrics small { color: var(--muted); font-size: 10px; }
+.mod-health-metrics strong { margin-top: 3px; font-size: 16px; }
+.mod-health-list { display: grid; gap: 6px; }
+.mod-health-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; overflow-wrap: anywhere; }
+.mod-health-item.warning { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); color: var(--danger); }
+.mod-file-health { max-width: 280px; overflow-wrap: anywhere; color: var(--danger); }
 .ignored-mods-setting { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; margin-top: 10px; }
 .conflict-notice { margin-bottom: 12px; padding: 14px 16px; border-radius: var(--radius); border-color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, var(--panel)); }
 .conflict-notice[hidden] { display: none; }
@@ -400,6 +413,7 @@ dialog::backdrop { background: rgba(8, 15, 28, .55); backdrop-filter: blur(4px);
   .app-statusbar { grid-column: 1; grid-row: 3; grid-template-columns: 1fr; height: auto; }
   .status-segment { border-right: 0; border-bottom: 1px solid var(--line); }
   .topbar, .toolbar, .mod-card { align-items: stretch; flex-direction: column; }
+  .mod-health-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .top-actions .btn { flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) {

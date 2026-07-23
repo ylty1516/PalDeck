@@ -13,7 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 
-from .domain import AuditStatus, ManifestAudit, ManifestFile, ModKind, ModManifest
+from .domain import (
+    AuditStatus,
+    FileLocationAudit,
+    ManifestAudit,
+    ManifestFile,
+    ManifestFileAudit,
+    ModKind,
+    ModManifest,
+)
 from .storage import JsonStore
 
 _REPARSE_POINT = 0x400
@@ -322,6 +330,11 @@ class ManifestStore:
             raise ValueError(f"invalid manifest: {manifest_id}: {exc}") from exc
         JsonStore(self._path(validated.id)).write(self._to_dict(validated))
 
+    def checkpoint(self, manifest: ModManifest) -> None:
+        """Persist a last-known-good recovery copy after a transaction commits."""
+        validated = self._from_dict(self._to_dict(manifest))
+        JsonStore(self._backup_path(validated.id)).write(self._to_dict(validated))
+
     def get(self, manifest_id: str) -> ModManifest:
         try:
             path = self._path(manifest_id)
@@ -357,6 +370,74 @@ class ManifestStore:
                 continue
         return sorted(manifests, key=lambda item: (_installed_datetime(item.installed_at), item.id))
 
+    def _backup_path(self, manifest_id: str) -> Path:
+        return self.root.parent / "manifest-backups" / f"{uuid.UUID(manifest_id).hex}.json"
+
+    def invalid_records(self) -> list[dict[str, object]]:
+        if not self.manifests_dir.is_dir():
+            return []
+        invalid: list[dict[str, object]] = []
+        for path in sorted(self.manifests_dir.glob("*.json"), key=lambda item: item.name):
+            reason = "清单字段无效"
+            try:
+                value = JsonStore(path).read(None)
+                if value is None:
+                    reason = "JSON 格式损坏"
+                    raise ValueError(reason)
+                manifest = self._from_dict(value)
+                if uuid.UUID(path.stem).hex != manifest.id:
+                    reason = "清单 ID 与文件名不一致"
+                    raise ValueError(reason)
+                continue
+            except (KeyError, TypeError, ValueError):
+                backup_available = False
+                try:
+                    normalized = uuid.UUID(path.stem).hex
+                    backup = JsonStore(self._backup_path(normalized)).read(None)
+                    restored = self._from_dict(backup)
+                    backup_available = restored.id == normalized
+                except (KeyError, TypeError, ValueError):
+                    normalized = path.stem
+                invalid.append({
+                    "id": normalized,
+                    "reason": reason,
+                    "backup_available": backup_available,
+                })
+        return invalid
+
+    def restore_invalid_from_backup(self, manifest_id: str) -> bool:
+        normalized = uuid.UUID(manifest_id).hex
+        path = self._path(normalized)
+        backup_path = self._backup_path(normalized)
+        value = JsonStore(backup_path).read(None)
+        restored = self._from_dict(value)
+        if restored.id != normalized:
+            raise ValueError("backup id does not match manifest id")
+        try:
+            self.get(normalized)
+            return False
+        except KeyError:
+            raise ValueError("manifest does not exist")
+        except ValueError:
+            pass
+        quarantine = (
+            self.root.parent
+            / "repair-quarantine"
+            / "manifests"
+            / uuid.uuid4().hex
+            / path.name
+        )
+        quarantine.parent.mkdir(parents=True, exist_ok=False)
+        os.replace(path, quarantine)
+        try:
+            JsonStore(path).write(self._to_dict(restored))
+            self.get(normalized)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            os.replace(quarantine, path)
+            raise
+        return True
+
     def delete(self, manifest_id: str) -> None:
         try:
             path = self._path(manifest_id)
@@ -375,6 +456,29 @@ class ManifestStore:
             raise ValueError("relative_path resolves outside its root")
         return resolved
 
+    def _audit_location(
+        self, root: Path, expected: ManifestFile
+    ) -> FileLocationAudit:
+        try:
+            path = self._audit_path(root, expected.relative_path)
+        except OSError:
+            return FileLocationAudit("conflict")
+        if not os.path.lexists(path):
+            return FileLocationAudit("missing")
+        if _is_reparse(path) or not path.is_file():
+            return FileLocationAudit("conflict")
+        try:
+            size = path.stat().st_size
+            digest = _sha256(path)
+        except OSError:
+            return FileLocationAudit("conflict")
+        state = (
+            "healthy"
+            if size == expected.size and digest == expected.sha256
+            else "modified"
+        )
+        return FileLocationAudit(state, size, digest)
+
     def audit(self, manifest_or_id: ModManifest | str) -> ManifestAudit:
         manifest = (
             manifest_or_id
@@ -383,42 +487,51 @@ class ManifestStore:
         )
         live_root = manifest.install_root
         alternate_root = self.root.parent / "disabled" / manifest.id
-        live_count = disabled_count = 0
-        changed = False
+        details: list[ManifestFileAudit] = []
         for expected in manifest.files:
-            live = self._audit_path(live_root, expected.relative_path)
-            disabled = self._audit_path(alternate_root, expected.relative_path)
-            live_exists = live.is_file()
-            disabled_exists = disabled.is_file()
-            if live_exists:
-                live_count += 1
-                changed |= live.stat().st_size != expected.size or _sha256(live) != expected.sha256
-            if disabled_exists:
-                disabled_count += 1
-                changed |= disabled.stat().st_size != expected.size or _sha256(disabled) != expected.sha256
-        if live_count and disabled_count:
+            details.append(ManifestFileAudit(
+                relative_path=expected.relative_path,
+                expected_size=expected.size,
+                expected_sha256=expected.sha256,
+                live=self._audit_location(live_root, expected),
+                disabled=self._audit_location(alternate_root, expected),
+            ))
+
+        live_present = any(item.live.state != "missing" for item in details)
+        disabled_present = any(item.disabled.state != "missing" for item in details)
+        if any(
+            item.live.state == "conflict" or item.disabled.state == "conflict"
+            for item in details
+        ) or (live_present and disabled_present):
             status = AuditStatus.CONFLICT
-        elif changed:
+        elif any(
+            item.live.state == "modified" or item.disabled.state == "modified"
+            for item in details
+        ):
             status = AuditStatus.MODIFIED
-        elif live_count == len(manifest.files):
+        elif all(item.live.state == "healthy" for item in details):
             status = AuditStatus.ENABLED
-        elif disabled_count == len(manifest.files):
+        elif all(item.disabled.state == "healthy" for item in details):
             status = AuditStatus.DISABLED
         else:
             status = AuditStatus.MISSING
 
         if manifest.ue4ss_enabled_txt is not None:
-            metadata = self._audit_path(
-                alternate_root, manifest.ue4ss_enabled_txt.relative_path
-            )
-            metadata_status: AuditStatus | None = None
-            if not metadata.is_file():
-                metadata_status = AuditStatus.MISSING
-            elif (
-                metadata.stat().st_size != manifest.ue4ss_enabled_txt.size
-                or _sha256(metadata) != manifest.ue4ss_enabled_txt.sha256
-            ):
-                metadata_status = AuditStatus.MODIFIED
+            expected = manifest.ue4ss_enabled_txt
+            metadata = self._audit_location(alternate_root, expected)
+            details.append(ManifestFileAudit(
+                relative_path=expected.relative_path,
+                expected_size=expected.size,
+                expected_sha256=expected.sha256,
+                live=FileLocationAudit("missing"),
+                disabled=metadata,
+                role="ue4ss_metadata",
+            ))
+            metadata_status: AuditStatus | None = {
+                "missing": AuditStatus.MISSING,
+                "modified": AuditStatus.MODIFIED,
+                "conflict": AuditStatus.CONFLICT,
+            }.get(metadata.state)
             if metadata_status is not None:
                 priority = {
                     AuditStatus.ENABLED: 0,
@@ -429,7 +542,7 @@ class ManifestStore:
                 }
                 if priority[metadata_status] > priority[status]:
                     status = metadata_status
-        return ManifestAudit(manifest.id, status)
+        return ManifestAudit(manifest.id, status, tuple(details))
 
     def migrate_legacy_registry(
         self,

@@ -16,6 +16,8 @@ from backend.mod_service import (
     ModifiedFilesError,
     ModService,
     NotExternalModError,
+    RepairConfirmationRequired,
+    RepairPlanStale,
     _move_verified,
 )
 from backend.process_utils import (
@@ -731,6 +733,94 @@ def test_list_mods_returns_real_audit(fake_game_root, tmp_path):
     listed = service.list_mods()
     assert listed[0]["id"] == item["id"]
     assert listed[0]["audit"] == {"manifest_id": item["id"], "status": AuditStatus.MODIFIED.value}
+
+
+def test_detailed_health_and_confirmed_repair_preserve_modified_copy(
+    fake_game_root, tmp_path
+):
+    source = tmp_path / "Repairable.pak"
+    source.write_bytes(b"original")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    live = _live(fake_game_root) / source.name
+    live.write_bytes(b"user modified")
+
+    listed = service.list_mods()[0]
+    [file_health] = listed["file_health"]
+    assert file_health["live"]["state"] == "modified"
+    assert file_health["disabled"]["state"] == "missing"
+    plan = service.repair_plan(installed["id"])
+    assert plan["safe_actions"] == 0
+    assert plan["confirmation_actions"] == 1
+    assert plan["actions"][0]["vault_available"] is True
+
+    with pytest.raises(RepairConfirmationRequired):
+        service.repair_mod(installed["id"], plan["revision"])
+
+    repaired = service.repair_mod(
+        installed["id"], plan["revision"], confirm_replace=True
+    )
+    assert repaired["complete"] is True
+    assert live.read_bytes() == b"original"
+    quarantine = Path(repaired["quarantine_path"])
+    assert [path.read_bytes() for path in quarantine.rglob(source.name)] == [
+        b"user modified"
+    ]
+
+
+def test_missing_file_is_restored_without_confirmation_from_verified_vault(
+    fake_game_root, tmp_path
+):
+    source = tmp_path / "Missing.pak"
+    source.write_bytes(b"recover me")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    live = _live(fake_game_root) / source.name
+    live.unlink()
+
+    plan = service.repair_plan(installed["id"])
+    assert plan["safe_actions"] == 1
+    assert plan["confirmation_actions"] == 0
+    assert plan["actions"][0]["kind"] == "restore_from_vault"
+
+    repaired = service.repair_mod(installed["id"], plan["revision"])
+    assert repaired["complete"] is True
+    assert repaired["quarantine_path"] is None
+    assert live.read_bytes() == b"recover me"
+
+
+def test_repair_plan_revision_rejects_stale_disk_state(fake_game_root, tmp_path):
+    source = tmp_path / "StaleRepair.pak"
+    source.write_bytes(b"original")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    live = _live(fake_game_root) / source.name
+    live.unlink()
+    plan = service.repair_plan(installed["id"])
+    live.write_bytes(b"new unexpected state")
+
+    with pytest.raises(RepairPlanStale):
+        service.repair_mod(installed["id"], plan["revision"], confirm_replace=True)
+
+
+def test_safe_health_repair_restores_invalid_manifest_backup(
+    fake_game_root, tmp_path
+):
+    source = tmp_path / "ManifestBackup.pak"
+    source.write_bytes(b"payload")
+    service = _service(fake_game_root, tmp_path)
+    installed = service.install(source)
+    manifest_path = service.store.manifests_dir / f"{installed['id']}.json"
+    manifest_path.write_text("{broken", encoding="utf-8")
+
+    before = service.health_report()
+    assert before["summary"]["invalid_manifests"] == 1
+    assert before["invalid_manifests"][0]["backup_available"] is True
+
+    repaired = service.repair_all_safe()
+    assert repaired["restored_manifests"] == [installed["id"]]
+    assert repaired["report"]["status"] == "healthy"
+    assert service.store.get(installed["id"]).name == "ManifestBackup"
 
 
 def test_transaction_lock_is_reentrant_in_same_thread(fake_game_root, tmp_path):

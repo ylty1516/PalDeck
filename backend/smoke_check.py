@@ -173,6 +173,22 @@ def run_http_smoke(base_url: str, token: str, report_path: Path, *, frozen: bool
             raise AssertionError("Mod value editor markers missing")
         passed("mod_value_editor_markers", {"markers": value_markers})
 
+        mod_health_index_markers = (
+            'id="modHealthState"', 'id="modHealthAbnormal"',
+            'data-action="checkModHealth"', 'data-action="repairModHealth"',
+        )
+        mod_health_render_markers = (
+            'actionButton("诊断修复", "repairMod"', "mod.file_health",
+        )
+        if any(marker not in index for marker in mod_health_index_markers) or any(
+            marker not in render_source for marker in mod_health_render_markers
+        ):
+            raise AssertionError("Mod health center markers missing")
+        passed("mod_health_center_markers", {
+            "index_markers": mod_health_index_markers,
+            "render_markers": mod_health_render_markers,
+        })
+
         health = json_data("api/health")
         if health.get("status") != "up" or health.get("frozen") is not True:
             raise AssertionError(f"health mismatch: {health}")

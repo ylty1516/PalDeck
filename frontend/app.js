@@ -17,6 +17,7 @@ const state = {
   importQueue: [], activeImportId: null, pendingUploadToken: null,
   pendingDeleteId: null, pendingDeleteForce: false, pendingWorkshopDependency: null, updateInfo: null,
   trash: { items: [], invalid_records: [] }, ue4ssUpdateAvailable: false,
+  modHealth: null,
   expandedModValueId: null, modValueCapability: null, modValueLoading: false, modValueError: "",
   modsRequestSequence: 0, modsRequestGeneration: 0, modsRequestController: null,
   nexusRequestSequence: 0, nexusRequestController: null, nexusMode: "downloads",
@@ -33,7 +34,7 @@ const VIEW_COPY = Object.freeze({
   credits: ["开源致谢", "感谢开放源代码项目与社区资料"],
 });
 const UE4SS_WRITE_ACTIONS = new Set([
-  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip", "repairUe4ss", "uninstallUe4ss",
+  "installUe4ss", "installUe4ssUpdate", "selectUe4ssZip", "repairUe4ss", "uninstallUe4ss", "repairModHealth",
 ]);
 const LOCAL_INPUT_ACTIONS = new Set([
   "filterMods", "filterModSource", "filterModStatus", "changeImportType", "editImportName", "editImportNexusId",
@@ -817,10 +818,117 @@ async function uninstallUe4ss() {
   }
 }
 
+function renderModHealth(report) {
+  state.modHealth = report && typeof report === "object" ? report : null;
+  const summary = state.modHealth?.summary || {};
+  $("#modHealthHealthy").textContent = String(summary.healthy_mods || 0);
+  $("#modHealthAbnormal").textContent = String(summary.abnormal_mods || 0);
+  $("#modHealthInvalid").textContent = String(summary.invalid_manifests || 0);
+  $("#modHealthSafe").textContent = String(summary.safe_actions || 0);
+  $("#modHealthState").textContent = state.modHealth?.status === "healthy" ? "状态正常" : "需要处理";
+
+  const fragment = document.createDocumentFragment();
+  const abnormal = Array.isArray(state.modHealth?.mods)
+    ? state.modHealth.mods.filter((item) => !["enabled", "disabled"].includes(item.status))
+    : [];
+  for (const item of abnormal.slice(0, 5)) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item warning";
+    row.textContent = `${item.name || item.id} · ${item.status} · 安全修复 ${item.safe_actions || 0} · 需确认 ${item.confirmation_actions || 0} · 阻塞 ${item.blocked || 0}`;
+    fragment.append(row);
+  }
+  for (const item of (state.modHealth?.invalid_manifests || []).slice(0, 5)) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item warning";
+    row.textContent = `清单 ${item.id} · ${item.reason}${item.backup_available ? " · 可从备份恢复" : " · 无可用备份"}`;
+    fragment.append(row);
+  }
+  if (!fragment.childNodes.length) {
+    const row = document.createElement("div");
+    row.className = "mod-health-item";
+    row.textContent = "所有受管 Mod 和清单均通过检查。";
+    fragment.append(row);
+  }
+  $("#modHealthList").replaceChildren(fragment);
+}
+
+async function loadModHealth() {
+  $("#modHealthResult").textContent = "正在逐文件检查完整性…";
+  const report = await request("/api/mods/health", { timeout: 120000 });
+  renderModHealth(report);
+  $("#modHealthResult").textContent = report.status === "healthy"
+    ? "检查完成：当前没有异常。"
+    : "检查完成：请查看异常项目；无损项可自动修复。";
+  return report;
+}
+
+async function repairModHealth() {
+  $("#modHealthResult").textContent = "正在创建健康副本并执行无损修复…";
+  beginModsWrite();
+  const result = await request("/api/mods/repair-safe", {
+    method: "POST", body: {}, timeout: 120000,
+  });
+  renderModHealth(result.report);
+  await loadMods();
+  const repaired = Array.isArray(result.repaired) ? result.repaired.length : 0;
+  const restored = Array.isArray(result.restored_manifests) ? result.restored_manifests.length : 0;
+  $("#modHealthResult").textContent = `安全修复完成：处理 ${repaired} 个 Mod，恢复 ${restored} 个损坏清单；用户修改未被覆盖。`;
+  toast("Mod 健康中心安全修复完成", result.ok === false ? "warning" : "success");
+}
+
+function showModRepairPlan(plan) {
+  const notice = $("#modConflictNotice");
+  const title = document.createElement("strong");
+  title.textContent = `${plan.name || "Mod"} · 修复诊断`;
+  const summary = document.createElement("p");
+  summary.textContent = `安全操作 ${plan.safe_actions || 0}，需确认操作 ${plan.confirmation_actions || 0}，无法自动处理 ${plan.blocked?.length || 0}。`;
+  const details = document.createElement("div");
+  for (const item of (plan.blocked || []).slice(0, 6)) {
+    const line = document.createElement("small");
+    line.className = "mod-file-health";
+    const reason = item.reason === "trusted_source_missing" ? "缺少可信修复源" : "路径不安全或冲突";
+    line.textContent = `${item.relative_path || "受管路径"}：${reason}`;
+    details.append(line);
+  }
+  notice.replaceChildren(title, summary, details);
+  notice.hidden = false;
+}
+
+async function repairMod(id) {
+  const plan = await request(`/api/mods/${encodeURIComponent(id)}/repair-plan`, { timeout: 120000 });
+  showModRepairPlan(plan);
+  if (!plan.repairable) {
+    toast("当前没有可自动执行的修复，请重新选择原始安装包或检查路径", "warning");
+    return;
+  }
+  const confirmReplace = Number(plan.confirmation_actions || 0) > 0;
+  if (confirmReplace && !window.confirm(`检测到 ${plan.confirmation_actions} 个被修改或冲突的文件。PalDeck 会先隔离原文件，再恢复健康副本。是否继续？`)) return;
+  beginModsWrite();
+  try {
+    const result = await request(`/api/mods/${encodeURIComponent(id)}/repair`, {
+      method: "POST",
+      body: { revision: plan.revision, ...(confirmReplace ? { confirm_replace: true } : {}) },
+      timeout: 120000,
+    });
+    await loadMods();
+    if (result.complete) {
+      $("#modConflictNotice").hidden = true;
+      toast("Mod 已修复并通过完整性校验", "success");
+    } else {
+      toast("已完成可执行项目，仍有文件需要原始安装包", "warning");
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "mod_repair_stale" && error.details) {
+      showModRepairPlan(error.details);
+    }
+    throw error;
+  }
+}
+
 async function loadSettings() {
   const status = await request("/api/game/status");
   if (status.configured) showPathInfo(status);
-  await Promise.all([loadUe4ssStatus(), loadIgnoredMods()]);
+  if (status.configured) await Promise.all([loadUe4ssStatus(), loadIgnoredMods(), loadModHealth()]);
 }
 
 async function installWithUe4ssConfirmation(operation) {
@@ -937,6 +1045,8 @@ export const ACTION_HANDLERS = Object.freeze({
   autoDetectGame: async () => { const data = await request("/api/game/detect"); renderDetectedGames($("#detectList"), data.installs || []); },
   saveGamePath: async () => { const path = $("#gamePathInput").value.trim(); const result = await request("/api/game/set", { method: "POST", body: { path } }); showPathInfo({ ...result, path: result.game_path || path, valid: true }); toast("游戏路径已保存", "success"); },
   repairFolders: async () => { await request("/api/game/ensure-folders", { method: "POST", body: {} }); toast("模组目录已修复", "success"); },
+  checkModHealth: async () => loadModHealth(),
+  repairModHealth: async () => repairModHealth(),
   installUe4ss: async () => installFixedUe4ss("/api/ue4ss/install-bundled"),
   repairUe4ss: async () => repairUe4ss(),
   uninstallUe4ss: async () => uninstallUe4ss(),
@@ -1067,7 +1177,7 @@ async function handleDynamicAction(event) {
       case "openModFolder": await run(target, () => request(`/api/mods/open-folder?id=${encodeURIComponent(id)}`), { disable: false }); break;
       case "openWorkshopFolder": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-folder`), { disable: false }); break;
       case "openSteamWorkshop": await run(target, () => request(`/api/workshop/${encodeURIComponent(id)}/open-page`, { method: "POST", body: {} }), { disable: false }); break;
-      case "rescanMods": beginModsWrite(); await request("/api/mods/resync", { method: "POST", body: {} }); await loadMods(); toast("重扫完成", "success"); break;
+      case "repairMod": await run(target, () => repairMod(id), { disable: false, global: true, busyText: "正在诊断并修复 Mod…" }); break;
       case "deleteMod": state.pendingDeleteId = id; state.pendingDeleteForce = false; $("#deleteDetails").replaceChildren(); $("#deleteMessage").textContent = `“${state.mods.find((mod) => String(mod.id) === id)?.name || id}”的受管文件将移入 PalDeck 回收站并保留 30 天。`; openModal($("#deleteModal")); break;
       case "unmanageMod": await unmanageMod(id); break;
       case "restoreTrash": await restoreTrash(id); break;

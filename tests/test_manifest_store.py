@@ -155,6 +155,24 @@ def test_audit_detects_modified_missing_disabled_and_conflict(tmp_path):
     assert store.audit(manifest.id).status == "conflict"
 
 
+def test_audit_exposes_per_location_hash_state(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    payload = live / "detail.pak"
+    payload.write_bytes(b"original")
+    store = ManifestStore(tmp_path / "data" / "manifests")
+    manifest = _create(store, live, [payload])
+    payload.write_bytes(b"changed")
+
+    audit = store.audit(manifest)
+
+    [detail] = audit.files
+    assert detail.relative_path == "detail.pak"
+    assert detail.live.state == "modified"
+    assert detail.live.sha256
+    assert detail.disabled.state == "missing"
+
+
 def test_audit_does_not_accept_a_caller_supplied_disabled_root(tmp_path):
     store = ManifestStore(tmp_path / "data" / "manifests")
     with pytest.raises(TypeError):

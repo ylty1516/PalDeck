@@ -951,6 +951,70 @@ def test_modified_delete_returns_409_then_force_succeeds(app, auth_client):
     assert all(mod["id"] != installed["id"] for mod in auth_client.get("/api/mods").json["data"])
 
 
+def test_mod_health_and_missing_file_repair_api(app, auth_client):
+    installed = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(name="RepairApi.pak"), "RepairApi.zip")},
+        content_type="multipart/form-data",
+    ).json["data"]
+    live = Path(installed["install_path"])
+    live.unlink()
+
+    health = auth_client.get("/api/mods/health")
+    plan = auth_client.get(f"/api/mods/{installed['id']}/repair-plan")
+    repaired = auth_client.post(
+        f"/api/mods/{installed['id']}/repair",
+        json={"revision": plan.json["data"]["revision"]},
+    )
+
+    assert health.status_code == 200
+    assert health.json["data"]["summary"]["abnormal_mods"] == 1
+    assert plan.json["data"]["actions"][0]["kind"] == "restore_from_vault"
+    assert repaired.status_code == 200
+    assert repaired.json["data"]["complete"] is True
+    assert live.read_bytes() == b"pak-data"
+
+
+def test_modified_mod_repair_api_requires_explicit_confirmation(app, auth_client):
+    installed = auth_client.post(
+        "/api/mods/import",
+        data={"file": (_pak_zip(name="ConfirmRepair.pak"), "ConfirmRepair.zip")},
+        content_type="multipart/form-data",
+    ).json["data"]
+    live = Path(installed["install_path"])
+    live.write_bytes(b"user version")
+    plan = auth_client.get(
+        f"/api/mods/{installed['id']}/repair-plan"
+    ).json["data"]
+
+    blocked = auth_client.post(
+        f"/api/mods/{installed['id']}/repair",
+        json={"revision": plan["revision"]},
+    )
+    confirmed = auth_client.post(
+        f"/api/mods/{installed['id']}/repair",
+        json={"revision": plan["revision"], "confirm_replace": True},
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json["error_code"] == "mod_repair_confirmation_required"
+    assert confirmed.status_code == 200
+    assert live.read_bytes() == b"pak-data"
+    assert Path(confirmed.json["data"]["quarantine_path"]).is_dir()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"revision": "bad"}, {"revision": "sha256:" + "0" * 64, "confirm_replace": "true"}],
+)
+def test_mod_repair_api_rejects_invalid_body(auth_client, body):
+    response = auth_client.post(
+        "/api/mods/00000000000000000000000000000000/repair", json=body
+    )
+    assert response.status_code == 400
+    assert response.json["error_code"] == "invalid_input"
+
+
 def test_game_running_maps_to_423(app, auth_client):
     app.extensions["mod_service"].game_running = lambda: True
     response = auth_client.post(

@@ -22,6 +22,23 @@ class ManifestFile:
 
 
 @dataclass(frozen=True)
+class FileLocationAudit:
+    state: str
+    size: int | None = None
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class ManifestFileAudit:
+    relative_path: str
+    expected_size: int
+    expected_sha256: str
+    live: FileLocationAudit
+    disabled: FileLocationAudit
+    role: str = "payload"
+
+
+@dataclass(frozen=True)
 class ModManifest:
     id: str
     name: str
@@ -47,6 +64,8 @@ class AuditStatus(StrEnum):
 class ManifestAudit:
     manifest_id: str
     status: AuditStatus
+    files: tuple[ManifestFileAudit, ...] = ()
+    issues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

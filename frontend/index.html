@@ -105,6 +105,18 @@
             <label>游戏目录<input id="gamePathInput" type="text" data-action="editGamePath" placeholder="含 Palworld.exe 的目录"></label>
             <div class="button-row"><button type="button" class="btn" data-action="autoDetectGame">自动检测</button><button type="button" class="btn primary" data-action="saveGamePath">保存路径</button><button type="button" class="btn" data-action="repairFolders">修复目录</button></div>
             <div id="detectList" class="stack"></div><div id="pathInfo" class="result"></div>
+            <section class="settings-subcard mod-health-card" data-settings-section="health" aria-label="Mod 健康中心">
+              <div class="mod-health-heading"><div><h3>Mod 健康中心</h3><p class="muted">逐文件校验、清单恢复和无损自动修复</p></div><strong id="modHealthState" class="badge">尚未检查</strong></div>
+              <div class="mod-health-metrics" aria-label="Mod 健康状态">
+                <article><small>正常</small><strong id="modHealthHealthy">0</strong></article>
+                <article><small>异常</small><strong id="modHealthAbnormal">0</strong></article>
+                <article><small>清单损坏</small><strong id="modHealthInvalid">0</strong></article>
+                <article><small>可安全修复</small><strong id="modHealthSafe">0</strong></article>
+              </div>
+              <div class="button-row"><button type="button" class="btn" data-action="checkModHealth">深度检查</button><button type="button" class="btn primary" data-action="repairModHealth">安全自动修复</button></div>
+              <div id="modHealthResult" class="result" aria-live="polite">不会自动覆盖用户修改；高风险项目需要逐项确认。</div>
+              <div id="modHealthList" class="mod-health-list" aria-live="polite"></div>
+            </section>
             <hr><section class="ue4ss-card" data-settings-section="ue4ss" aria-label="Palworld 专用 UE4SS">
               <h3>Palworld 专用 UE4SS</h3><p class="muted">由 Okaetsu 维护的固定 Palworld 构建</p>
               <p id="ue4ssStatus" class="muted">UE4SS 状态未知</p>
