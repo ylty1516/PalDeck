@@ -9,6 +9,7 @@ import {
 import { renderConflict, renderDetectedGames, renderMessage, renderMods, renderNexus, renderTrash, validatedNexusUrl } from "./render.js";
 import { callWindowControl, chooseModFolder as chooseNativeModFolder, initializeWindowControls } from "./window-controls.js";
 import { createImportQueue, deriveModView, reduceImportQueue } from "./ui-model.js";
+import { setupFileDropzone } from './dropzone.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = {
@@ -1099,10 +1100,8 @@ function setupImportQueue() {
 
 function setupDropzone() {
   const zone = $("#dropzone");
-  for (const name of ["dragenter", "dragover", "dragleave", "drop"]) zone.addEventListener(name, async (event) => {
-    event.preventDefault();
-    zone.classList.toggle("dragging", name === "dragenter" || name === "dragover");
-    if (name === "drop") await executeModFileSelection(event.dataTransfer?.files || []);
+  setupFileDropzone(zone, executeModFileSelection, {
+    onEmpty: () => toast('没有读取到可拖放的文件，请改用“选择文件”', 'error'),
   });
 }
 

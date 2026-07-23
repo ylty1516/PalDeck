@@ -16,15 +16,17 @@ class FakeWindow:
 
 
 def test_bridge_exposes_only_window_control_whitelist():
-    bridge = DesktopBridge(custom_chrome=True)
+    drag = lambda window: window.calls.append('begin_drag') or True
+    bridge = DesktopBridge(custom_chrome=True, native_drag=drag)
     window = FakeWindow()
     bridge.bind(window)
     assert bridge.get_state() == {"state": "normal", "custom_chrome": True}
     assert bridge.minimize() == {"state": "minimized"}
     assert bridge.toggle_maximize() == {"state": "maximized"}
     assert bridge.toggle_maximize() == {"state": "normal"}
+    assert bridge.begin_drag() == {'started': True}
     assert bridge.close() == {"state": "closed"}
-    assert window.calls == ["minimize", "maximize", "restore", "destroy"]
+    assert window.calls == ['minimize', 'maximize', 'restore', 'begin_drag', 'destroy']
     for forbidden in ("execute", "open_path", "open_url", "eval", "run"):
         assert not hasattr(bridge, forbidden)
 
@@ -73,3 +75,24 @@ def test_failed_native_call_does_not_publish_false_state():
     with pytest.raises(RuntimeError, match="native failure"):
         bridge.toggle_maximize()
     assert bridge.get_state()["state"] == "normal"
+
+
+def test_native_drag_requires_binding_and_reports_unavailable_fallback():
+    bridge = DesktopBridge(native_drag=lambda _window: False)
+    with pytest.raises(RuntimeError, match='not ready'):
+        bridge.begin_drag()
+    bridge.bind(FakeWindow())
+    assert bridge.begin_drag() == {'started': False}
+
+
+def test_native_drag_synchronizes_snap_state_before_next_toggle():
+    class NativeWindow(FakeWindow):
+        native = type('Native', (), {'WindowState': 'Maximized'})()
+
+    bridge = DesktopBridge(native_drag=lambda _window: True)
+    window = NativeWindow()
+    bridge.bind(window)
+    assert bridge.begin_drag() == {'started': True}
+    assert bridge.get_state()['state'] == 'maximized'
+    bridge.toggle_maximize()
+    assert window.calls == ['restore']

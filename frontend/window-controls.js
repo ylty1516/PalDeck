@@ -1,4 +1,5 @@
-const ALLOWED_CONTROLS = new Set(["minimize", "toggle_maximize", "close"]);
+const ALLOWED_CONTROLS = new Set(['minimize', 'toggle_maximize', 'close', 'begin_drag']);
+const nativeDragRegions = new WeakSet();
 
 function requestedChrome(host) {
   try {
@@ -42,11 +43,37 @@ export async function chooseModFolder(host = globalThis.window) {
   return result && Array.isArray(result.items) ? result.items : null;
 }
 
+function bindNativeDragEvents(region, host) {
+  region.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.detail > 1) return;
+    event.preventDefault();
+    void callWindowControl('begin_drag', host);
+  });
+  region.addEventListener('dblclick', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    void callWindowControl('toggle_maximize', host);
+  });
+}
+
+export function setupNativeWindowDrag(root = globalThis.document, host = globalThis.window) {
+  const region = root?.querySelector?.('.window-drag-region');
+  if (!region || typeof host?.pywebview?.api?.begin_drag !== 'function') return false;
+  region.classList?.remove?.('pywebview-drag-region');
+  if (nativeDragRegions.has(region)) return true;
+  nativeDragRegions.add(region);
+  bindNativeDragEvents(region, host);
+  return true;
+}
+
 export async function setupWindowControls(root = globalThis.document, host = globalThis.window) {
   const getState = host?.pywebview?.api?.get_state;
   if (typeof getState !== "function") return false;
   const state = await getState.call(host.pywebview.api);
-  return applyChrome(root, state?.custom_chrome === true);
+  const enabled = state?.custom_chrome === true;
+  const applied = applyChrome(root, enabled);
+  if (enabled) setupNativeWindowDrag(root, host);
+  return applied;
 }
 
 export function initializeWindowControls(root = globalThis.document, host = globalThis.window) {
