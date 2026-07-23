@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import threading
@@ -15,6 +16,7 @@ from backend.mod_service import (
     ModifiedFilesError,
     ModService,
     NotExternalModError,
+    _move_verified,
 )
 from backend.process_utils import (
     ProcessCheckError,
@@ -92,7 +94,85 @@ def _live(game: Path, kind=ModKind.PAK) -> Path:
     return game / "Pal" / "Content" / "Paks" / name
 
 
-def test_zip_pak_group_install_disable_enable_delete(fake_game_root, tmp_path):
+def _simulate_cross_volume_moves(monkeypatch, game_root: Path, data_root: Path) -> None:
+    original_replace = os.replace
+    game_root = Path(os.path.abspath(game_root))
+    data_root = Path(os.path.abspath(data_root))
+
+    def replace(source, destination):
+        source_path = Path(os.path.abspath(source))
+        destination_path = Path(os.path.abspath(destination))
+        source_is_game = source_path == game_root or source_path.is_relative_to(game_root)
+        destination_is_game = (
+            destination_path == game_root or destination_path.is_relative_to(game_root)
+        )
+        source_is_data = source_path == data_root or source_path.is_relative_to(data_root)
+        destination_is_data = (
+            destination_path == data_root or destination_path.is_relative_to(data_root)
+        )
+        if (source_is_game and destination_is_data) or (
+            source_is_data and destination_is_game
+        ):
+            raise OSError(errno.EXDEV, "simulated cross-volume rename")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("backend.mod_service.os.replace", replace)
+
+
+def _force_one_cross_volume_move(monkeypatch, source: Path, destination: Path) -> None:
+    original_replace = os.replace
+
+    def replace(candidate, target):
+        if Path(candidate) == source and Path(target) == destination:
+            raise OSError(errno.EXDEV, "simulated cross-volume rename")
+        return original_replace(candidate, target)
+
+    monkeypatch.setattr("backend.mod_service.os.replace", replace)
+
+
+def test_cross_volume_move_hash_failure_keeps_source_and_cleans_target(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source" / "Hash.pak"
+    destination = tmp_path / "destination" / "Hash.pak"
+    source.parent.mkdir()
+    source.write_bytes(b"payload")
+    _force_one_cross_volume_move(monkeypatch, source, destination)
+
+    with pytest.raises(ValueError, match="校验失败"):
+        _move_verified(source, destination, "0" * 64)
+
+    assert source.read_bytes() == b"payload"
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".*.tmp"))
+
+
+def test_cross_volume_move_unlink_failure_removes_published_copy(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source" / "Unlink.pak"
+    destination = tmp_path / "destination" / "Unlink.pak"
+    source.parent.mkdir()
+    source.write_bytes(b"payload")
+    _force_one_cross_volume_move(monkeypatch, source, destination)
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError("simulated source unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    with pytest.raises(PermissionError, match="source unlink failure"):
+        _move_verified(source, destination)
+
+    assert source.read_bytes() == b"payload"
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".*.tmp"))
+
+
+def test_zip_pak_group_install_disable_enable_delete(fake_game_root, tmp_path, monkeypatch):
     source = _zip(tmp_path / "group.zip", {
         "Cool.pak": b"pak", "Cool.utoc": b"utoc", "Cool.ucas": b"ucas",
     })
@@ -105,6 +185,7 @@ def test_zip_pak_group_install_disable_enable_delete(fake_game_root, tmp_path):
     }
     assert installed["audit"]["status"] == "enabled"
 
+    _simulate_cross_volume_moves(monkeypatch, fake_game_root, tmp_path / "data")
     disabled = service.set_enabled(manifest_id, False)
     assert disabled["audit"]["status"] == "disabled"
     assert not any(_live(fake_game_root).iterdir())
@@ -325,7 +406,7 @@ def test_direct_pak_collects_same_stem_sidecars(fake_game_root, tmp_path):
     ]
 
 
-def test_conflict_cancel_replace_and_keep_both(fake_game_root, tmp_path):
+def test_conflict_cancel_replace_and_keep_both(fake_game_root, tmp_path, monkeypatch):
     first = tmp_path / "first" / "Same.pak"
     first.parent.mkdir()
     first.write_bytes(b"old")
@@ -344,6 +425,7 @@ def test_conflict_cancel_replace_and_keep_both(fake_game_root, tmp_path):
     assert (_live(fake_game_root) / "Same (Second Mod).pak").read_bytes() == b"new"
     service.delete(kept["id"])
 
+    _simulate_cross_volume_moves(monkeypatch, fake_game_root, tmp_path / "data")
     replaced = service.install(second, decision="replace")
     assert (_live(fake_game_root) / "Same.pak").read_bytes() == b"new"
     assert replaced["id"] != old["id"]
@@ -686,7 +768,7 @@ def test_two_services_serialize_writes_without_deleting_each_others_manifests(fa
     assert {item["name"] for item in first.list_mods()} == {"First", "Second"}
 
 
-def test_legacy_disabled_pak_migrates_once_to_disabled_storage(fake_game_root, tmp_path):
+def test_legacy_disabled_pak_migrates_once_to_disabled_storage(fake_game_root, tmp_path, monkeypatch):
     data = tmp_path / "data"
     legacy = _live(fake_game_root) / "Legacy.pak.disabled"
     legacy.parent.mkdir(parents=True, exist_ok=True)
@@ -698,6 +780,7 @@ def test_legacy_disabled_pak_migrates_once_to_disabled_storage(fake_game_root, t
         "install_path": str(legacy), "files": [legacy.name], "source_name": "old.zip",
     }]), encoding="utf-8")
 
+    _simulate_cross_volume_moves(monkeypatch, fake_game_root, data)
     service = ModService(fake_game_root, data, game_running=lambda: False)
     listed = service.list_mods()
     assert len(listed) == 1

@@ -761,6 +761,8 @@ def test_v22_shell_has_brand_sidebar_workspace_statusbar_and_three_breakpoints()
     assert "--statusbar-height" in css
     assert "updateShellStatus" in app
     assert 'data-action="showSettingsStatus"' in html
+    assert 'id="sidebarVersion">v-<' in html
+    assert 'id="sidebarVersion">v2.1.1<' not in html
 
 
 def test_restored_window_layout_wraps_mod_actions_and_centers_status_open_button():

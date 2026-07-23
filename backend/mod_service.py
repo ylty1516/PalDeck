@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -73,6 +74,48 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_cross_device_error(error: OSError) -> bool:
+    return error.errno == errno.EXDEV or getattr(error, "winerror", None) == 17
+
+
+def _move_verified(
+    source: Path, destination: Path, expected_sha256: str | None = None
+) -> None:
+    """Move one regular file, falling back to a verified copy across volumes."""
+    source = validate_no_reparse_ancestors(source)
+    destination = validate_no_reparse_ancestors(destination)
+    if _is_reparse(source) or not source.is_file():
+        raise ValueError(f"移动源文件不存在或不安全：{source}")
+    if os.path.lexists(destination):
+        raise FileExistsError(f"移动目标已存在：{destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    validate_no_reparse_ancestors(destination.parent)
+    try:
+        os.replace(source, destination)
+        return
+    except OSError as error:
+        if not _is_cross_device_error(error):
+            raise
+
+    digest = expected_sha256 or _sha256(source)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with source.open("rb") as reader, temporary.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if _sha256(temporary) != digest:
+            raise ValueError("跨盘符移动校验失败")
+        os.replace(temporary, destination)
+        try:
+            source.unlink()
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _is_reparse(path: Path) -> bool:
@@ -166,7 +209,7 @@ class ModService:
                     disabled = self.data_dir / "disabled" / manifest_id / relative_name
                     validate_no_reparse_ancestors(disabled)
                     disabled.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(source, disabled)
+                    _move_verified(source, disabled)
                     moved.append((disabled, source))
                     manifest = ModManifest(
                         id=manifest_id,
@@ -193,7 +236,7 @@ class ModService:
                 for disabled, source in reversed(moved):
                     source.parent.mkdir(parents=True, exist_ok=True)
                     if disabled.exists():
-                        os.replace(disabled, source)
+                        _move_verified(disabled, source)
                 raise
 
     def _assert_stopped(self) -> None:
@@ -611,14 +654,14 @@ class ModService:
                             if live.is_file():
                                 backup = backup_root / owner.id / item.relative_path
                                 backup.parent.mkdir(parents=True, exist_ok=True)
-                                os.replace(live, backup)
+                                _move_verified(live, backup)
                                 backups.append((backup, live))
                     owned_paths = {original.resolve() for _, original in backups}
                     for _, destination in conflicts:
                         if destination.is_file() and destination.resolve() not in owned_paths:
                             backup = backup_root / "unmanaged" / destination.name
                             backup.parent.mkdir(parents=True, exist_ok=True)
-                            os.replace(destination, backup)
+                            _move_verified(destination, backup)
                             backups.append((backup, destination))
 
             for incoming, destination in planned:
@@ -667,7 +710,7 @@ class ModService:
             for backup, original in reversed(backups):
                 original.parent.mkdir(parents=True, exist_ok=True)
                 if backup.exists():
-                    os.replace(backup, original)
+                    _move_verified(backup, original)
             for manifest in old_manifests.values():
                 if not (self.store.manifests_dir / f"{manifest.id}.json").exists():
                     self.store.save(manifest)
@@ -746,7 +789,7 @@ class ModService:
                     source = manifest.install_root / item.relative_path
                     destination = holding / item.relative_path
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(source, destination)
+                    _move_verified(source, destination, item.sha256)
                     moves.append((destination, source))
                 disabled_root.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(holding, disabled_root)
@@ -766,7 +809,7 @@ class ModService:
                     source = disabled_root / item.relative_path
                     destination = manifest.install_root / item.relative_path
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(source, destination)
+                    _move_verified(source, destination, item.sha256)
                     moves.append((destination, source))
             self.store.save(changed)
             result = self._listed(changed)
@@ -774,7 +817,7 @@ class ModService:
             for current, original in reversed(moves):
                 original.parent.mkdir(parents=True, exist_ok=True)
                 if current.exists():
-                    os.replace(current, original)
+                    _move_verified(current, original)
             rollback_manifest = manifest_path.with_name(f".{manifest_path.name}.rollback.tmp")
             rollback_manifest.parent.mkdir(parents=True, exist_ok=True)
             rollback_manifest.write_bytes(manifest_bytes)
